@@ -5,7 +5,7 @@
 
 ## Summary
 
-Omnimodem is a gRPC-driven, batteries-included multi-mode software modem written
+Omnimodem is a gRPC-driven, building-block-based multi-mode software modem written
 in Rust. A single binary is operated entirely over gRPC and can run multiple
 amateur-radio modes simultaneously, each bound to its own audio interface and
 PTT. It generalizes the reception techniques that make the Graywolf AFSK
@@ -15,7 +15,7 @@ that were the weakest parts of Graywolf.
 
 Three design goals drive everything:
 
-1. **Easy to add new modes** — reusable DSP/FEC "batteries" and a one-module mode
+1. **Easy to add new modes** — reusable DSP/FEC "building blocks" and a one-module mode
    registry, so a new mode touches one place, not five `match` arms.
 2. **Easy to integrate with** — a stable, versioned gRPC API so developers build
    their own frontends in any language.
@@ -132,7 +132,7 @@ So the mode abstraction supports two demod shapes from the start:
    multi-pass decode, returning multiple decodes (FT8/JS8/WSPR).
 
 And the pipeline carries **soft information (LLRs)** end-to-end, not just hard
-bits — otherwise the listed Viterbi/LDPC batteries are useless and FEC-mode
+bits — otherwise the listed Viterbi/LDPC building blocks are useless and FEC-mode
 reception is not best-of-class. Frame assembly (HDLC and friends) moves
 downstream of the demod rather than living inside it.
 
@@ -163,7 +163,7 @@ TX:  message/frame encode → FEC encode → interleave / scramble
 ```
 
 omnimodem provides these stages as **composable, individually-testable
-batteries**, and a mode is an *assembly* of stages declared in its one registry
+building blocks**, and a mode is an *assembly* of stages declared in its one registry
 module. This is precisely what makes "as-good-or-better-than-the-reference"
 tractable: we implement the best known version of each stage *once* (e.g. one
 soft-decision LDPC belief-propagation decoder, one Costas-array correlator) and
@@ -180,7 +180,7 @@ soft RS (JT65), Walsh/FHT correlation (Olivia), memory-ARQ soft-combine (ARDOP)
 the same point the review's "soft-decision plumbing" note raised, now made the
 organizing principle of the toolkit.)
 
-### Batteries catalog
+### Building-blocks catalog
 
 Derived from auditing the GRA-126 reference codebases. Grouped by pipeline stage;
 verified parameters are noted so the list is checkably complete, not hand-wavy.
@@ -297,7 +297,7 @@ verified parameters are noted so the list is checkably complete, not hand-wavy.
   QSO). Optional for FT8/JT65, effectively always-on for FT4/Q65/FST4.
 - **ARQ engine hooks** (sequencing, retransmit, bandwidth/rate negotiation, memory-
   ARQ) for ARDOP-class transports — a per-mode *protocol* layer above the DSP/coding
-  library, not a shared DSP battery.
+  library, not a shared DSP building block.
 
 **F. Metrics & validation (feeds goal #4)**
 - Per-mode metrics: SNR (normalized to reference BW), sync metric, freq/time offset,
@@ -326,8 +326,8 @@ internally, DCD scoring is copy-pasted between AFSK and 9600 (`demod_afsk.rs:691
 and `modem_9600/mod.rs:172-182`), and PSK/9600 share no code with AFSK; the reusable
 `MultiSlicer` / `DcdScorer` / `DpllClockRecovery` / `ParallelDemodulator<D>`
 abstractions do not exist yet, and the soft-LLR contract is new. The catalog above
-is the *target* battery set; it must be phased. Suggested grouping by build phase:
-the streaming/packet batteries (A front-end, B sync, NRZI/scramblers/HDLC/RS/FX.25/
+is the *target* building block set; it must be phased. Suggested grouping by build phase:
+the streaming/packet building blocks (A front-end, B sync, NRZI/scramblers/HDLC/RS/FX.25/
 IL2P, the dedup window) land first with 1200/9600; the soft-LLR contract + LDPC
 BP/OSD + Costas-array + 77-bit codec + SIC/AP/wideband orchestration land with FT8;
 the convolutional/Viterbi/FHT/interleaver/Varicode family lands with the fldigi
@@ -336,9 +336,9 @@ constants (exact LDPC min-sum scaling, AP LLR seeding, FT8 sync-metric threshold
 IL2P `set_field` bit map) should be confirmed against the reference sources at
 implementation time rather than locked from secondary documentation now.
 
-### Coverage map — reference software → batteries
+### Coverage map — reference software → building blocks
 
-| Reference (GRA-126) | Modes | Key batteries the framework must supply |
+| Reference (GRA-126) | Modes | Key building blocks the framework must supply |
 |---|---|---|
 | **Direwolf / Graywolf** | AX.25 1200 AFSK, 9600 G3RUH, FX.25, IL2P, APRS | AFSK correlator + multi-slicer, baseband-FSK LPF/slicer, DPLL, NRZI, self-sync **and** frame-reset scramblers, HDLC+CRC-16/X.25, GF(256) RS (fcr=0 **and** 1), FX.25/IL2P framing, multi-decoder dedup |
 | **WSJT-X** | FT8, FT4, JT65, JT9, WSPR, MSK144, Q65, FST4/W | STFT bank, CPFSK/MSK detect, soft-LLR, LDPC BP+OSD, GF(2⁶) soft-RS, QRA, conv-K32+Fano, Costas-array correlator, 77/72/50-bit codecs + call hashing, SIC + AP + wideband multi-decode, accurate time base |
@@ -459,7 +459,7 @@ state, good/bad-FCS counts, PTT state, duty cycle. Additional high-value metrics
 4. **Multi-client TX:** cooperative queue + optional exclusive lease.
 5. **KISS/AGWPE:** external translator, not in the core (future work).
 
-## Graywolf reuse map — the AFSK "secret sauce" as mode-agnostic batteries
+## Graywolf reuse map — the AFSK "secret sauce" as mode-agnostic building blocks
 
 Lift these out of the AFSK demod so PSK/RTTY/9600/FT8 inherit them. All verified
 present in the Graywolf source:
@@ -476,7 +476,7 @@ present in the Graywolf source:
   these are **mutually exclusive** in Graywolf: DFB runs only in single-slicer
   mode (`demod_afsk.rs:507`), multi-slicer uses peak/valley. Model them in the
   registry as alternatives selected by slicer count, not as two independently
-  composable batteries.
+  composable building blocks.
 - **Hard-limiter-before-bandpass** correlator stage — `sign(x)`, keep
   zero-crossing timing (`demod_afsk.rs:459-461, 545-547`).
 - **Digital PLL clock recovery** with locked-vs-searching inertia
