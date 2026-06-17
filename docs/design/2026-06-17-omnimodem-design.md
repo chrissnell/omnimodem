@@ -150,24 +150,200 @@ parallel and union/dedup their outputs. Note carefully:
   (`demod_afsk_multi.rs`) is the HDLC-streaming mechanism. Windowed modes dedup
   by decoded-message + time-slot instead.
 
-### Batteries-included DSP/FEC toolkit
+### The pipeline-stage model — why this is the key to "as good or better"
 
-Filters, resampler, PLL/Costas, AGC, FFT/Goertzel; HDLC, FX.25, IL2P,
-Reed-Solomon, Viterbi, LDPC, varicode. Mode authors draw from these instead of
-reinventing them. The resampler also closes Graywolf's "every source must
-natively match the demod rate" gap, and per-mode `ModeCaps` rates turn
-Graywolf's global 48 kHz ceiling into a per-mode capability so SDR-rate modes
-coexist with 48 kHz AFSK.
+A mode is **not** a monolithic demod. Every reference implementation (WSJT-X,
+fldigi, Direwolf, Codec2/FreeDV, M17, ARDOP) is internally a chain of stages:
+
+```
+RX:  front-end DSP → synchronizer → symbol detector → soft-LLR demapper
+        → de-interleave / descramble → FEC decode → frame/message decode
+TX:  message/frame encode → FEC encode → interleave / scramble
+        → symbol map → pulse-shape / modulate → up-convert
+```
+
+omnimodem provides these stages as **composable, individually-testable
+batteries**, and a mode is an *assembly* of stages declared in its one registry
+module. This is precisely what makes "as-good-or-better-than-the-reference"
+tractable: we implement the best known version of each stage *once* (e.g. one
+soft-decision LDPC belief-propagation decoder, one Costas-array correlator) and
+every mode that needs it inherits best-in-class behaviour, rather than each mode
+re-deriving a weaker version. The catalog below is sized so that **every mode in
+the GRA-126 catalog composes from this set** — that is the completeness bar.
+
+**The soft-information (LLR) contract is the spine.** The single
+highest-leverage abstraction is a defined soft-value (log-likelihood-ratio)
+interface between the detector/demapper and the FEC decoder. Every modern weak-
+signal gain — LDPC BP/OSD (FT8/FreeDV), soft Viterbi (M17/MFSK16), Franke-Taylor
+soft RS (JT65), Walsh/FHT correlation (Olivia), memory-ARQ soft-combine (ARDOP)
+— depends on carrying soft values, not hard bits, across that boundary. (This is
+the same point the review's "soft-decision plumbing" note raised, now made the
+organizing principle of the toolkit.)
+
+### Batteries catalog
+
+Derived from auditing the GRA-126 reference codebases. Grouped by pipeline stage;
+verified parameters are noted so the list is checkably complete, not hand-wavy.
+
+**A. Front-end DSP & waveform (RX detectors + symmetric TX modulators)**
+- Resampler / decimator (arbitrary source rate → per-mode working rate; 12 kHz is
+  the WSJT-X norm, 8 kHz voice, 48 kHz AFSK) — also closes Graywolf's "source must
+  match the demod rate" gap.
+- Tunable NCO / complex down-converter + channelizer (passband isolation,
+  click-to-tune on the waterfall).
+- Overlapped STFT/FFT engine (waterfall **and** noncoherent tone detection;
+  configurable window/hop — FT8 uses ~160 ms windows, ~40 ms hop).
+- Filter toolkit: FIR/IIR, **RRC** (Direwolf AFSK, M17 α=0.5), raised-cosine
+  envelope (PSK31/Throb/Hell), **Gaussian/CPFSK shaping** (configurable BT — FT8
+  BT=2.0, FT4 BT=1.0), low-pass baseband shaping (G3RUH), Hilbert/analytic.
+- Pre/de-emphasis + per-tone AGC (AFSK amplitude balancing); peak/valley &
+  decision-feedback AGC (lifted from Graywolf — see reuse map).
+- FM discriminator / phase-difference detector (WEFAX, FSK); envelope detector +
+  adaptive attack/decay squelch (CW, Hell OOK).
+- Modulators/detectors, each TX+RX: **CPFSK/GFSK** (FT8/FT4/Q65/FST4), **M-FSK**
+  tone bank (MFSK16/32, Olivia, JT65 65-FSK, WSPR 4-FSK, M17/ARDOP 4-FSK),
+  **M-PSK** incl. differential BPSK/QPSK/8PSK (PSK31, FreeDV 1600/700C, ARDOP),
+  **16-QAM** (ARDOP), **OQPSK/MSK** coherent (MSK144), **OFDM core** (carrier bank,
+  IFFT/FFT, cyclic-prefix, per-carrier EQ, **PAPR/clipping** — FreeDV 700D/E/2020,
+  ARDOP), **2-FSK shift** (RTTY/NAVTEX, selectable shift), **OOK column-raster**
+  (Hellschreiber).
+- Per-bin noise-floor estimator + uniform SNR reporter (normalized to a reference
+  bandwidth, WSJT-X-style).
+
+**B. Synchronization & acquisition**
+- DPLL clock/bit-sync with locked/searching inertia (lift from Graywolf;
+  Direwolf parity).
+- Symbol-timing recovery variants: Gardner/early-late (PSK), async start-bit edge
+  (RTTY/NAVTEX), DFT-impulse timing (MFSK/DominoEX), transition-minimum (PSK31).
+- Costas-loop / PLL carrier recovery (coherent PSK); **AFC** frequency-offset
+  estimation + drift tracking (fldigi-grade, with matched-filter re-centering).
+- **Costas-array** generator + correlator (parameterized N — 7×7 ×3 for FT8,
+  4×4 ×4 for FT4) — distinct from the Costas *loop* above.
+- Generic known-sequence / sync-word / preamble correlator: M17 16-bit sync words,
+  ARDOP leader, JT65/JT9/WSPR pseudo-random sync vectors, FST4 sync groups, IL2P
+  24-bit `0xF15E48`, **FX.25 64-bit CTAG with fuzzy/Hamming-distance matching**,
+  NAVTEX phasing.
+- Pilot-symbol OFDM coarse/fine freq+timing sync with drift tracking (FreeDV).
+- **Candidate finder**: sweep the passband, produce a sync-metric-sorted candidate
+  list `(freq, time, metric)` — the front half of wideband multi-decode.
+
+**C. FEC & coding (soft-decision throughout)**
+- **Soft-LLR demapper** (tone power / phase → per-bit LLR, noise-variance scaled) —
+  the contract named above.
+- **LDPC** encoder + belief-propagation/min-sum decoder (parametric H-matrix) +
+  **ordered-statistics-decoding (OSD)** layer for the last ~2 dB. Ship matrices for
+  (174,91) FT8/FT4, (128,80) MSK144, (240,101) FST4/FST4W, and the FreeDV
+  rate-½/rate-0.8 matrices.
+- **Convolutional** encoder + **soft Viterbi** (parametric R/K/polys — K=5 M17 &
+  fldigi QPSK, K=7 MFSK16/THOR/DominoEX) + **puncturing/depuncturing** (M17 P1/P2/P3).
+- **Convolutional K=32, r=½ + Fano sequential decoder** (JT9, WSPR — Viterbi is
+  impractical at K=32).
+- **Reed-Solomon over GF(256)**, parametric `(nroots, fcr, prim)` + shortened/zero-
+  padded blocks — must instantiate **fcr=1 (FX.25)** *and* **fcr=0 (IL2P)** *and*
+  ARDOP; nroots ∈ {2,4,6,8,16,32,64}.
+- **Reed-Solomon over GF(2⁶) with a soft-decision (Franke-Taylor) decoder**
+  (JT65 RS(63,12)); **QRA (Q-ary repeat-accumulate) over GF(2⁶)** (Q65 QRA(63,13)).
+- **Golay(23,12)/(24,12)** (FreeDV 1600, M17 LICH).
+- **Walsh–Hadamard / Fast-Hadamard-Transform block codec**, soft, parametric size
+  (64 = Olivia, 32 = Contestia).
+- **Constant-ratio (4-of-7) codec + time-diversity delay-and-combine** (CCIR-476 /
+  NAVTEX / SITOR-B).
+- **Interleavers**: block/QPP (M17), depth-L convolutional (DominoEX/THOR),
+  self-synchronizing diagonal (MFSK16), bit-reversal (WSPR), long time-interleaver
+  across fades (FreeDV 700D).
+- **Scramblers — three distinct primitives** (a common pitfall): self-synchronizing
+  multiplicative LFSR (G3RUH **x¹⁷+x¹²+1**), frame-reset additive LFSR (IL2P
+  **x⁹+x⁴+1**, fixed seed), and additive PRBS/decorrelator (M17, Olivia whitening).
+- **NRZI** codec; **Gray-code** mapper; **differential** encode/decode.
+- **CRC library**, parametric: CRC-16/X.25 FCS (AX.25), CRC-14 `0x6757` (FT8/FT4),
+  CRC-24 (FST4), CRC-16 `0x5935` (M17), CRC-8 (MSK144).
+- **Diversity / soft-combiner** (FreeDV 700C frequency diversity) and **memory-ARQ
+  soft-combine buffer** (ARDOP — reusable math even though the ARQ policy is not).
+- **Frame-dedup across parallel decoders** (Direwolf `PROCESS_AFTER_BITS`-style
+  hold window + CRC/retry scoring; Graywolf `(content, offset)` window).
+
+**D. Source / message / framing coding**
+- **Varicode** with pluggable tables (PSK, MFSK/IZ8BLY, DominoEX/THOR nibble).
+- **Baudot/ITA2** (LTRS/FIGS shift), **CCIR-476** alphabet (NAVTEX), **Morse** +
+  fuzzy/SOM best-fit decoder (CW).
+- **WSJT-X 77-bit message codec**: type field, standard exchange, free text,
+  telemetry; **28-bit callsign compression + 10/12/22-bit callsign hashing** (shared
+  hash table); **15-bit Maidenhead grid** + power. Plus legacy **72-bit** (JT65/JT9)
+  and **50-bit** (WSPR/FST4W) packers.
+- **HDLC** (flag/stuff/destuff/FCS) + **AX.25/APRS** (UI-frame application convention);
+  **FX.25** (CTAG table + RS wrap of an *intact* HDLC frame, legacy-compatible);
+  **IL2P** (sync + 6-bit callsign-transposing header + per-block RS, HDLC-replacing).
+- **Image raster** framer/renderer: WEFAX (IOC/LPM scaling, phasing, slant
+  correction); Hell column-scan font rasteriser.
+- **Vocoder interface** — a clean Codec2 (1300/3200/700C) and LPCNet boundary so
+  voice modes plug a vocoder into the bit pipeline. Voice frames carry **opaque
+  vocoder payload**, so the `Frame` type must be payload-agnostic (text, packet, or
+  codec bits).
+
+**E. Decode orchestration — the WSJT-X-class differentiators**
+- **ParallelDemodulator<D>** diversity ensemble (the Graywolf "hydra") — diversity
+  *within one signal*.
+- **Wideband multi-signal decode** — decode *every* signal in the passband at once
+  (dozens of FT8 stations per 15 s window; the fldigi PSK/CW "browser"). Parallel/
+  threaded processing of the candidate-finder list, per-candidate timeout, and a
+  decode-**depth** knob (BP-only vs BP+OSD search order). This is distinct from, and
+  composes with, `ParallelDemodulator`.
+- **Multi-pass successive interference cancellation**: decode → re-encode → estimate
+  amplitude/phase/timing → **subtract from the time-domain waveform** → re-decode to
+  expose masked signals. The single biggest reason WSJT-X out-decodes naïve
+  implementations on crowded bands.
+- **A-priori (AP) decoding**: a QSO-state manager seeds known/likely content (own
+  call, DX call, `CQ`, grid) as strong a-priori LLRs (~+2–4 dB; compounds across a
+  QSO). Optional for FT8/JT65, effectively always-on for FT4/Q65/FST4.
+- **ARQ engine hooks** (sequencing, retransmit, bandwidth/rate negotiation, memory-
+  ARQ) for ARDOP-class transports — a per-mode *protocol* layer above the DSP/coding
+  library, not a shared DSP battery.
+
+**F. Metrics & validation (feeds goal #4)**
+- Per-mode metrics: SNR (normalized to reference BW), sync metric, freq/time offset,
+  EVM / PSK31-style IMD / phase-quality, DCD, good/bad-CRC counts, decode pass#,
+  duty cycle.
+- **Reference-corpus regression harness**: golden recordings with known-good decode
+  counts (e.g. the WA8LMF AFSK test CD where Graywolf already beats Direwolf; WSJT-X
+  sample `.wav`s), run in CI to *prove* as-good-or-better and guard DSP regressions.
+  This extends the record/replay + regression-harness already in the design and is
+  how the "as good or better" claim is made falsifiable rather than aspirational.
+
+### Layering: shared library vs per-mode protocol
+
+The clean split is a **shared DSP/coding library** (everything in A–C above, plus
+the source-coding codecs and the orchestration mechanisms in E that are pure math)
+with the soft-LLR contract as its interface, and a **thin per-mode protocol layer**
+on top (M17 LSF/Stream/Packet framing, ARDOP ARQ state machine, FreeDV bit-mapping,
+Winlink session). A mode's registry module wires shared stages together and adds
+only its protocol specifics.
 
 ### Honest scope note
 
-Extracting the batteries is a **real refactor, not a lift-and-shift.** Today the
-AFSK demod owns `Vec<HdlcDecoder>` and frames internally, DCD scoring is
-copy-pasted between AFSK and 9600 (`demod_afsk.rs:691-723` and
-`modem_9600/mod.rs:172-182`), and PSK/9600 share no code with AFSK. The reusable
+This is a **large library, and extracting it is a real refactor, not a
+lift-and-shift.** Today Graywolf's AFSK demod owns `Vec<HdlcDecoder>` and frames
+internally, DCD scoring is copy-pasted between AFSK and 9600 (`demod_afsk.rs:691-723`
+and `modem_9600/mod.rs:172-182`), and PSK/9600 share no code with AFSK; the reusable
 `MultiSlicer` / `DcdScorer` / `DpllClockRecovery` / `ParallelDemodulator<D>`
-abstractions do not exist yet and threading soft decisions through is genuine
-Phase-2 work. The implementation plan should budget for this.
+abstractions do not exist yet, and the soft-LLR contract is new. The catalog above
+is the *target* battery set; it must be phased. Suggested grouping by build phase:
+the streaming/packet batteries (A front-end, B sync, NRZI/scramblers/HDLC/RS/FX.25/
+IL2P, the dedup window) land first with 1200/9600; the soft-LLR contract + LDPC
+BP/OSD + Costas-array + 77-bit codec + SIC/AP/wideband orchestration land with FT8;
+the convolutional/Viterbi/FHT/interleaver/Varicode family lands with the fldigi
+modes; OFDM + vocoder + ARQ land with the FreeDV/M17/ARDOP family. A few low-level
+constants (exact LDPC min-sum scaling, AP LLR seeding, FT8 sync-metric threshold, the
+IL2P `set_field` bit map) should be confirmed against the reference sources at
+implementation time rather than locked from secondary documentation now.
+
+### Coverage map — reference software → batteries
+
+| Reference (GRA-126) | Modes | Key batteries the framework must supply |
+|---|---|---|
+| **Direwolf / Graywolf** | AX.25 1200 AFSK, 9600 G3RUH, FX.25, IL2P, APRS | AFSK correlator + multi-slicer, baseband-FSK LPF/slicer, DPLL, NRZI, self-sync **and** frame-reset scramblers, HDLC+CRC-16/X.25, GF(256) RS (fcr=0 **and** 1), FX.25/IL2P framing, multi-decoder dedup |
+| **WSJT-X** | FT8, FT4, JT65, JT9, WSPR, MSK144, Q65, FST4/W | STFT bank, CPFSK/MSK detect, soft-LLR, LDPC BP+OSD, GF(2⁶) soft-RS, QRA, conv-K32+Fano, Costas-array correlator, 77/72/50-bit codecs + call hashing, SIC + AP + wideband multi-decode, accurate time base |
+| **fldigi** | PSK31/63/QPSK, RTTY, MFSK16/32, Olivia, Contestia, THOR, DominoEX, Hell, Throb, CW, WEFAX, NAVTEX | differential PSK + raised-cosine, 2-FSK + Baudot, MFSK tone bank, conv+soft-Viterbi+interleavers, Walsh/FHT, constant-ratio + time-diversity, Varicode tables, AFC, Morse+SOM, image raster |
+| **Codec2/FreeDV, M17, ARDOP** | FreeDV 700C/D/E/1600/2020, M17, ARDOP | OFDM core + pilot sync + PAPR clipping, coherent/diff PSK, 4-FSK+RRC, QAM, LDPC soft, Golay, conv+puncture+QPP, diversity & memory-ARQ soft-combine, vocoder interface, sync-word correlator, ARQ engine |
 
 ## Audio subsystem (goal #3)
 
