@@ -47,6 +47,24 @@ object UsbPttAdapter : UsbPttCallback {
     const val PTT_METHOD_AIOC_CDC_DTR = 3
     const val PTT_METHOD_VOX = 4
 
+    /** Best PTT method for the open/attached USB device, or VOX if none found.
+     *  The modem configures PTT with this and actuates it back through pttSet(). */
+    fun preferredMethod(): Int {
+        if (cp2102n != null) return PTT_METHOD_CP2102N_RTS
+        if (aioc != null) return PTT_METHOD_AIOC_CDC_DTR
+        if (cm108 != null) return PTT_METHOD_CM108_HID
+        if (!::usbManager.isInitialized) return PTT_METHOD_VOX
+        for (dev in usbManager.deviceList.values) {
+            when (classify(dev)) {
+                DeviceRole.CP2102N -> return PTT_METHOD_CP2102N_RTS
+                DeviceRole.AIOC -> return PTT_METHOD_AIOC_CDC_DTR
+                DeviceRole.CM108 -> return PTT_METHOD_CM108_HID
+                DeviceRole.UNKNOWN -> {}
+            }
+        }
+        return PTT_METHOD_VOX
+    }
+
     // Vendor / product IDs.
     private const val CP2102N_VID = 0x10C4
     private const val CP2102N_PID = 0xEA60

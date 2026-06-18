@@ -31,12 +31,13 @@ plugins {
 
 android {
     namespace = "com.omnimodem.app"
-    compileSdk = 35
+    compileSdk = 36
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "com.omnimodem.app"
         minSdk = 28
-        targetSdk = 35
+        targetSdk = 36
         versionCode = omnimodemVersionCode
         versionName = omnimodemVersionName
     }

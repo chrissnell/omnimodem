@@ -19,14 +19,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, OnceLock};
 
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{JClass, JObject, JShortArray, JString};
 use jni::sys::{jboolean, jint, jstring, JNI_VERSION_1_6};
 use jni::{JNIEnv, JavaVM};
 use log::{error, info};
+use tokio::sync::oneshot;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use crate::audio::{AudioChunk, AudioError, CHUNK_QUEUE_DEPTH};
-use crate::ids::DeviceId;
+use crate::core::command::Command;
+use crate::ids::{ChannelId, DeviceId};
 
 pub mod audio;
 pub mod upcall;
@@ -59,6 +61,11 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 
 /// Guards against booting the core twice across app restarts.
 static STARTED: OnceLock<()> = OnceLock::new();
+
+/// The running core's command handle, exposed to the JNI control edge so the
+/// Kotlin app can drive the modem in-process (configure / key / transmit)
+/// without a gRPC round-trip to its own UDS.
+static CORE: OnceLock<crate::core::CoreHandle> = OnceLock::new();
 
 /// `modemVersion()` — the crate version string, for the service notification.
 #[no_mangle]
@@ -131,6 +138,7 @@ fn run_core(sock_path: &str) -> Result<(), String> {
             as Box<dyn AudioBackend>
     });
     let (core, _join) = crate::core::spawn(supervisor, enumerator, factory);
+    let _ = CORE.set(core.clone()); // expose to the JNI control edge
     let svc = crate::grpc::ControlService::new(core);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -141,6 +149,155 @@ fn run_core(sock_path: &str) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())
     })
+}
+
+// ── JNI control edge ──────────────────────────────────────────────────────────
+//
+// The Android app drives the modem in-process by sending the same `core::Command`s
+// the gRPC edge sends — no gRPC client / UDS round-trip to its own daemon. Each
+// call blocks the calling thread on the core's oneshot reply (short ops; for
+// `modemTransmit` the call blocks for the tone's playback duration, so call it
+// off the UI thread). Kotlin signatures (class `com.omnimodem.app.jni.ModemBridge`):
+//
+//   external fun modemListDevices(): String           // "device_id\tlabel" per line
+//   external fun modemConfigure(channel: Int, pttMethod: Int): Int  // actual rate, or -1
+//   external fun modemKeyPtt(channel: Int, keyed: Boolean): Boolean
+//   external fun modemTransmit(channel: Int, samples: ShortArray): Boolean
+//
+// `pttMethod` is one of `ptt::android` method ints (CP2102N_RTS, CM108_HID, …);
+// the modem actuates it back through the Kotlin USB layer via the PTT callback.
+
+/// `modemListDevices()` — newline-joined `device_id<TAB>label`.
+#[no_mangle]
+pub extern "system" fn Java_com_omnimodem_app_jni_ModemBridge_modemListDevices<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    let text = match CORE.get() {
+        Some(core) => {
+            let (tx, rx) = oneshot::channel();
+            if core.commands.send(Command::ListDevices { reply: tx }).is_ok() {
+                rx.blocking_recv()
+                    .map(|devs| {
+                        devs.iter()
+                            .map(|d| format!("{}\t{}", d.id.to_canonical_string(), d.label))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        None => String::new(),
+    };
+    env.new_string(text).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+/// `modemConfigure(channel, pttMethod)` — bind the channel to the Android audio
+/// device + an Android PTT actuator. Returns the actual sample rate, or -1.
+#[no_mangle]
+pub extern "system" fn Java_com_omnimodem_app_jni_ModemBridge_modemConfigure<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    channel: jint,
+    ptt_method: jint,
+) -> jint {
+    configure_channel(channel as u32, ptt_method).unwrap_or(-1)
+}
+
+fn configure_channel(ch: u32, ptt_method: i32) -> Option<i32> {
+    let core = CORE.get()?;
+    let id = ChannelId(ch);
+
+    let (tx, rx) = oneshot::channel();
+    core.commands
+        .send(Command::ConfigureChannel { id, name: "android".into(), mode: "none".into(), reply: tx })
+        .ok()?;
+    rx.blocking_recv().ok()?.ok()?;
+
+    // Resolve the single synthetic Android audio device.
+    let (tx, rx) = oneshot::channel();
+    core.commands.send(Command::ListDevices { reply: tx }).ok()?;
+    let dev = rx.blocking_recv().ok()?.into_iter().next()?;
+
+    let (tx, rx) = oneshot::channel();
+    core.commands
+        .send(Command::ConfigureAudio {
+            id,
+            device_id: dev.id.clone(),
+            sample_rate: crate::audio::MAX_SAMPLE_RATE,
+            fanout: 1,
+            reply: tx,
+        })
+        .ok()?;
+    let rate = rx.blocking_recv().ok()?.ok()?;
+
+    let ptt = crate::ptt::registry::PttConfig {
+        device_id: dev.id,
+        method: crate::ptt::registry::PttMethod::Android { method: ptt_method },
+        invert: false,
+    };
+    let (tx, rx) = oneshot::channel();
+    core.commands.send(Command::ConfigurePtt { id, ptt, reply: tx }).ok()?;
+    rx.blocking_recv().ok()?.ok()?;
+
+    Some(rate as i32)
+}
+
+/// `modemKeyPtt(channel, keyed)` — key/unkey the channel's PTT.
+#[no_mangle]
+pub extern "system" fn Java_com_omnimodem_app_jni_ModemBridge_modemKeyPtt<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    channel: jint,
+    keyed: jboolean,
+) -> jboolean {
+    let ok = (|| {
+        let core = CORE.get()?;
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::KeyPtt { channel: ChannelId(channel as u32), keyed: keyed != 0, reply: tx })
+            .ok()?;
+        rx.blocking_recv().ok()?.ok()?;
+        Some(())
+    })()
+    .is_some();
+    ok as jboolean
+}
+
+/// `modemTransmit(channel, samples)` — play `samples` (mono i16 PCM) out the
+/// channel with PTT asserted for the duration. Blocks for the playback time.
+#[no_mangle]
+pub extern "system" fn Java_com_omnimodem_app_jni_ModemBridge_modemTransmit<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    channel: jint,
+    samples: JShortArray<'local>,
+) -> jboolean {
+    let len = env.get_array_length(&samples).unwrap_or(0);
+    if len <= 0 {
+        return 0;
+    }
+    let mut scratch = vec![0i16; len as usize];
+    if env.get_short_array_region(&samples, 0, &mut scratch).is_err() {
+        return 0;
+    }
+    let mut payload = Vec::with_capacity(scratch.len() * 2);
+    for s in scratch {
+        payload.extend_from_slice(&s.to_le_bytes());
+    }
+    let ok = (|| {
+        let core = CORE.get()?;
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::Transmit { channel: ChannelId(channel as u32), payload, reply: tx })
+            .ok()?;
+        rx.blocking_recv().ok()?.ok()?;
+        Some(())
+    })()
+    .is_some();
+    ok as jboolean
 }
 
 /// Synthetic enumerator: Android has one logical audio device (Kotlin owns the

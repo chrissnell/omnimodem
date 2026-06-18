@@ -78,7 +78,17 @@ class ModemService : Service() {
             }
             if (stopping) { ModemBridge.modemStop(); return@thread }
             audioPump.start()
-            Log.i(TAG, "modem booted, RX pump running")
+
+            // Self-drive: bind channel 0 to the Android audio device + the
+            // attached USB PTT method, so the app operates the modem on its own.
+            val method = UsbPttAdapter.preferredMethod()
+            val rate = ModemBridge.modemConfigure(CHANNEL, method)
+            if (rate > 0) {
+                ready = true
+                Log.i(TAG, "modem booted; channel $CHANNEL configured (rate=$rate ptt=$method)")
+            } else {
+                Log.w(TAG, "modem booted but modemConfigure(channel=$CHANNEL) failed")
+            }
         }
     }
 
@@ -126,5 +136,13 @@ class ModemService : Service() {
         private const val TAG = "ModemService"
         private const val CHANNEL_ID = "omnimodem-foreground"
         private const val NOTIF_ID = 0x6F4D
+
+        /** Channel the service self-configures and the UI drives. */
+        const val CHANNEL = 0
+
+        /** True once the core is booted and channel 0 is configured (audio+PTT
+         *  bound). The UI gates Key/Transmit on this. */
+        @Volatile var ready = false
+            private set
     }
 }

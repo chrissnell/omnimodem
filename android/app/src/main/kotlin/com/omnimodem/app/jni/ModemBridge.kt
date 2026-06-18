@@ -54,6 +54,26 @@ object ModemBridge {
     /** Stop the core and release its threads. */
     external fun modemStop()
 
+    // --- In-process control edge (drives the core directly; no gRPC needed) ---
+
+    /** Enumerate devices as newline-joined "deviceId\tlabel". */
+    external fun modemListDevices(): String
+
+    /**
+     * Bind `channel` to the Android audio device and an Android PTT actuator.
+     * @param pttMethod one of UsbPttAdapter.PTT_METHOD_* (CP2102N_RTS=1, CM108_HID=2,
+     *                  AIOC_CDC_DTR=3, VOX=4)
+     * @return actual sample rate, or -1 on failure
+     */
+    external fun modemConfigure(channel: Int, pttMethod: Int): Int
+
+    /** Key/unkey the channel's PTT. */
+    external fun modemKeyPtt(channel: Int, keyed: Boolean): Boolean
+
+    /** Transmit mono i16 PCM out the channel (PTT asserted for its duration).
+     *  Blocks for the playback time — call off the UI thread. */
+    external fun modemTransmit(channel: Int, samples: ShortArray): Boolean
+
     /** Register the PTT actuator the Rust TX governor calls on key/unkey. */
     external fun installPttCallback(cb: UsbPttCallback)
 
