@@ -1,6 +1,7 @@
 //! Channel configuration and runtime state.
 
 use crate::ids::{ChannelId, DeviceId};
+use crate::ptt::registry::PttConfig;
 
 /// Persisted, operator-supplied channel configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,8 +11,14 @@ pub struct ChannelConfig {
     /// Phase 1 placeholder mode label (e.g. "none"); becomes a parametric
     /// `ModeConfig` in Phase 3.
     pub mode: String,
-    /// Stable device this channel binds to (placeholder in Phase 1).
+    /// Audio device this channel binds to (the durable identity).
     pub device_id: DeviceId,
+    /// Requested working rate (clamped to 48 kHz at open).
+    pub sample_rate: u32,
+    /// Capture fan-out consumers (0/1 == none).
+    pub fanout: u32,
+    /// PTT binding; `None` until ConfigurePtt.
+    pub ptt: Option<PttConfig>,
 }
 
 /// Live channel state: its config plus whether the (stub) pipeline is running.

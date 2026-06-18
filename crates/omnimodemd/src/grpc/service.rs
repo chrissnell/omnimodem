@@ -3,8 +3,9 @@
 
 use crate::core::command::Command;
 use crate::core::CoreHandle;
+use crate::grpc::convert;
 use crate::grpc::convert::{core_error_to_status, snapshot_to_proto};
-use crate::ids::ChannelId;
+use crate::ids::{ChannelId, DeviceId};
 use crate::proto;
 use crate::proto::modem_control_server::ModemControl;
 use tokio::sync::oneshot;
@@ -79,6 +80,93 @@ impl ModemControl for ControlService {
             .map_err(|_| Status::unavailable("core dropped reply"))?
             .map_err(core_error_to_status)?;
         Ok(Response::new(proto::TransmitResponse { transmit_id: transmit_id.0 }))
+    }
+
+    async fn list_devices(
+        &self,
+        _request: Request<proto::ListDevicesRequest>,
+    ) -> Result<Response<proto::ListDevicesResponse>, Status> {
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ListDevices { reply: tx })?;
+        let devices = rx.await.map_err(|_| Status::unavailable("core dropped reply"))?;
+        Ok(Response::new(proto::ListDevicesResponse {
+            devices: devices.iter().map(convert::device_descriptor_to_proto).collect(),
+        }))
+    }
+
+    async fn configure_audio(
+        &self,
+        request: Request<proto::ConfigureAudioRequest>,
+    ) -> Result<Response<proto::ConfigureAudioResponse>, Status> {
+        let req = request.into_inner();
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id must not be empty"));
+        }
+        let device_id = DeviceId::parse(&req.device_id)
+            .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?;
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ConfigureAudio {
+            id: ChannelId(req.channel),
+            device_id,
+            sample_rate: req.sample_rate,
+            fanout: req.fanout,
+            reply: tx,
+        })?;
+        let actual = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::ConfigureAudioResponse { actual_sample_rate: actual }))
+    }
+
+    async fn configure_ptt(
+        &self,
+        request: Request<proto::ConfigurePttRequest>,
+    ) -> Result<Response<proto::ConfigurePttResponse>, Status> {
+        let req = request.into_inner();
+        let ptt = convert::proto_ptt_to_config(&req)?;
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ConfigurePtt { id: ChannelId(req.channel), ptt, reply: tx })?;
+        rx.await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::ConfigurePttResponse {}))
+    }
+
+    async fn key_ptt(
+        &self,
+        request: Request<proto::KeyPttRequest>,
+    ) -> Result<Response<proto::KeyPttResponse>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::KeyPtt {
+            channel: ChannelId(req.channel),
+            keyed: req.keyed,
+            reply: tx,
+        })?;
+        rx.await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::KeyPttResponse {}))
+    }
+
+    async fn suggest_udev_rule(
+        &self,
+        request: Request<proto::SuggestUdevRuleRequest>,
+    ) -> Result<Response<proto::SuggestUdevRuleResponse>, Status> {
+        let req = request.into_inner();
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id must not be empty"));
+        }
+        let device_id = DeviceId::parse(&req.device_id)
+            .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?;
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::SuggestUdevRule { device_id, reply: tx })?;
+        let (rule, instructions) = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::SuggestUdevRuleResponse { rule, instructions }))
     }
 
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;

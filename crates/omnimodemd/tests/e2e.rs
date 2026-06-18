@@ -52,7 +52,7 @@ async fn phase1_exit_criterion_roundtrip() {
         Kind::Snapshot(s) => {
             assert_eq!(s.channels.len(), 1);
             assert_eq!(s.channels[0].name, "vfo-a");
-            assert_eq!(s.channels[0].device_id, "virtual:0");
+            assert_eq!(s.channels[0].device_id, "virtual:virtual:0");
         }
         other => panic!("expected snapshot first, got {other:?}"),
     }

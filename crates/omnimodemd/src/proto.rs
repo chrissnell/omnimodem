@@ -27,4 +27,16 @@ mod tests {
         };
         assert!(ev.kind.is_some());
     }
+
+    #[test]
+    fn phase2_types_are_constructible() {
+        let _ = DeviceInfo {
+            device_id: "usb:0d8c:013c:".into(),
+            label: "C-Media".into(),
+            has_capture: true,
+            has_playback: true,
+        };
+        let _ = Event { kind: Some(event::Kind::PttState(PttState { channel: 0, keyed: true })) };
+        assert_eq!(PttMethod::SerialRts as i32, 3);
+    }
 }

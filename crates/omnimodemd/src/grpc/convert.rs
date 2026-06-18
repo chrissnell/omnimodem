@@ -2,17 +2,66 @@
 
 use crate::core::error::CoreError;
 use crate::core::event::{FrameEvent, TelemetryEvent};
+use crate::device::DeviceDescriptor;
+use crate::ids::DeviceId;
 use crate::proto;
+use crate::ptt::registry::{PttConfig, PttMethod};
+use crate::ptt::PttError;
 use crate::supervisor::ModemSnapshot;
 use tonic::Status;
 
 /// Map a core error to a gRPC status.
 pub fn core_error_to_status(e: CoreError) -> Status {
-    match e {
+    match &e {
         CoreError::UnknownChannel(_) => Status::not_found(e.to_string()),
         CoreError::Persist(_) => Status::internal(e.to_string()),
+        CoreError::Audio(_) => Status::failed_precondition(e.to_string()),
+        CoreError::Ptt(p) => match p {
+            PttError::DeviceGone { .. } => Status::failed_precondition(e.to_string()),
+            PttError::PermissionDenied { .. } => Status::permission_denied(e.to_string()),
+            PttError::Busy { .. } => Status::unavailable(e.to_string()),
+            PttError::Config(_) => Status::invalid_argument(e.to_string()),
+            PttError::Unsupported => Status::unimplemented(e.to_string()),
+            PttError::Io(_) => Status::internal(e.to_string()),
+        },
         CoreError::Closed => Status::unavailable(e.to_string()),
     }
+}
+
+/// A device descriptor as the wire `DeviceInfo`.
+pub fn device_descriptor_to_proto(d: &DeviceDescriptor) -> proto::DeviceInfo {
+    proto::DeviceInfo {
+        device_id: d.id.to_canonical_string(),
+        label: d.label.clone(),
+        has_capture: d.has_capture,
+        has_playback: d.has_playback,
+    }
+}
+
+/// Build a domain `PttConfig` from a `ConfigurePtt` request, validating the
+/// method and device id.
+pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig, Status> {
+    if req.device_id.is_empty() {
+        return Err(Status::invalid_argument("device_id must not be empty"));
+    }
+    let device_id = DeviceId::parse(&req.device_id)
+        .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?;
+    let method = match proto::PttMethod::try_from(req.method) {
+        Ok(proto::PttMethod::None) => PttMethod::None,
+        Ok(proto::PttMethod::Vox) => PttMethod::Vox,
+        Ok(proto::PttMethod::SerialRts) => PttMethod::SerialRts { node: req.node.clone() },
+        Ok(proto::PttMethod::SerialDtr) => PttMethod::SerialDtr { node: req.node.clone() },
+        Ok(proto::PttMethod::Cm108) => {
+            PttMethod::Cm108 { node: req.node.clone(), pin: req.pin_or_line as u8 }
+        }
+        Ok(proto::PttMethod::Gpio) => {
+            PttMethod::Gpio { chip: req.node.clone(), line: req.pin_or_line }
+        }
+        Ok(proto::PttMethod::Unspecified) | Err(_) => {
+            return Err(Status::invalid_argument("ptt method must be specified"));
+        }
+    };
+    Ok(PttConfig { device_id, method, invert: req.invert })
 }
 
 /// Build a proto `ModemState` from a snapshot.
@@ -25,7 +74,7 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
             channel: c.id.0,
             name: c.name.clone(),
             mode: c.mode.clone(),
-            device_id: c.device_id.0.clone(),
+            device_id: c.device_id.to_canonical_string(),
             running: *running,
         })
         .collect();
@@ -70,6 +119,20 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
         }
         TelemetryEvent::Status { channel, tx_frames } => {
             Kind::Status(proto::Status { channel: channel.0, tx_frames })
+        }
+        TelemetryEvent::DeviceArrived { device_id, label } => {
+            Kind::DeviceArrived(proto::DeviceArrived {
+                device_id: device_id.to_canonical_string(),
+                label,
+            })
+        }
+        TelemetryEvent::DeviceDeparted { device_id } => {
+            Kind::DeviceDeparted(proto::DeviceDeparted {
+                device_id: device_id.to_canonical_string(),
+            })
+        }
+        TelemetryEvent::PttKeyed { channel, keyed } => {
+            Kind::PttState(proto::PttState { channel: channel.0, keyed })
         }
     };
     proto::Event { kind: Some(kind) }

@@ -50,7 +50,7 @@ async fn configure_get_transmit_roundtrip() {
     let state = client.get_state(GetStateRequest {}).await.unwrap().into_inner();
     assert_eq!(state.channels.len(), 1);
     assert_eq!(state.channels[0].name, "vfo-a");
-    assert_eq!(state.channels[0].device_id, "virtual:0");
+    assert_eq!(state.channels[0].device_id, "virtual:virtual:0");
 
     // Transmit returns a monotonic id.
     let tx = client
