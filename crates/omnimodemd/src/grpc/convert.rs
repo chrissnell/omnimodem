@@ -25,7 +25,7 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
             channel: c.id.0,
             name: c.name.clone(),
             mode: c.mode.clone(),
-            device_id: c.device_id.0.clone(),
+            device_id: c.device_id.to_canonical_string(),
             running: *running,
         })
         .collect();

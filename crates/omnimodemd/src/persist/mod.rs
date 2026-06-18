@@ -58,7 +58,7 @@ impl Store {
                  name = excluded.name,
                  mode = excluded.mode,
                  device_id = excluded.device_id;",
-            rusqlite::params![cfg.id.0, cfg.name, cfg.mode, cfg.device_id.0],
+            rusqlite::params![cfg.id.0, cfg.name, cfg.mode, cfg.device_id.to_canonical_string()],
         )?;
         Ok(())
     }
@@ -73,7 +73,8 @@ impl Store {
                 id: ChannelId(row.get::<_, u32>(0)?),
                 name: row.get(1)?,
                 mode: row.get(2)?,
-                device_id: DeviceId(row.get::<_, String>(3)?),
+                device_id: DeviceId::parse(&row.get::<_, String>(3)?)
+                    .unwrap_or_else(DeviceId::placeholder),
             })
         })?;
         let mut out = Vec::new();
