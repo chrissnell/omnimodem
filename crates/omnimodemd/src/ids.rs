@@ -1,7 +1,7 @@
 //! Strongly-typed identifiers used across the core/supervisor.
 
 /// Logical channel id (matches the proto `channel` field).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChannelId(pub u32);
 
 /// Per-process monotonic transmit id.
