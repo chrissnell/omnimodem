@@ -1,11 +1,14 @@
 # Omnimodem — Design
 
-**Date:** 2026-06-17
-**Status:** Approved for planning (direction approved; review feedback incorporated)
+**Date:** 2026-06-17 · **Last reorganized:** 2026-06-18
+**Status:** Phase 1 implemented & merged; Phase 2 in planning. The document is
+organized as **Foundations** (phase-independent contracts and reference) followed
+by a **phase-by-phase delivery plan** (the source of truth for what lands when),
+then cross-cutting testing and decisions.
 
-## Summary
+## Summary & goals
 
-Omnimodem is a gRPC-driven, batteries-included multi-mode software modem written
+Omnimodem is a gRPC-driven, building-block-based multi-mode software modem written
 in Rust. A single binary is operated entirely over gRPC and can run multiple
 amateur-radio modes simultaneously, each bound to its own audio interface and
 PTT. It generalizes the reception techniques that make the Graywolf AFSK
@@ -15,14 +18,32 @@ that were the weakest parts of Graywolf.
 
 Three design goals drive everything:
 
-1. **Easy to add new modes** — reusable DSP/FEC "batteries" and a one-module mode
-   registry, so a new mode touches one place, not five `match` arms.
+1. **Easy to add new modes** — reusable DSP/FEC "building blocks" and a one-module
+   mode registry, so a new mode touches one place, not five `match` arms.
 2. **Easy to integrate with** — a stable, versioned gRPC API so developers build
    their own frontends in any language.
 3. **Rock-solid audio detection and PTT** — stable device identity across
    renames/hotplug, structured errors, and a transmitter you can trust.
 
-Plus useful metrics (SNR, signal level, bad frames, DCD, duty cycle, etc.).
+Plus useful metrics (SNR, signal level, bad frames, DCD, duty cycle, etc.) and
+**provable correctness** — every mode is gated against the reference software it
+claims to match (see Testing).
+
+## How to read this document
+
+- **Foundations** (Architecture · Cross-cutting contracts · Mode-framework model ·
+  Building-blocks catalog · Graywolf reuse map) are phase-independent. They define
+  the *what and why* that span the whole build and are referenced from the phases.
+- **Delivery plan** is the backbone: Phases 1–5, each with a goal, the components
+  it owns (with full detail folded in), the building-block groups it introduces,
+  and an **exit criterion**. If you want to know *when* something is built, read the
+  phases — that is the authoritative sequencing.
+- **Cross-cutting** holds the testing framework (built early, gates every mode),
+  the resolved decisions, and open follow-ons.
+
+---
+
+# Foundations
 
 ## Architecture
 
@@ -61,7 +82,14 @@ simplicity, made consciously because best-of-class reception runs several
 demodulators per channel. The only cross-channel shared state is the PTT
 registry and the device cache.
 
-## gRPC control surface
+## Cross-cutting contracts
+
+Two contracts are deliberately locked early because they are expensive to
+retrofit and every later phase plugs into them. (Their *implementation* lands in
+specific phases — the control-plane contract in Phase 1, the soft-LLR contract in
+Phase 3 — but the contracts themselves are foundational.)
+
+### Control-plane contract (gRPC)
 
 A `ModemControl` service:
 
@@ -102,7 +130,18 @@ authz is required even on the default local transport, not only when routable:
 stability/versioning policy for the proto from day one (semver on the package,
 additive-only within a major).
 
-## Mode framework
+### The soft-information (LLR) contract
+
+The single highest-leverage abstraction is a defined soft-value
+(log-likelihood-ratio) interface between the detector/demapper and the FEC
+decoder. Every modern weak-signal gain — LDPC BP/OSD (FT8/FreeDV), soft Viterbi
+(M17/MFSK16), Franke-Taylor soft RS (JT65), Walsh/FHT correlation (Olivia),
+memory-ARQ soft-combine (ARDOP) — depends on carrying soft values, not hard bits,
+across that boundary. Frame assembly (HDLC and friends) lives *downstream* of the
+demod, not inside it. This contract is the spine of the pipeline-stage model
+below.
+
+## Mode framework model
 
 `trait Demodulator` / `trait Modulator`, each declaring a `ModeCaps`
 (native sample rate, bandwidth, TX support, duplex). A **mode registry** means
@@ -131,10 +170,9 @@ So the mode abstraction supports two demod shapes from the start:
 2. **Block/windowed demod** — buffers a time-aligned window and runs a
    multi-pass decode, returning multiple decodes (FT8/JS8/WSPR).
 
-And the pipeline carries **soft information (LLRs)** end-to-end, not just hard
-bits — otherwise the listed Viterbi/LDPC batteries are useless and FEC-mode
-reception is not best-of-class. Frame assembly (HDLC and friends) moves
-downstream of the demod rather than living inside it.
+And the pipeline carries **soft information (LLRs)** end-to-end (see the soft-LLR
+contract above) — otherwise the Viterbi/LDPC building blocks are useless and
+FEC-mode reception is not best-of-class.
 
 ### Best-of-class reception, generalized
 
@@ -162,8 +200,8 @@ TX:  message/frame encode → FEC encode → interleave / scramble
         → symbol map → pulse-shape / modulate → up-convert
 ```
 
-omnimodem provides these stages as **composable, individually-testable
-batteries**, and a mode is an *assembly* of stages declared in its one registry
+omnimodem provides these stages as **composable, individually-testable building
+blocks**, and a mode is an *assembly* of stages declared in its one registry
 module. This is precisely what makes "as-good-or-better-than-the-reference"
 tractable: we implement the best known version of each stage *once* (e.g. one
 soft-decision LDPC belief-propagation decoder, one Costas-array correlator) and
@@ -171,19 +209,11 @@ every mode that needs it inherits best-in-class behaviour, rather than each mode
 re-deriving a weaker version. The catalog below is sized so that **every mode in
 the GRA-126 catalog composes from this set** — that is the completeness bar.
 
-**The soft-information (LLR) contract is the spine.** The single
-highest-leverage abstraction is a defined soft-value (log-likelihood-ratio)
-interface between the detector/demapper and the FEC decoder. Every modern weak-
-signal gain — LDPC BP/OSD (FT8/FreeDV), soft Viterbi (M17/MFSK16), Franke-Taylor
-soft RS (JT65), Walsh/FHT correlation (Olivia), memory-ARQ soft-combine (ARDOP)
-— depends on carrying soft values, not hard bits, across that boundary. (This is
-the same point the review's "soft-decision plumbing" note raised, now made the
-organizing principle of the toolkit.)
-
-### Batteries catalog
+## Building-blocks catalog (reference)
 
 Derived from auditing the GRA-126 reference codebases. Grouped by pipeline stage;
 verified parameters are noted so the list is checkably complete, not hand-wavy.
+Which groups land in which phase is in the delivery plan, not here.
 
 **A. Front-end DSP & waveform (RX detectors + symmetric TX modulators)**
 - Resampler / decimator (arbitrary source rate → per-mode working rate; 12 kHz is
@@ -297,17 +327,13 @@ verified parameters are noted so the list is checkably complete, not hand-wavy.
   QSO). Optional for FT8/JT65, effectively always-on for FT4/Q65/FST4.
 - **ARQ engine hooks** (sequencing, retransmit, bandwidth/rate negotiation, memory-
   ARQ) for ARDOP-class transports — a per-mode *protocol* layer above the DSP/coding
-  library, not a shared DSP battery.
+  library, not a shared DSP building block.
 
-**F. Metrics & validation (feeds goal #4)**
+**F. Metrics (the data sources behind goal #4)**
 - Per-mode metrics: SNR (normalized to reference BW), sync metric, freq/time offset,
   EVM / PSK31-style IMD / phase-quality, DCD, good/bad-CRC counts, decode pass#,
-  duty cycle.
-- **Reference-corpus regression harness**: golden recordings with known-good decode
-  counts (e.g. the WA8LMF AFSK test CD where Graywolf already beats Direwolf; WSJT-X
-  sample `.wav`s), run in CI to *prove* as-good-or-better and guard DSP regressions.
-  This extends the record/replay + regression-harness already in the design and is
-  how the "as good or better" claim is made falsifiable rather than aspirational.
+  duty cycle. (Emission/transport is the Metrics component in Phase 5; the
+  decode-rate proof harness is in Testing.)
 
 ### Layering: shared library vs per-mode protocol
 
@@ -326,140 +352,23 @@ internally, DCD scoring is copy-pasted between AFSK and 9600 (`demod_afsk.rs:691
 and `modem_9600/mod.rs:172-182`), and PSK/9600 share no code with AFSK; the reusable
 `MultiSlicer` / `DcdScorer` / `DpllClockRecovery` / `ParallelDemodulator<D>`
 abstractions do not exist yet, and the soft-LLR contract is new. The catalog above
-is the *target* battery set; it must be phased. Suggested grouping by build phase:
-the streaming/packet batteries (A front-end, B sync, NRZI/scramblers/HDLC/RS/FX.25/
-IL2P, the dedup window) land first with 1200/9600; the soft-LLR contract + LDPC
-BP/OSD + Costas-array + 77-bit codec + SIC/AP/wideband orchestration land with FT8;
-the convolutional/Viterbi/FHT/interleaver/Varicode family lands with the fldigi
-modes; OFDM + vocoder + ARQ land with the FreeDV/M17/ARDOP family. A few low-level
-constants (exact LDPC min-sum scaling, AP LLR seeding, FT8 sync-metric threshold, the
-IL2P `set_field` bit map) should be confirmed against the reference sources at
-implementation time rather than locked from secondary documentation now.
+is the *target* building-block set; it is phased in the delivery plan (Phase 3
+builds the framework + the groups Phase-4 modes need; later groups land with the
+modes that need them). A few low-level constants (exact LDPC min-sum scaling, AP
+LLR seeding, FT8 sync-metric threshold, the IL2P `set_field` bit map) should be
+confirmed against the reference sources at implementation time rather than locked
+from secondary documentation now.
 
-### Coverage map — reference software → batteries
+### Coverage map — reference software → building blocks
 
-| Reference (GRA-126) | Modes | Key batteries the framework must supply |
+| Reference (GRA-126) | Modes | Key building blocks the framework must supply |
 |---|---|---|
 | **Direwolf / Graywolf** | AX.25 1200 AFSK, 9600 G3RUH, FX.25, IL2P, APRS | AFSK correlator + multi-slicer, baseband-FSK LPF/slicer, DPLL, NRZI, self-sync **and** frame-reset scramblers, HDLC+CRC-16/X.25, GF(256) RS (fcr=0 **and** 1), FX.25/IL2P framing, multi-decoder dedup |
 | **WSJT-X** | FT8, FT4, JT65, JT9, WSPR, MSK144, Q65, FST4/W | STFT bank, CPFSK/MSK detect, soft-LLR, LDPC BP+OSD, GF(2⁶) soft-RS, QRA, conv-K32+Fano, Costas-array correlator, 77/72/50-bit codecs + call hashing, SIC + AP + wideband multi-decode, accurate time base |
 | **fldigi** | PSK31/63/QPSK, RTTY, MFSK16/32, Olivia, Contestia, THOR, DominoEX, Hell, Throb, CW, WEFAX, NAVTEX | differential PSK + raised-cosine, 2-FSK + Baudot, MFSK tone bank, conv+soft-Viterbi+interleavers, Walsh/FHT, constant-ratio + time-diversity, Varicode tables, AFC, Morse+SOM, image raster |
 | **Codec2/FreeDV, M17, ARDOP** | FreeDV 700C/D/E/1600/2020, M17, ARDOP | OFDM core + pilot sync + PAPR clipping, coherent/diff PSK, 4-FSK+RRC, QAM, LDPC soft, Golay, conv+puncture+QPP, diversity & memory-ARQ soft-combine, vocoder interface, sync-word correlator, ARQ engine |
 
-## Audio subsystem (goal #3)
-
-Lift Graywolf's hardened bits — defensive I16 format selection,
-stream-rebuild-with-backoff, submitted/drained TX watermarks, ALSA
-canonicalization pure-functions, `probe_capture`, in-use device caching
-(all in `audio/soundcard.rs`). Fixes:
-
-- **A real `trait AudioBackend`** (cpal / file / stdin / SDR / JACK pluggable)
-  replacing Graywolf's ad-hoc spawn-functions dispatched by a `match`
-  (`modem/mod.rs:449-480`).
-- **A unified cross-platform `DeviceId`** collapsing Graywolf's two diverging
-  enumeration paths (cpal/ALSA `list_audio.rs` vs nusb `list_usb.rs`) and their
-  per-OS identity mismatch into one stable identity derived from durable
-  attributes (USB `idVendor:idProduct` + serial, ALSA stable card *name* not
-  index, USB port-topology as fallback; prefer `/dev/serial/by-id/` symlinks).
-- **Resampling** so a source rate need not match the demod rate. Crucially, this
-  must **retain** Graywolf's ALSA `plughw` format/rate hardening
-  (`audio/mod.rs`, `soundcard.rs`) — the 48 kHz ceiling exists to avoid ALSA's
-  synthetic-rate `plughw` trap that desyncs bit timing. Resampling is additive;
-  it does not replace that defensive selection.
-- **Capture fan-out** — one capture stream can feed several demods (1200 + 9600
-  on the same audio, or SDR slices). Opt-in; 1:1 is the default. (Graywolf's
-  `extra_demods` already proves this works.)
-
-## PTT subsystem (goal #3)
-
-Lift the whole PTT subsystem — `trait PttDriver` + factory + `PortRegistry`
-(multi-handle) + per-OS drivers + `drive_tx_cycle` no-sleep sequencing +
-unkey-on-Drop (`tx/ptt.rs`, `modem/tx_worker.rs`). Fixes:
-
-- **Structured `PttError` enum** replacing the stringly-typed `Result<(),
-  String>` errors (`ptt.rs:184-189`), so callers can distinguish
-  device-went-away vs permission-denied vs busy.
-- **Hotplug eviction for serial / CM108.** `PortRegistry` currently caches serial
-  fds by path string and never evicts them (`ptt.rs:484-487` documents this as a
-  known limitation); GPIO has `LineGone` eviction, serial does not. Since
-  "rock-solid PTT" is a primary goal, the `DeviceId` work must **evict and reopen
-  by `DeviceId` on device disappearance/hotplug**, not only resolve at startup.
-- **RX/TX interlock per channel.** When a channel keys PTT on a shared device, RX
-  decode on that device must be muted/skipped to avoid decoding our own
-  transmission or feedback. Graywolf handles this implicitly on its single
-  thread; the per-channel-thread model must make it explicit.
-
-## Persistence
-
-Config is persisted in a **SQLite** file owned by the modem (frontends are
-arbitrary external clients, so config must outlive any single client and be
-shared across them). Key rules:
-
-- **Key config on the stable `DeviceId`, never on the volatile `/dev` path**, so a
-  TNC that jumps `ttyUSB0 → ttyUSB1` still binds. At startup and on hotplug the
-  core resolves each stored `DeviceId` to its current device node.
-- **Keep SQLite off the DSP hot path.** Writes happen on the control edge or a
-  dedicated thread — never in the audio pump — so a disk hiccup can't become an
-  audio underrun.
-- **`SuggestUdevRule(device_id)` RPC** returns ready-to-install udev rule text
-  (keyed on vendor/product/serial or topology, producing a stable
-  `/dev/omnimodem/<label>` symlink) plus instructions — useful for two identical
-  adapters that `by-id` can't disambiguate. The modem only *suggests*; it never
-  writes to `/etc/udev` (root-owned; operator stays in control).
-
-## TX model
-
-- **Cooperative queue + optional exclusive lease.** TX frames from any client
-  queue on the channel's TX worker and serialize on-air. Sessions that can't
-  tolerate interleaving (contest/Winlink) take an **optional exclusive TX lease**.
-- **Per-channel TX worker** (improvement over Graywolf's single global TX worker
-  in `tx_worker.rs`, which needlessly serializes TX across independent radios).
-  **Rule:** two channels that share one physical rig must still serialize via the
-  shared PTT registry — concurrency is per-rig, not per-channel.
-- **Time-slot-aligned scheduling** for windowed modes: the TX worker must be able
-  to transmit precisely on the next even/odd slot boundary (e.g. FT8's 15 s
-  grid), not "as soon as queued."
-
-## Time synchronization
-
-WSJT-X-family modes require an accurate system clock. Omnimodem depends on the
-host clock being disciplined (NTP/PTP) and **surfaces clock offset as a metric**
-so operators can see when decode failures are a time-sync problem rather than a
-signal problem.
-
-## Metrics (goal #4)
-
-Per-channel over gRPC plus an optional Prometheus exporter: SNR, dBFS level, DCD
-state, good/bad-FCS counts, PTT state, duty cycle. Additional high-value metrics:
-
-- **Which ensemble member / slicer decoded each frame** (Graywolf has this data;
-  it's gold for tuning the hydra).
-- **AFC / frequency-error offset.**
-- **Audio over/underrun and clip counts.**
-- **Clock offset** (for WSJT-X modes; see Time synchronization).
-
-## Other features
-
-- **Record/replay to FLAC** plus a **decode-rate regression harness** over a known
-  corpus — serves the best-of-class-reception goal and guards DSP regressions.
-- **Reference CLI/TUI client.**
-- **KISS/AGWPE compatibility** is **out of scope for the core**: it belongs in a
-  separate external KISS↔gRPC translator process (future work), so existing TNC
-  apps work without polluting the core.
-
-## Resolved decisions
-
-1. **Language: Rust.** (Maximizes Graywolf reuse.)
-2. **Persistence: SQLite**, keyed on stable `DeviceId`, with `SuggestUdevRule`
-   for the device-rename problem.
-3. **Build order:** (1) modem service structure — gRPC + control plane + PTT +
-   audio I/O, provable end-to-end via loopback/level-metering and a real
-   key/unkey before any DSP exists; (2) the audio building blocks — DSP/FEC
-   toolkit + mode framework (streaming **and** block paths, soft-decision
-   plumbing); (3) modes — 1200 AFSK first, then FT8, then outward.
-4. **Multi-client TX:** cooperative queue + optional exclusive lease.
-5. **KISS/AGWPE:** external translator, not in the core (future work).
-
-## Graywolf reuse map — the AFSK "secret sauce" as mode-agnostic batteries
+## Graywolf reuse map — the AFSK "secret sauce" as mode-agnostic building blocks
 
 Lift these out of the AFSK demod so PSK/RTTY/9600/FT8 inherit them. All verified
 present in the Graywolf source:
@@ -476,7 +385,7 @@ present in the Graywolf source:
   these are **mutually exclusive** in Graywolf: DFB runs only in single-slicer
   mode (`demod_afsk.rs:507`), multi-slicer uses peak/valley. Model them in the
   registry as alternatives selected by slicer count, not as two independently
-  composable batteries.
+  composable building blocks.
 - **Hard-limiter-before-bandpass** correlator stage — `sign(x)`, keep
   zero-crossing timing (`demod_afsk.rs:459-461, 545-547`).
 - **Digital PLL clock recovery** with locked-vs-searching inertia
@@ -495,109 +404,312 @@ W7ION (Ion Todirel) attribution for the decision-feedback AGC, the hard-limiter
 correlator, and the hydra idea carries over into omnimodem's code, same as
 Graywolf.
 
-## Recommended phasing
+---
 
-The build order below moves from the inside out: prove the skeleton and the
-control plane, then the physical-world plumbing (audio + PTT), then the DSP
-toolkit that every mode is assembled from, and only then the modes themselves.
-Modes come last on purpose — by the time we write the first one, the framework,
-the batteries, and the conformance harness that proves a mode is "as-good-or-
-better-than-the-reference" all already exist, so each new mode is an assembly
-job rather than a from-scratch DSP project.
+# Delivery plan
 
-### Phase 1 — Program structure & gRPC control plane
+The build order moves **from the inside out**: prove the skeleton and the control
+plane, then the physical-world plumbing (audio + PTT), then the DSP toolkit that
+every mode is assembled from, and only then the modes themselves. Modes come last
+on purpose — by the time we write the first one, the framework, the building
+blocks, and the conformance harness that proves a mode is "as-good-or-better-than-
+the-reference" all already exist, so each new mode is an assembly job rather than a
+from-scratch DSP project.
 
-Stand up the workspace and the async-control-edge / sync-core split
-(`Architecture`) with the control plane fully working against a **stub core** —
-no real DSP yet. Deliverables: the `ModemControl` gRPC service (unary C2 +
-server-streaming `SubscribeEvents` with snapshot-on-subscribe), the
-`mpsc`-command / `tokio::broadcast`-event wiring, the Supervisor skeleton, and
-SQLite persistence keyed on a placeholder `DeviceId`. Lock down the things that
-are expensive to retrofit: the **lossless-frames / lossy-telemetry backpressure
-policy**, **local authz** (UDS + `SO_PEERCRED`, mTLS hook for routable binds),
-and the **proto versioning policy**. Exit criterion: a client can configure a
-channel, subscribe to events, and drive a fake "transmit" round-trip end-to-end
-over gRPC.
+Each phase below lists its **goal**, the **components** it owns (with detail), the
+**building-block groups** it introduces (from the catalog), and an **exit
+criterion**. A component or contract referenced from Foundations is *implemented*
+in the phase that owns it.
 
-### Phase 2 — Basic operational components: audio devices & PTT
+## Phase 1 — Program structure & gRPC control plane
 
-Make the program talk to real hardware reliably — the half of goal #3 that has
-nothing to do with DSP. Build the `AudioBackend` trait (cpal first; file/stdin
-backends for test), the **unified cross-platform `DeviceId`** (durable
-USB/ALSA/serial identity), device detection/enumeration/caching, resampling
-(while **retaining** the ALSA `plughw` hardening), and capture fan-out. In
-parallel build the full PTT subsystem — `PttDriver` + factory + `PortRegistry`,
-per-OS drivers, no-sleep TX sequencing, unkey-on-`Drop`, the structured
-`PttError` enum, **hotplug eviction/reopen by `DeviceId`**, and the per-channel
-RX/TX interlock. Exit criterion: detect a device, open capture/playback, and
-key/unkey a real radio — all driven over the Phase-1 gRPC surface, still with no
-mode attached.
+**Status: implemented & merged** (plan: `docs/plans/2026-06-18-omnimodem-phase1-grpc-control-plane.md`;
+code under `crates/omnimodemd/`). Phase 2 plan is in progress.
 
-### Phase 3 — Mode scaffolding & the batteries toolkit
+**Goal.** Stand up the workspace and the async-control-edge / sync-core split
+(Architecture) with the control plane fully working against a **stub core** — no
+real DSP yet.
+
+**Delivers.**
+- The `ModemControl` gRPC service — unary C2 + server-streaming `SubscribeEvents`
+  with snapshot-on-subscribe (the **control-plane contract**, now implemented).
+- The `mpsc`-command / `tokio::broadcast`-event spine and the stub sync-core thread.
+- The **Supervisor skeleton** (channels + placeholder device cache + placeholder
+  PTT registry).
+- **Persistence** (implemented here): a SQLite config store **keyed on a stable
+  `DeviceId`, never the volatile `/dev` path** (Phase 1 uses a placeholder
+  `DeviceId`; real resolution lands in Phase 2). Writes stay **off the DSP hot
+  path** — on the control edge / a dedicated thread — so a disk hiccup can't cause
+  an audio underrun. (The `SuggestUdevRule` RPC for the device-rename problem is a
+  Phase-2 addition once real `DeviceId`s exist.)
+
+**Contracts locked early** (expensive to retrofit): the lossless-frames /
+lossy-telemetry backpressure policy; local authz (UDS socket-mode + `SO_PEERCRED`,
+mTLS hook stubbed for routable binds); and the proto versioning policy
+(`proto/VERSIONING.md`).
+
+**Exit criterion (met).** Over a real UDS, a gRPC client can configure a channel,
+subscribe to events and receive a state snapshot, and drive a fake "transmit"
+round-trip end-to-end — with no audio devices or DSP present.
+
+## Phase 2 — Basic operational components: audio devices & PTT
+
+**Status: in planning.**
+
+**Goal.** Make the program talk to real hardware reliably — the half of goal #3
+that has nothing to do with DSP. Everything is driven over the Phase-1 gRPC
+surface, still with no mode attached.
+
+### Audio subsystem
+
+Lift Graywolf's hardened bits — defensive I16 format selection,
+stream-rebuild-with-backoff, submitted/drained TX watermarks, ALSA
+canonicalization pure-functions, `probe_capture`, in-use device caching
+(all in `audio/soundcard.rs`). Fixes:
+
+- **A real `trait AudioBackend`** (cpal / file / stdin / SDR / JACK pluggable)
+  replacing Graywolf's ad-hoc spawn-functions dispatched by a `match`
+  (`modem/mod.rs:449-480`). The file/stdin backends are also the deterministic
+  inputs the Testing corpus replays through.
+- **A unified cross-platform `DeviceId`** collapsing Graywolf's two diverging
+  enumeration paths (cpal/ALSA `list_audio.rs` vs nusb `list_usb.rs`) and their
+  per-OS identity mismatch into one stable identity derived from durable
+  attributes (USB `idVendor:idProduct` + serial, ALSA stable card *name* not
+  index, USB port-topology as fallback; prefer `/dev/serial/by-id/` symlinks).
+  This `DeviceId` is what persistence (Phase 1) keys on, and it powers the
+  `SuggestUdevRule(device_id)` RPC (returns ready-to-install udev rule text for a
+  stable `/dev/omnimodem/<label>` symlink; the modem only *suggests*, never writes
+  `/etc/udev`).
+- **Resampling** so a source rate need not match the demod rate. Crucially, this
+  must **retain** Graywolf's ALSA `plughw` format/rate hardening
+  (`audio/mod.rs`, `soundcard.rs`) — the 48 kHz ceiling exists to avoid ALSA's
+  synthetic-rate `plughw` trap that desyncs bit timing. Resampling is additive;
+  it does not replace that defensive selection.
+- **Capture fan-out** — one capture stream can feed several demods (1200 + 9600
+  on the same audio, or SDR slices). Opt-in; 1:1 is the default. (Graywolf's
+  `extra_demods` already proves this works.)
+
+### PTT subsystem
+
+Lift the whole PTT subsystem — `trait PttDriver` + factory + `PortRegistry`
+(multi-handle) + per-OS drivers + `drive_tx_cycle` no-sleep sequencing +
+unkey-on-Drop (`tx/ptt.rs`, `modem/tx_worker.rs`). Fixes:
+
+- **Structured `PttError` enum** replacing the stringly-typed `Result<(),
+  String>` errors (`ptt.rs:184-189`), so callers can distinguish
+  device-went-away vs permission-denied vs busy.
+- **Hotplug eviction for serial / CM108.** `PortRegistry` currently caches serial
+  fds by path string and never evicts them (`ptt.rs:484-487` documents this as a
+  known limitation); GPIO has `LineGone` eviction, serial does not. Since
+  "rock-solid PTT" is a primary goal, the `DeviceId` work must **evict and reopen
+  by `DeviceId` on device disappearance/hotplug**, not only resolve at startup.
+- **RX/TX interlock per channel.** When a channel keys PTT on a shared device, RX
+  decode on that device must be muted/skipped to avoid decoding our own
+  transmission or feedback. Graywolf handles this implicitly on its single
+  thread; the per-channel-thread model must make it explicit.
+
+**Exit criterion.** Detect a device, open capture/playback, and key/unkey a real
+radio — all over the Phase-1 gRPC surface, still with no mode attached.
+
+## Phase 3 — Mode scaffolding & the building-blocks toolkit
 
 The deliberate, carefully-considered phase, because this is what makes
-"best-of-breed for everything" tractable. Build the **mode framework** (the
-`Demodulator` / `Modulator` traits, `ModeCaps`, the parametric `ModeConfig`, and
-the one-module **mode registry**) with **both** demod shapes first-class — the
-streaming `feed(samples) -> Vec<Frame>` shape and the block/windowed
-multi-pass shape — and make the **soft-information (LLR) contract the spine** of
-the pipeline so FEC-heavy modes are best-of-class rather than an afterthought.
-Implement the pipeline as **composable, individually-testable batteries**
-(`Batteries catalog`) and the `ParallelDemodulator<D>` ensemble pattern. Build
-out only the battery groups the Phase-4 modes need (front-end DSP, sync, the
-streaming/packet stages, plus the soft-LLR + LDPC-BP/OSD + Costas-array stack
-that FT8 requires); the convolutional/Viterbi/FHT and OFDM/vocoder/ARQ groups
-land in Phase 5 with the modes that need them. This phase ships **no end-user
-mode** but should be validated by the conformance harness against extracted
-reference stages. Spend the design effort here — a weak stage abstraction taxes
-every mode forever.
+"best-of-breed for everything" tractable.
 
-### Phase 4 — First modes (popular, diverse coverage)
+**Goal.** Build the **mode framework** (the `Demodulator` / `Modulator` traits,
+`ModeCaps`, the parametric `ModeConfig`, and the one-module **mode registry**) with
+**both** demod shapes first-class — the streaming `feed(samples) -> Vec<Frame>`
+shape and the block/windowed multi-pass shape — and make the **soft-LLR contract
+the spine** of the pipeline so FEC-heavy modes are best-of-class rather than an
+afterthought. Implement the pipeline as **composable, individually-testable
+building blocks** (Building-blocks catalog) and the `ParallelDemodulator<D>`
+ensemble pattern.
 
-Implement a small set chosen to be both popular **and** to exercise every path
-the framework claims to support, so any gap surfaces now rather than at mode #20:
+**Building-block groups introduced now** (only what the Phase-4 modes need):
+catalog group **A** front-end DSP, **B** sync, the streaming/packet **C/D** stages
+(NRZI, the self-sync + frame-reset scramblers, HDLC/FX.25/IL2P, GF(256) RS, the
+dedup window), **plus** the soft-LLR + LDPC-BP/OSD + Costas-array stack that FT8
+requires. The convolutional/Viterbi/FHT and OFDM/vocoder/ARQ groups land in Phase 5
+with the modes that need them.
+
+**Exit criterion.** Ships **no end-user mode**, but is validated by the conformance
+harness against extracted reference stages (e.g. our LDPC/RS/CRC building blocks
+pass known-answer vectors). Spend the design effort here — a weak stage abstraction
+taxes every mode forever.
+
+## Phase 4 — First modes (popular, diverse coverage)
+
+**Goal.** Implement a small set chosen to be both popular **and** to exercise every
+path the framework claims to support, so any gap surfaces now rather than at mode #20:
 
 - **AFSK 1200 (AX.25)** — the streaming/HDLC path and the Graywolf
-  multi-slicer/ensemble "secret sauce"; our baseline and the easiest interop
-  check against Direwolf.
+  multi-slicer/ensemble "secret sauce"; our baseline and the easiest interop check
+  against Direwolf.
 - **FT8** — the block/windowed + soft-LLR + LDPC + Costas-array + time-slot-TX
   path. The most demanding first mode, and the one that proves the FEC spine.
 - **CW** — lightweight, exercises the Morse/detector + envelope path and gives an
   easy operator-visible win.
 - **Good-fit additions:** **RTTY** (2-FSK + Baudot) and **PSK31** (differential
-  PSK + Varicode) — both popular, cheap on top of the Phase-3 batteries, and they
-  exercise the FSK-slicer and PSK-demapper stages that later modes reuse.
+  PSK + Varicode) — both popular, cheap on top of the Phase-3 building blocks, and
+  they exercise the FSK-slicer and PSK-demapper stages that later modes reuse.
 
-Each mode must pass the conformance harness (below) before it is considered done.
+This phase introduces the **TX model** and **time synchronization**, because the
+first modes are the first things that actually transmit:
 
-### Phase 5 — Breadth, then integration & safety
+- **TX model.** Cooperative queue + optional exclusive lease: TX frames from any
+  client queue on the channel's TX worker and serialize on-air; sessions that can't
+  tolerate interleaving (contest/Winlink) take an **optional exclusive TX lease**.
+  **Per-channel TX worker** (improvement over Graywolf's single global TX worker in
+  `tx_worker.rs`, which needlessly serializes TX across independent radios) — but
+  two channels sharing one physical rig must still serialize via the shared PTT
+  registry (concurrency is per-rig, not per-channel). **Time-slot-aligned
+  scheduling** for windowed modes: transmit precisely on the next even/odd slot
+  boundary (FT8's 15 s grid), not "as soon as queued." (The exclusive lease itself
+  can slip to Phase 5; the cooperative queue + slot scheduling are needed here.)
+- **Time synchronization.** WSJT-X-family modes require an accurate system clock.
+  Omnimodem depends on the host clock being disciplined (NTP/PTP) and **surfaces
+  clock offset as a metric** so operators can see when decode failures are a
+  time-sync problem rather than a signal problem.
 
-With the toolkit proven, grow the catalog **incrementally** — the rest of the
-WSJT-X family (FT4/JT65/JT9/WSPR), the fldigi modes (MFSK/Olivia/THOR/Hell), and
-eventually the FreeDV/M17/ARDOP family, pulling in the remaining battery groups
-as each cluster needs them. Fold in the remaining cross-cutting work alongside:
-metrics / Prometheus exporter, clock-offset surfacing, the TX exclusive lease,
-mTLS for routable binds, and the reference CLI/TUI client. (The KISS/AGWPE
-translator stays out-of-core, as separate future work.)
+**Exit criterion.** Each mode passes the conformance harness — its KAT vectors
+pass, cross-decode with the reference works **both** directions, and its
+BER/decode-rate curve meets the committed threshold — before it is considered done.
 
-### Conformance & decode-performance testing framework
+## Phase 5 — Breadth, then integration & safety
 
-A first-class requirement, not an afterthought, and the mechanism that makes the
-"as-good-or-better-than-the-reference" claim *measurable*. It is built early
-(usable in Phase 3) and is the gate every mode passes in Phase 4+. Components:
+**Goal.** With the toolkit proven, grow the catalog **incrementally** — the rest of
+the WSJT-X family (FT4/JT65/JT9/WSPR), the fldigi modes (MFSK/Olivia/THOR/Hell), and
+eventually the FreeDV/M17/ARDOP family, pulling in the remaining building-block
+groups (convolutional/Viterbi/FHT/interleavers; OFDM/vocoder/ARQ) as each cluster
+needs them.
+
+Fold in the remaining cross-cutting work alongside:
+
+- **Metrics & observability.** Per-channel metrics over gRPC plus an optional
+  **Prometheus exporter**: SNR, dBFS level, DCD, good/bad-FCS counts, PTT state,
+  duty cycle, plus which ensemble member/slicer decoded each frame, AFC/frequency
+  offset, audio over/underrun & clip counts, and clock offset. (The lossy-telemetry
+  event class exists from Phase 1; per-mode metric *content* grows with the modes.)
+- **TX exclusive lease**, **mTLS for routable binds**, and the **reference CLI/TUI
+  client**.
+- **KISS/AGWPE compatibility** stays **out of the core**: a separate external
+  KISS↔gRPC translator process (future work), so existing TNC apps work without
+  polluting the core.
+
+---
+
+# Cross-cutting
+
+## Conformance, performance & robustness testing
+
+For a modem, "good test coverage" is not a line-percentage target — the bar is
+**provable correctness on the air**, and a measurable "as-good-or-better-than-the-
+reference" claim. The harness is a **first-class requirement built early** (usable
+in Phase 3) and is the **gate every mode passes in Phase 4+**. The architecture is
+shaped to make it cheap: the pipeline-stage model makes every stage independently
+testable; the soft-LLR contract lets a decoder be tested in isolation; the file
+`AudioBackend` (Phase 2) replays the corpus deterministically; `trait
+AudioBackend` / `trait PttDriver` let the whole RX/TX path run in CI with **no
+hardware**.
+
+### Layer 1 — Conformance (bit-exact to the published standard)
+
+- **Known-answer tests against published vectors** for every coding block: CRCs
+  (CRC-16/X.25, CRC-14 `0x6757`, CRC-24, M17 `0x5935`), Reed-Solomon, LDPC, Golay,
+  Viterbi, the scramblers, NRZI, Gray, Varicode/Baudot/CCIR-476, and the FT8 77-bit
+  packer + callsign hashing — checked against vectors from the standards and the
+  reference codebases (`ft8_lib`, `libm17`, Direwolf, codec2).
+- **Cross-decode interop — the decisive test.** Modulate with omnimodem → decode
+  with the reference, *and* the reverse, both directions: our FT8 TX into WSJT-X
+  `jt9`; WSJT-X `ft8sim`/`ft8code` output into our decoder; our AX.25 frames through
+  Direwolf `atest`; Direwolf `gen_packets` into our demod; M17 against `libm17`.
+  Passing both directions *is* the definition of "doing what we say."
+- **Modulator golden snapshots.** Modulate a fixed message and diff the symbol
+  stream / waveform against a stored golden vector (`insta`-style), so any change
+  that alters on-air output is caught in review.
+
+### Layer 2 — Performance (as-good-or-better, quantified)
+
+- **BER / frame-decode-rate vs SNR curves.** Per mode, sweep Eb/N0 (or SNR in a
+  2500 Hz reference BW) with a **seeded** AWGN source, measure bit-error / decode
+  rate, and plot it against the **reference-implementation oracle's** curve on the
+  same inputs. The completeness bar: **equal or better at every SNR point**;
+  regressions fail CI. This mirrors how WSJT-X (`ft8sim`/`wsprsim`), codec2
+  (OFDM/LDPC BER tooling), and Direwolf (WA8LMF TEST CD via `atest`) validate
+  themselves.
+- **Channel simulators, not just AWGN.** These modes are built for fading channels,
+  so AWGN-only testing overstates performance. Ship deterministic, seedable
+  fixtures: Watterson HF fading (CCIR good/moderate/poor), multipath, frequency
+  offset + drift, fractional-symbol timing offset, and impulse noise.
+
+### Layer 3 — Robustness (won't fall over)
+
+- **Property-based tests** (`proptest`): round-trip invariants over randomized
+  inputs/parameters — `descramble∘scramble = id`, `decode∘encode = id`, FEC corrects
+  ≤ t errors and detects > t, interleaver/NRZI/Gray round-trip.
+- **Fuzzing** (`cargo-fuzz`/`arbitrary`) of every parser/framer (HDLC, IL2P, FX.25,
+  message decoders) and the gRPC surface: malformed input must never panic,
+  over-read, or wedge the core — only reject cleanly.
+- **Error-path & hardware-failure tests** via mock backends: audio stream-rebuild/
+  backoff, TX watermark draining, unkey-on-Drop, serial/CM108 hotplug eviction, the
+  `PttError` branches — all without real hardware.
+- **gRPC contract tests:** request validation + acks; the backpressure policy (a
+  deliberately slow subscriber drops telemetry but **never** loses a decoded frame);
+  state-snapshot replay on subscribe; UDS peer-cred authz.
+
+### Infrastructure & CI
 
 - **Signal corpus + record/replay.** A version-controlled corpus of known-good
   recordings (FLAC) — real off-air captures plus synthetic signals generated at
   controlled SNRs — replayed deterministically through the file `AudioBackend`.
 - **Reference-implementation oracles.** Wrap trusted existing decoders/encoders —
   WSJT-X (`jt9`, `ft8code`/`ft8sim`), fldigi, Direwolf (`atest`/`gen_packets`),
-  Codec2/FreeDV — and run them over the same corpus to establish the baseline
-  each omnimodem mode must meet or beat.
-- **Decode-rate / BER-vs-SNR curves.** Sweep SNR over a synthetic corpus and plot
-  omnimodem's decode rate against the reference oracle's. The completeness bar:
-  **equal or better at every SNR point**; regressions fail CI.
-- **Round-trip interop.** Encode with omnimodem → decode with the reference (and
-  the reverse) to prove on-air compatibility, not just self-consistency.
-- **CI regression gate.** The harness runs in CI over the corpus so a DSP change
-  that quietly degrades a mode is caught immediately — the modern evolution of
-  the `record/replay + regression harness` already listed under *Other features*.
+  Codec2/FreeDV — and run them over the same corpus to establish the baseline each
+  omnimodem mode must meet or beat.
+- **Real-time-path guards:** the sample loop is benchmarked (`criterion`; Graywolf
+  has `demod_bench`) and asserted allocation-free/bounded — on a real-time modem a
+  perf regression *is* a correctness bug (underruns drop frames).
+- **Metrics accuracy:** feed a calibrated known-SNR signal and assert reported
+  SNR/AFC-offset match within tolerance — prove the telemetry is true, not merely
+  present.
+- **Coverage measured** (`cargo-llvm-cov`) with a high bar on the DSP/FEC/framing
+  crates specifically, treated as necessary-but-not-sufficient — Layers 1–2 are the
+  real proof.
+- **CI tiering:** fast unit / round-trip / KAT-vector tests on every PR; the slow
+  BER sweeps, channel-sim runs, fuzz batches, and reference-binary interop + corpus
+  jobs run nightly (or behind a label), since they need the reference toolchains
+  installed and minutes of CPU.
+
+**Definition of done for a mode:** its conformance vectors pass, cross-decode with
+the reference works **both** directions, and its BER/decode-rate curve meets the
+committed threshold (equal-or-better at every SNR point). Until then the mode is
+not "done," regardless of a happy-path loopback demo.
+
+## Resolved decisions
+
+1. **Language: Rust.** (Maximizes Graywolf reuse.)
+2. **Persistence: SQLite**, keyed on stable `DeviceId`, with `SuggestUdevRule`
+   for the device-rename problem.
+3. **Build order:** inside-out, per the Delivery plan — (1) program structure +
+   gRPC control plane; (2) audio + PTT; (3) mode framework + building-blocks
+   toolkit; (4) first modes (1200 AFSK, FT8, CW, RTTY, PSK31); (5) breadth +
+   integration.
+4. **Multi-client TX:** cooperative queue + optional exclusive lease.
+5. **KISS/AGWPE:** external translator, not in the core (future work).
+6. **Terminology:** the reusable components are **building blocks** (not
+   "batteries").
+
+## Open questions & follow-ons
+
+- **Phase-1 plan / code touch-ups (follow-on, low priority).** The Phase-1 plan and
+  its scope notes still say "batteries toolkit"; reword to "building blocks" to
+  match this design. The plan otherwise matches the reorganized Phase 1 above
+  (stub core, locked contracts, the met exit criterion) and needs no structural
+  change. The design's Phase headings are kept verbatim so the plan's
+  cross-references stay valid.
+- **TX exclusive lease timing.** Listed in Phase 4 (TX model) but can slip to
+  Phase 5 if the first modes don't need contention control; the cooperative queue +
+  slot scheduling are the Phase-4 essentials.
+- **Constants to confirm at implementation time** (not from secondary docs): exact
+  LDPC min-sum scaling, AP LLR seeding magnitudes, the FT8 sync-metric threshold,
+  and the IL2P `set_field` bit map.
