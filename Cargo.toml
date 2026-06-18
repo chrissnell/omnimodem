@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/omnimodemd"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/chrissnell/omnimodem"
+
+[workspace.dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+async-stream = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+libc = "0.2"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tonic-build = "0.12"
