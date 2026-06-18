@@ -16,7 +16,7 @@ This plan covers **only Phase 1** from `docs/design/2026-06-17-omnimodem-design.
 
 - Real audio backends, `DeviceId` resolution, resampling, capture fan-out (Phase 2).
 - Real PTT drivers and hotplug eviction (Phase 2).
-- The DSP/FEC batteries toolkit and mode framework (Phase 3+).
+- The DSP/FEC building-blocks toolkit and mode framework (Phase 3+).
 
 Everything the core does is a stub: channels carry a placeholder `mode` string, "transmit" is simulated, and the device identity is a single hard-coded `DeviceId::placeholder()`. The point of Phase 1 is to lock down the **expensive-to-retrofit** decisions — the async/sync boundary, the backpressure policy, local authz, the proto versioning policy, and the persistence keying — so later phases plug into a stable spine.
 

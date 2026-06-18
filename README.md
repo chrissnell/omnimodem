@@ -1,6 +1,6 @@
 # omnimodem
 
-A gRPC-driven, batteries-included multi-mode software modem.
+A gRPC-driven, building-block-based multi-mode software modem.
 
 omnimodem runs multiple amateur-radio modes simultaneously from a single binary,
 each bound to its own audio interface and PTT, and is operated entirely over a
