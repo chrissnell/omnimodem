@@ -437,6 +437,92 @@ state, good/bad-FCS counts, PTT state, duty cycle. Additional high-value metrics
 - **Audio over/underrun and clip counts.**
 - **Clock offset** (for WSJT-X modes; see Time synchronization).
 
+## Testing & verification (proving the modem does what it says)
+
+For a modem, "good test coverage" is not a line-percentage target — the bar is
+**provable correctness on the air**. The strategy is three layers of proof plus
+engineering hygiene, and the architecture is deliberately shaped to make each
+layer cheap: the pipeline-stage model makes every stage independently testable;
+the soft-LLR contract lets a decoder be tested in isolation from any front-end;
+`trait AudioBackend` / `trait PttDriver` let the whole RX/TX path run in CI
+against file/loopback/mock backends with **no hardware**; and record/replay to
+FLAC gives deterministic, re-runnable real-world signals.
+
+### Layer 1 — Conformance (bit-exact to the published standard)
+
+Proves interoperability, not just self-consistency.
+
+- **Known-answer tests against published vectors** for every coding block: CRCs
+  (CRC-16/X.25, CRC-14 `0x6757`, CRC-24, M17 CRC-16/`0x5935`), Reed-Solomon, LDPC,
+  Golay, Viterbi, the scramblers, NRZI, Gray, Varicode/Baudot/CCIR-476, and the
+  FT8 77-bit packer + callsign hashing — checked against vectors from the standards
+  and the reference codebases (`ft8_lib`, `libm17`, Direwolf, codec2).
+- **Cross-decode interop — the decisive test.** Modulate with omnimodem → decode
+  with the reference software, *and* the reverse, in both directions: our FT8 TX
+  into WSJT-X `jt9`; WSJT-X `ft8sim` output into our decoder; our AX.25 frames
+  through Direwolf `atest`; Direwolf `gen_packets` into our demod; M17 against
+  `libm17`. Passing both directions *is* the definition of "doing what we say."
+- **Modulator golden snapshots.** Modulate a fixed message and diff the symbol
+  stream / waveform against a stored golden vector (`insta`-style) so any change
+  that alters on-air output is caught in review.
+
+### Layer 2 — Performance (as-good-or-better, quantified)
+
+Proves the best-of-class-reception claim with numbers, not adjectives.
+
+- **BER / frame-decode-rate vs SNR curves.** Per mode, sweep Eb/N0 (or SNR in a
+  2500 Hz reference BW) with a **seeded** AWGN source, measure bit-error / decode
+  rate, assert the curve meets a committed threshold, **and compare against the
+  reference implementation's curve on the same inputs** — CI fails if we regress or
+  fall behind. This mirrors how WSJT-X (`ft8sim`/`wsprsim`), codec2 (OFDM/LDPC BER
+  tooling), and Direwolf (WA8LMF TEST CD via `atest`) validate themselves; we adopt
+  their method and gate on it.
+- **Channel simulators, not just AWGN.** These modes are built for fading channels,
+  so AWGN-only testing overstates performance. Ship deterministic, seedable
+  fixtures: Watterson HF fading (CCIR good/moderate/poor), multipath, frequency
+  offset + drift, fractional-symbol timing offset, and impulse noise.
+- **Reference-corpus regression harness** (cross-referenced from Mode framework §F
+  and Other features): golden recordings — WA8LMF AFSK CD (where Graywolf already
+  beats Direwolf), WSJT-X / fldigi sample files — with known-good decode counts; CI
+  asserts decode count ≥ reference and fails on regression. This is the headline
+  "as good or better" proof.
+
+### Layer 3 — Robustness (won't fall over)
+
+- **Property-based tests** (`proptest`): round-trip invariants over randomized
+  inputs/parameters — `descramble∘scramble = id`, `decode∘encode = id`, FEC corrects
+  ≤ t errors and detects > t, interleaver/NRZI/Gray round-trip.
+- **Fuzzing** (`cargo-fuzz`/`arbitrary`) of every parser/framer (HDLC, IL2P, FX.25,
+  message decoders) and the gRPC surface: malformed input must never panic, over-read,
+  or wedge the core — only reject cleanly.
+- **Error-path & hardware-failure tests** via mock backends: audio stream-rebuild/
+  backoff, TX watermark draining, unkey-on-Drop, serial/CM108 hotplug eviction, the
+  `PttError` branches — all without real hardware.
+- **gRPC contract tests:** request validation + acks; the backpressure policy (a
+  deliberately slow subscriber drops telemetry but **never** loses a decoded frame);
+  state-snapshot replay on subscribe; UDS peer-cred authz.
+
+### Hygiene & CI
+
+- **Real-time-path guards:** the sample loop is benchmarked (`criterion`; Graywolf
+  has `demod_bench`) and asserted allocation-free/bounded — on a real-time modem a
+  perf regression *is* a correctness bug (underruns drop frames).
+- **Metrics accuracy:** feed a calibrated known-SNR signal and assert reported
+  SNR/AFC-offset match within tolerance — prove the telemetry is true, not merely
+  present.
+- **Coverage measured** (`cargo-llvm-cov`) with a high bar on the DSP/FEC/framing
+  crates specifically, treated as necessary-but-not-sufficient — Layers 1–2 are the
+  real proof.
+- **CI tiering:** fast unit / round-trip / conformance-vector tests on every PR; the
+  slow BER sweeps, channel-sim runs, fuzz batches, and reference-binary interop +
+  corpus jobs run nightly (or behind a label), since they need the reference
+  toolchains installed and minutes of CPU.
+
+**Definition of done for a mode:** its conformance vectors pass, cross-decode with
+the reference works **both** directions, and its BER/decode-rate curve meets the
+committed threshold. Until then the mode is not "done," regardless of a happy-path
+loopback demo.
+
 ## Other features
 
 - **Record/replay to FLAC** plus a **decode-rate regression harness** over a known
@@ -500,7 +586,10 @@ Graywolf.
 1. **Foundations + vertical slice** — workspace, lift DSP/HDLC, mode framework
    (streaming + block traits, soft-decision plumbing), 1200 AFSK with the
    ensemble end-to-end over gRPC + cpal + PTT. Prove gRPC backpressure and local
-   authz here.
+   authz here. **Stand up the test harness in this phase, not later:** the seeded
+   AWGN/channel simulators, the BER/decode-rate runner, conformance-vector tests,
+   and the reference-binary interop + corpus jobs (see Testing & verification).
+   Every mode added thereafter ships with its Layer-1/2 gates or it isn't "done."
 2. **Audio/device hardening** — `AudioBackend`, unified `DeviceId`, resampling,
    capture fan-out, hotplug + serial-PTT eviction.
 3. **Breadth + observability** — 9600 / PSK31 / RTTY → WSJT-X family (exercising
