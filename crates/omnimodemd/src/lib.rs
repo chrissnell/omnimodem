@@ -13,3 +13,5 @@ pub mod ids;
 pub mod persist;
 
 pub mod supervisor;
+
+pub mod core;
