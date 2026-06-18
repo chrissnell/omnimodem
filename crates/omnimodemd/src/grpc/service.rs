@@ -81,18 +81,12 @@ impl ModemControl for ControlService {
         Ok(Response::new(proto::TransmitResponse { transmit_id: transmit_id.0 }))
     }
 
-    // SubscribeEvents is implemented in subscribe.rs as part of this same impl
-    // block via an `include!`-free split: see Task 9, which replaces this file's
-    // impl with the full trait. (Until Task 9, the streaming method is stubbed
-    // below so the trait is satisfied and unary tests can run.)
-    type SubscribeEventsStream = std::pin::Pin<
-        Box<dyn tokio_stream::Stream<Item = Result<proto::Event, Status>> + Send + 'static>,
-    >;
+    type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(
         &self,
-        _request: Request<proto::SubscribeRequest>,
+        request: Request<proto::SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
-        Err(Status::unimplemented("SubscribeEvents lands in Task 9"))
+        crate::grpc::subscribe::subscribe(self, request).await
     }
 }
