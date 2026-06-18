@@ -49,3 +49,17 @@ pub async fn serve_uds_no_authz(
         .await?;
     Ok(())
 }
+
+/// Spawn the control plane over an AUTHORIZED UDS (SO_PEERCRED enforced).
+/// Used by the e2e exit-criterion test and by anything that wants the real
+/// production transport in-process.
+pub async fn serve_uds_authz_for_test(
+    db_path: &Path,
+    sock_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = persist::Store::open(db_path)?;
+    let supervisor = supervisor::Supervisor::new(store)?;
+    let (core, _join) = core::spawn(supervisor);
+    let svc = grpc::ControlService::new(core);
+    authz::serve_uds(svc, sock_path).await
+}
