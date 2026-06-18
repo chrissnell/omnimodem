@@ -5,7 +5,7 @@
 //! (levels, status, transmit notifications) is LOSSY — only the latest value
 //! matters, so dropping intermediates under lag is fine.
 
-use crate::ids::{ChannelId, TransmitId};
+use crate::ids::{ChannelId, DeviceId, TransmitId};
 
 /// LOSSLESS class. Carried on a dedicated broadcast; a subscriber that lags is
 /// disconnected rather than allowed to miss a frame.
@@ -26,4 +26,7 @@ pub enum TelemetryEvent {
     TransmitComplete { channel: ChannelId, transmit_id: TransmitId },
     AudioLevel { channel: ChannelId, dbfs: f32 },
     Status { channel: ChannelId, tx_frames: u64 },
+    DeviceArrived { device_id: DeviceId, label: String },
+    DeviceDeparted { device_id: DeviceId },
+    PttKeyed { channel: ChannelId, keyed: bool },
 }

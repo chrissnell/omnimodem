@@ -8,6 +8,10 @@ pub enum CoreError {
     UnknownChannel(ChannelId),
     #[error("persistence error: {0}")]
     Persist(String),
+    #[error("audio error: {0}")]
+    Audio(#[from] crate::audio::AudioError),
+    #[error("ptt error: {0}")]
+    Ptt(#[from] crate::ptt::PttError),
     #[error("core shutting down")]
     Closed,
 }

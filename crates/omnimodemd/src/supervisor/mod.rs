@@ -1,14 +1,16 @@
-//! The Supervisor: owns live channels, the device cache, the PTT registry, and
-//! the persistence store. Evolution of Graywolf's `struct Modem` state role.
+//! The Supervisor: owns live channels, the device cache, the PTT registry, the
+//! RX/TX interlock, and the persistence store. Evolution of Graywolf's
+//! `struct Modem` state role.
 
 pub mod channel;
-pub mod ptt;
 
-use crate::ids::ChannelId;
-use crate::persist::Store;
-use channel::{ChannelConfig, ChannelState};
+use crate::audio::MAX_SAMPLE_RATE;
 use crate::device::DeviceCache;
-use ptt::PttRegistry;
+use crate::ids::{ChannelId, DeviceId};
+use crate::persist::Store;
+use crate::ptt::interlock::RxTxInterlock;
+use crate::ptt::registry::{DriverOpener, PortRegistry, PttConfig};
+use channel::{ChannelConfig, ChannelState};
 use std::collections::BTreeMap;
 
 /// An immutable point-in-time view of modem state, used for snapshot-on-subscribe.
@@ -22,13 +24,15 @@ pub struct ModemSnapshot {
 pub struct Supervisor {
     channels: BTreeMap<ChannelId, ChannelState>,
     devices: DeviceCache,
-    ptt: PttRegistry,
+    ptt: PortRegistry,
+    interlock: RxTxInterlock,
     store: Store,
 }
 
 impl Supervisor {
-    /// Build a Supervisor, restoring any persisted channels from `store`.
-    pub fn new(store: Store) -> Result<Self, crate::persist::StoreError> {
+    /// Build a Supervisor, restoring any persisted channels from `store`. The
+    /// `opener` builds real PTT drivers (production) or test doubles.
+    pub fn new(store: Store, opener: Box<dyn DriverOpener>) -> Result<Self, crate::persist::StoreError> {
         let mut channels = BTreeMap::new();
         for cfg in store.load_channels()? {
             channels.insert(cfg.id, ChannelState::new(cfg));
@@ -36,24 +40,29 @@ impl Supervisor {
         Ok(Supervisor {
             channels,
             devices: DeviceCache::new(),
-            ptt: PttRegistry::new(),
+            ptt: PortRegistry::new(opener),
+            interlock: RxTxInterlock::new(),
             store,
         })
     }
 
-    /// Apply a channel configuration: persist it, then update live state.
+    /// Apply a channel configuration: persist it, then update live state. The
+    /// dedicated `configure_audio`/`configure_ptt` set the real bindings; a new
+    /// channel starts on the placeholder device with no PTT.
     pub fn configure_channel(
         &mut self,
         id: ChannelId,
         name: String,
         mode: String,
     ) -> Result<(), crate::persist::StoreError> {
-        let _ = &self.devices; // real binding wired in Task 16
         let cfg = ChannelConfig {
             id,
             name,
             mode,
-            device_id: crate::ids::DeviceId::placeholder(),
+            device_id: DeviceId::placeholder(),
+            sample_rate: MAX_SAMPLE_RATE,
+            fanout: 1,
+            ptt: None,
         };
         self.store.upsert_channel(&cfg)?;
         self.channels
@@ -63,12 +72,53 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Bind a channel's audio to a device and persist. No-op if the channel is
+    /// unknown (the core guards existence first).
+    pub fn configure_audio(
+        &mut self,
+        id: ChannelId,
+        device_id: DeviceId,
+        sample_rate: u32,
+        fanout: u32,
+    ) -> Result<(), crate::persist::StoreError> {
+        let Some(state) = self.channels.get_mut(&id) else {
+            return Ok(());
+        };
+        state.config.device_id = device_id;
+        state.config.sample_rate = if sample_rate == 0 { MAX_SAMPLE_RATE } else { sample_rate };
+        state.config.fanout = fanout;
+        let cfg = state.config.clone();
+        self.store.upsert_channel(&cfg)
+    }
+
+    /// Bind a channel's PTT and persist. No-op if the channel is unknown.
+    pub fn configure_ptt(
+        &mut self,
+        id: ChannelId,
+        ptt: PttConfig,
+    ) -> Result<(), crate::persist::StoreError> {
+        let Some(state) = self.channels.get_mut(&id) else {
+            return Ok(());
+        };
+        state.config.ptt = Some(ptt);
+        let cfg = state.config.clone();
+        self.store.upsert_channel(&cfg)
+    }
+
     pub fn has_channel(&self, id: ChannelId) -> bool {
         self.channels.contains_key(&id)
     }
 
-    /// Mutable access to the PTT registry (for the transmit simulation).
-    pub fn ptt_mut(&mut self) -> &mut PttRegistry {
+    /// A cloneable handle to the per-rig RX/TX interlock.
+    pub fn interlock(&self) -> RxTxInterlock {
+        self.interlock.clone()
+    }
+
+    pub fn device_cache_mut(&mut self) -> &mut DeviceCache {
+        &mut self.devices
+    }
+
+    pub fn ptt_registry_mut(&mut self) -> &mut PortRegistry {
         &mut self.ptt
     }
 
@@ -87,11 +137,16 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ptt::registry::RealOpener;
+
+    fn supervisor() -> Supervisor {
+        let store = Store::open_in_memory().unwrap();
+        Supervisor::new(store, Box::new(RealOpener)).unwrap()
+    }
 
     #[test]
     fn configure_then_snapshot_reflects_channel() {
-        let store = Store::open_in_memory().unwrap();
-        let mut sup = Supervisor::new(store).unwrap();
+        let mut sup = supervisor();
         sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into())
             .unwrap();
 
@@ -104,8 +159,7 @@ mod tests {
 
     #[test]
     fn reconfigure_updates_in_place() {
-        let store = Store::open_in_memory().unwrap();
-        let mut sup = Supervisor::new(store).unwrap();
+        let mut sup = supervisor();
         sup.configure_channel(ChannelId(0), "first".into(), "none".into())
             .unwrap();
         sup.configure_channel(ChannelId(0), "second".into(), "none".into())
@@ -117,6 +171,33 @@ mod tests {
     }
 
     #[test]
+    fn configure_audio_then_ptt_binds() {
+        let mut sup = supervisor();
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into())
+            .unwrap();
+        sup.configure_audio(
+            ChannelId(0),
+            DeviceId::AlsaCard { card_name: "Device".into() },
+            44_100,
+            1,
+        )
+        .unwrap();
+        sup.configure_ptt(
+            ChannelId(0),
+            PttConfig {
+                device_id: DeviceId::AlsaCard { card_name: "Device".into() },
+                method: crate::ptt::registry::PttMethod::None,
+                invert: false,
+            },
+        )
+        .unwrap();
+
+        let snap = sup.snapshot();
+        assert_eq!(snap.channels[0].sample_rate, 44_100);
+        assert!(snap.channels[0].ptt.is_some());
+    }
+
+    #[test]
     fn new_supervisor_restores_persisted_channels() {
         let store = Store::open_in_memory().unwrap();
         store
@@ -125,9 +206,12 @@ mod tests {
                 name: "restored".into(),
                 mode: "none".into(),
                 device_id: crate::ids::DeviceId::placeholder(),
+                sample_rate: 48_000,
+                fanout: 1,
+                ptt: None,
             })
             .unwrap();
-        let sup = Supervisor::new(store).unwrap();
+        let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();
         assert!(sup.has_channel(ChannelId(3)));
     }
 }

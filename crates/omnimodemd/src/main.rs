@@ -1,10 +1,8 @@
 //! omnimodemd entrypoint: wire the sync core to the authorized gRPC edge.
 
 use omnimodemd::authz::{self, Transport};
-use omnimodemd::core;
 use omnimodemd::grpc::ControlService;
 use omnimodemd::persist::Store;
-use omnimodemd::supervisor::Supervisor;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -30,8 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let store = Store::open(&db_path)?;
-    let supervisor = Supervisor::new(store)?;
-    let (core_handle, _join) = core::spawn(supervisor);
+    let (core_handle, _join) = omnimodemd::production_core(store)?;
     let svc = ControlService::new(core_handle);
 
     tracing::info!(socket = %sock_path.display(), "omnimodemd {} serving", omnimodemd::VERSION);

@@ -25,6 +25,21 @@ service ModemControl {
   // Subscribe to the event stream. The first message is always a snapshot
   // (Event.snapshot) reflecting state at subscription time; live events follow.
   rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
+
+  // Enumerate present audio/PTT-capable devices with their stable DeviceId.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+
+  // Bind a channel's audio to a device (by stable DeviceId) and open streams.
+  rpc ConfigureAudio(ConfigureAudioRequest) returns (ConfigureAudioResponse);
+
+  // Bind a channel's PTT to a device + method.
+  rpc ConfigurePtt(ConfigurePttRequest) returns (ConfigurePttResponse);
+
+  // Manually key/unkey a channel's PTT (operator test; no audio).
+  rpc KeyPtt(KeyPttRequest) returns (KeyPttResponse);
+
+  // Return ready-to-install udev rule text for a device (never writes it).
+  rpc SuggestUdevRule(SuggestUdevRuleRequest) returns (SuggestUdevRuleResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +98,9 @@ message Event {
     RxFrame rx_frame = 5;               // LOSSLESS class
     AudioLevel audio_level = 6;         // LOSSY class
     Status status = 7;                  // LOSSY class
+    DeviceArrived device_arrived = 8;   // LOSSY
+    DeviceDeparted device_departed = 9; // LOSSY
+    PttState ptt_state = 10;            // LOSSY
   }
 }
 
@@ -114,4 +132,83 @@ message AudioLevel {
 message Status {
   uint32 channel = 1;
   uint64 tx_frames = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: devices, audio, PTT
+// ---------------------------------------------------------------------------
+
+message ListDevicesRequest {}
+
+message DeviceInfo {
+  string device_id = 1;   // canonical DeviceId string (see ids.rs)
+  string label = 2;       // operator-facing name
+  bool has_capture = 3;
+  bool has_playback = 4;
+}
+
+message ListDevicesResponse {
+  repeated DeviceInfo devices = 1;
+}
+
+message ConfigureAudioRequest {
+  uint32 channel = 1;
+  string device_id = 2;       // stable DeviceId; config keys on this
+  uint32 sample_rate = 3;     // requested working rate (clamped to 48 kHz)
+  uint32 fanout = 4;          // capture consumers; 0/1 == no fan-out
+}
+
+message ConfigureAudioResponse {
+  uint32 actual_sample_rate = 1;  // rate the stream actually opened at
+}
+
+enum PttMethod {
+  PTT_METHOD_UNSPECIFIED = 0;
+  PTT_METHOD_NONE = 1;
+  PTT_METHOD_VOX = 2;
+  PTT_METHOD_SERIAL_RTS = 3;
+  PTT_METHOD_SERIAL_DTR = 4;
+  PTT_METHOD_CM108 = 5;
+  PTT_METHOD_GPIO = 6;
+}
+
+message ConfigurePttRequest {
+  uint32 channel = 1;
+  string device_id = 2;       // stable DeviceId for the PTT device
+  PttMethod method = 3;
+  string node = 4;            // resolved node / chip path (serial/cm108/gpio)
+  uint32 pin_or_line = 5;     // cm108 GPIO pin (1-8) or gpiochip line offset
+  bool invert = 6;
+}
+
+message ConfigurePttResponse {}
+
+message KeyPttRequest {
+  uint32 channel = 1;
+  bool keyed = 2;             // true=key, false=unkey
+}
+
+message KeyPttResponse {}
+
+message SuggestUdevRuleRequest {
+  string device_id = 1;
+}
+
+message SuggestUdevRuleResponse {
+  string rule = 1;            // udev rule text
+  string instructions = 2;    // where to put it
+}
+
+message DeviceArrived {
+  string device_id = 1;
+  string label = 2;
+}
+
+message DeviceDeparted {
+  string device_id = 1;
+}
+
+message PttState {
+  uint32 channel = 1;
+  bool keyed = 2;
 }
