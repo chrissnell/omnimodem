@@ -57,3 +57,43 @@ pub async fn serve_uds(
         .await?;
     Ok(())
 }
+
+/// Validate a chosen transport before binding. Returns a warning string for
+/// transports that are allowed-but-risky, or an error for disallowed ones.
+pub fn validate_transport(t: &Transport) -> Result<Option<String>, tls::TlsError> {
+    match t {
+        Transport::Uds { .. } => Ok(None),
+        Transport::TcpLoopback { .. } => Ok(Some(
+            "loopback TCP exposes every local user; no per-peer authorization is enforced"
+                .to_string(),
+        )),
+        // Fails closed: routable requires mTLS, unimplemented in Phase 1.
+        Transport::Routable { .. } => {
+            tls::routable_tls_config()?;
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uds_is_clean() {
+        let t = Transport::Uds { path: "/tmp/x.sock".into() };
+        assert_eq!(validate_transport(&t).unwrap(), None);
+    }
+
+    #[test]
+    fn loopback_warns() {
+        let t = Transport::TcpLoopback { addr: "127.0.0.1:9000".parse().unwrap() };
+        assert!(validate_transport(&t).unwrap().is_some());
+    }
+
+    #[test]
+    fn routable_fails_closed() {
+        let t = Transport::Routable { addr: "0.0.0.0:9000".parse().unwrap() };
+        assert!(validate_transport(&t).is_err());
+    }
+}
