@@ -1,0 +1,117 @@
+// Omnimodem control-plane API.
+//
+// Stability: package is versioned (omnimodem.v1). Within a major version,
+// changes are ADDITIVE ONLY — see proto/VERSIONING.md. Field tags are never
+// reused or renumbered.
+
+syntax = "proto3";
+
+package omnimodem.v1;
+
+// Command-and-control plane for the Omnimodem software modem.
+service ModemControl {
+  // Create or update a virtual channel. Idempotent on channel id.
+  rpc ConfigureChannel(ConfigureChannelRequest) returns (ConfigureChannelResponse);
+
+  // Snapshot the current modem state (channels + status).
+  rpc GetState(GetStateRequest) returns (ModemState);
+
+  // Enqueue a frame for transmission on a channel. In Phase 1 this is
+  // simulated: the core acknowledges with a transmit id and emits
+  // TransmitStarted/TransmitComplete events. Returns once the frame is
+  // accepted onto the channel's TX queue, not when it leaves the air.
+  rpc Transmit(TransmitRequest) returns (TransmitResponse);
+
+  // Subscribe to the event stream. The first message is always a snapshot
+  // (Event.snapshot) reflecting state at subscription time; live events follow.
+  rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
+}
+
+// ---------------------------------------------------------------------------
+// Unary request/response
+// ---------------------------------------------------------------------------
+
+message ConfigureChannelRequest {
+  uint32 channel = 1;     // logical channel id; reused id updates in place
+  string name = 2;        // operator-facing label
+  string mode = 3;        // Phase 1 placeholder, e.g. "none"
+}
+
+message ConfigureChannelResponse {
+  uint32 channel = 1;
+}
+
+message GetStateRequest {}
+
+message TransmitRequest {
+  uint32 channel = 1;
+  bytes payload = 2;      // opaque frame bytes; not interpreted in Phase 1
+}
+
+message TransmitResponse {
+  uint64 transmit_id = 1; // monotonically increasing per process
+}
+
+message SubscribeRequest {}
+
+// ---------------------------------------------------------------------------
+// State snapshot
+// ---------------------------------------------------------------------------
+
+message ModemState {
+  repeated ChannelInfo channels = 1;
+}
+
+message ChannelInfo {
+  uint32 channel = 1;
+  string name = 2;
+  string mode = 3;
+  string device_id = 4;   // stable device identity (placeholder in Phase 1)
+  bool running = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Event stream
+// ---------------------------------------------------------------------------
+
+message Event {
+  oneof kind {
+    ModemState snapshot = 1;            // always first on a fresh subscription
+    ChannelConfigured channel_configured = 2;
+    TransmitStarted transmit_started = 3;
+    TransmitComplete transmit_complete = 4;
+    RxFrame rx_frame = 5;               // LOSSLESS class
+    AudioLevel audio_level = 6;         // LOSSY class
+    Status status = 7;                  // LOSSY class
+  }
+}
+
+message ChannelConfigured { uint32 channel = 1; }
+
+message TransmitStarted {
+  uint32 channel = 1;
+  uint64 transmit_id = 2;
+}
+
+message TransmitComplete {
+  uint32 channel = 1;
+  uint64 transmit_id = 2;
+}
+
+// A decoded RX frame. No DSP exists in Phase 1, so this is emitted only by
+// tests/tools; it is defined now to pin the LOSSLESS backpressure contract.
+message RxFrame {
+  uint32 channel = 1;
+  bytes data = 2;
+  uint64 timestamp_ns = 3;
+}
+
+message AudioLevel {
+  uint32 channel = 1;
+  float dbfs = 2;
+}
+
+message Status {
+  uint32 channel = 1;
+  uint64 tx_frames = 2;
+}

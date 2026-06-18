@@ -5,3 +5,5 @@
 
 /// Crate version, surfaced to clients in the gRPC handshake metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod proto;
