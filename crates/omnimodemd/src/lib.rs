@@ -10,7 +10,13 @@ pub mod proto;
 
 pub mod ids;
 
+pub mod audio;
+
 pub mod persist;
+
+pub mod device;
+
+pub mod ptt;
 
 pub mod supervisor;
 

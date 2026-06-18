@@ -2,13 +2,12 @@
 //! the persistence store. Evolution of Graywolf's `struct Modem` state role.
 
 pub mod channel;
-pub mod device;
 pub mod ptt;
 
 use crate::ids::ChannelId;
 use crate::persist::Store;
 use channel::{ChannelConfig, ChannelState};
-use device::DeviceCache;
+use crate::device::DeviceCache;
 use ptt::PttRegistry;
 use std::collections::BTreeMap;
 
@@ -49,11 +48,12 @@ impl Supervisor {
         name: String,
         mode: String,
     ) -> Result<(), crate::persist::StoreError> {
+        let _ = &self.devices; // real binding wired in Task 16
         let cfg = ChannelConfig {
             id,
             name,
             mode,
-            device_id: self.devices.default_device(),
+            device_id: crate::ids::DeviceId::placeholder(),
         };
         self.store.upsert_channel(&cfg)?;
         self.channels
