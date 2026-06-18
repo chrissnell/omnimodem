@@ -160,12 +160,12 @@ jobs:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # NDK 27 matches the floor cargo-ndk expects; build-tools/platform 35
-      # match android/app/build.gradle.kts (compileSdk/targetSdk = 35).
+      # NDK 27 matches the floor cargo-ndk expects; build-tools/platform 36
+      # match android/app/build.gradle.kts (compileSdk/targetSdk/buildTools = 36).
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018'
+          packages: 'platforms;android-36 build-tools;36.0.0 ndk;27.2.12479018'
 
       # --info surfaces the cargo-ndk stdout that Gradle's Exec task would
       # otherwise buffer and discard, so a Rust build failure lands a real

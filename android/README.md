@@ -29,7 +29,7 @@ android/
 ## Prerequisites
 
 - JDK 17
-- Android SDK with **platform 35**, **build-tools 35.0.0**, **NDK 27** (set
+- Android SDK with **platform 36**, **build-tools 36.0.0**, **NDK 27** (set
   `ANDROID_HOME` / `ANDROID_NDK_HOME`).
 - Rust with the Android targets:
   `rustup target add aarch64-linux-android x86_64-linux-android`

@@ -47,6 +47,11 @@ pub fn nusb_scan() -> Vec<UsbInfo> {
         pid: d.product_id(),
         serial: d.serial_number().map(|s| s.to_string()),
         bus: d.bus_number(),
+        // NOTE: `device_address` is the bus enumeration address, which is NOT
+        // stable across replug. It is only a best-effort disambiguator for a
+        // serial-less device; the durable identity is `Usb { serial }` above.
+        // nusb 0.1 exposes no cross-platform physical port-chain. When the
+        // macOS/Windows matchers go live, prefer a stabler handle there.
         ports: d.device_address().to_string(),
     })
     .collect()

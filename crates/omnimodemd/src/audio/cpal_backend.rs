@@ -140,12 +140,16 @@ impl AudioBackend for CpalBackend {
     }
 
     fn open_playback(&self, requested_rate: u32) -> Result<PlaybackHandle, AudioError> {
-        let rate = choose_stream_rate(requested_rate, &output_rate_ranges(&self.device))?;
+        // Enumerate the device's output configs once; derive both the rate
+        // ranges and the format choice from it.
+        let configs = self.output_configs();
+        let ranges: Vec<(u32, u32)> = configs.iter().map(|&(_, lo, hi)| (lo, hi)).collect();
+        let rate = choose_stream_rate(requested_rate, &ranges)?;
         // Pick the output sample format the device actually offers. Cheap USB
         // codecs deliver I16; macOS/Windows usually only offer F32. Defaulting
         // to I16 (rather than building an I16 stream unconditionally) is the fix
         // for the I16-only output that failed to open on those platforms.
-        let out_fmt = pick_sample_format(&self.output_configs(), rate).unwrap_or(SampleFmt::I16);
+        let out_fmt = pick_sample_format(&configs, rate).unwrap_or(SampleFmt::I16);
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         let submitted = Arc::new(AtomicUsize::new(0));
         let drained = Arc::new(AtomicUsize::new(0));
@@ -306,12 +310,6 @@ fn build_output(
     }
 }
 
-fn output_rate_ranges(device: &cpal::Device) -> Vec<(u32, u32)> {
-    device
-        .supported_output_configs()
-        .map(|it| it.map(|r| (r.min_sample_rate(), r.max_sample_rate())).collect())
-        .unwrap_or_default()
-}
 
 /// Enumerate the default host's devices as `(DeviceId, CpalBackend)`. The cpal
 /// device name (an ALSA pcm id on Linux) yields an `AlsaCard` identity; the USB

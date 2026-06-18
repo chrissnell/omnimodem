@@ -157,7 +157,10 @@ fn run_core(sock_path: &str) -> Result<(), String> {
 // the gRPC edge sends — no gRPC client / UDS round-trip to its own daemon. Each
 // call blocks the calling thread on the core's oneshot reply (short ops; for
 // `modemTransmit` the call blocks for the tone's playback duration, so call it
-// off the UI thread). Kotlin signatures (class `com.omnimodem.app.jni.ModemBridge`):
+// off the UI thread). Because the core drains commands serially, these calls are
+// also mutually serializing: a `modemTransmit` in flight blocks a concurrent
+// `modemKeyPtt`/`modemListDevices` caller until it completes. Kotlin signatures
+// (class `com.omnimodem.app.jni.ModemBridge`):
 //
 //   external fun modemListDevices(): String           // "device_id\tlabel" per line
 //   external fun modemConfigure(channel: Int, pttMethod: Int): Int  // actual rate, or -1

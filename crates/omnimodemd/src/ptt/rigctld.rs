@@ -27,16 +27,6 @@ pub fn parse_rprt(line: &str) -> Result<(), PttError> {
     }
 }
 
-/// Parse the bare `t` (get-PTT) reply: a single `0` or `1` line. An error
-/// surfaces as `RPRT <n>` instead, which `parse_rprt` turns into an error.
-pub fn parse_get_ptt(line: &str) -> Result<bool, PttError> {
-    match line.trim() {
-        "1" => Ok(true),
-        "0" => Ok(false),
-        other => parse_rprt(other).map(|_| false),
-    }
-}
-
 /// A rigctld connection. `key`/`unkey` send `T 1`/`T 0`. Unkey is safety-retried
 /// (a stuck-keyed radio is worse than a failed key); Drop force-unkeys.
 pub struct RigctldPtt {
@@ -77,6 +67,10 @@ impl PttDriver for RigctldPtt {
         self.command_rprt("T 1\n")
     }
     fn unkey(&mut self) -> Result<(), PttError> {
+        // Safety-retried: a stuck-keyed rig is worse than a slow unkey. Note this
+        // can block up to ~2s (3 × 150ms sleep + read timeouts) if rigctld wedges;
+        // since the sync core drains commands serially, that stalls command
+        // processing for the duration (PTT still releases on Drop regardless).
         let mut last = self.command_rprt("T 0\n");
         let mut tries = 0;
         while last.is_err() && tries < UNKEY_SAFETY_RETRIES {
@@ -127,12 +121,6 @@ mod parse_tests {
         assert!(matches!(parse_rprt(""), Err(PttError::Io(_))));
     }
 
-    #[test]
-    fn get_ptt_parses_bare_line() {
-        assert_eq!(parse_get_ptt("1").unwrap(), true);
-        assert_eq!(parse_get_ptt("0").unwrap(), false);
-        assert!(parse_get_ptt("RPRT -5").is_err());
-    }
 }
 
 #[cfg(test)]

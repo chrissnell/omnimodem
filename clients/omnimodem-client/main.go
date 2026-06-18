@@ -45,7 +45,9 @@ func main() {
 	toneMs := flag.Uint("tone-ms", 500, "transmit tone duration (ms)")
 	flag.Parse()
 
-	conn, err := grpc.NewClient("unix://"+*socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// "unix:" (no authority) handles both absolute and relative paths; the
+	// "unix://" authority form would mis-parse a relative path as the authority.
+	conn, err := grpc.NewClient("unix:"+*socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("dial %s: %v", *socket, err)
 	}
