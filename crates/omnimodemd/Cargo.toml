@@ -9,6 +9,20 @@ repository.workspace = true
 name = "omnimodemd"
 path = "src/main.rs"
 
+# cdylib so `cargo ndk` can emit libomnimodemd.so for the Android JNI host;
+# rlib so the binary and integration tests keep linking the library normally.
+[lib]
+name = "omnimodemd"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Compile the Android JNI upcall helpers on the host so the PTT/audio dispatch
+# is unit-tested on Linux without an Android target or live JVM. Real JNI calls
+# are replaced by an in-memory recording stub (android::upcall::take_recorded()).
+android-test-stub = []
+
 [dependencies]
 tonic.workspace = true
 prost.workspace = true
@@ -22,15 +36,30 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 cpal.workspace = true
 
+# nusb (USB identity/topology) and hidapi (CM108 HID on macOS/Windows) are both
+# unavailable on Android; gate them off there.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 nusb.workspace = true
+hidapi.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
-hidapi.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpiocdev.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Devices_Communication",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+android_logger = "0.15"
+log = "0.4"
 
 [build-dependencies]
 tonic-build.workspace = true
@@ -39,3 +68,4 @@ tonic-build.workspace = true
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+serial_test = "3"

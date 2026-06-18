@@ -26,6 +26,22 @@ pub mod grpc;
 
 pub mod authz;
 
+// Android JNI bridge. On Android the real module compiles (linking jni /
+// ndk_context). On the host under `android-test-stub`, android/mod.rs is gated
+// out (jni is android-only), so we synthesize a `crate::android` module that
+// pulls in only the self-contained upcall.rs via #[path], keeping the path
+// `crate::android::upcall::...` identical across both configs.
+#[cfg(target_os = "android")]
+pub mod android;
+
+#[cfg(all(not(target_os = "android"), feature = "android-test-stub"))]
+pub mod android {
+    // Inside this inline `android` module, child paths resolve under
+    // `src/android/`, so the file is just `upcall.rs`.
+    #[path = "upcall.rs"]
+    pub mod upcall;
+}
+
 #[cfg(not(test))]
 use std::path::Path;
 
