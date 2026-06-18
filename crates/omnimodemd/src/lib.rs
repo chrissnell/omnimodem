@@ -26,6 +26,7 @@ pub mod grpc;
 
 pub mod authz;
 
+#[cfg(not(test))]
 use std::path::Path;
 
 /// Build the production core: a real PTT registry, the cpal/nusb enumerator,

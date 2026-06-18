@@ -3,25 +3,25 @@
 //! actually plays, with NO mode attached. Deterministic backends (file audio +
 //! MockPtt), so this runs in CI; the manual procedure below runs the identical
 //! RPC sequence against real hardware.
-//!
-//! MANUAL REAL-HARDWARE GATE (run on a host with a sound card + radio):
-//!   1. cargo run -p omnimodemd   (Phase-1 daemon over UDS)
-//!   2. With grpcurl or the reference client:
-//!        a. ListDevices -> confirm the USB sound card appears with a stable
-//!           DeviceId (usb:VVVV:PPPP:serial or alsa:<card>).
-//!        b. ConfigureAudio { channel:0, device_id:<from a>, sample_rate:48000 }
-//!           -> actual_sample_rate is 48000 (or the card's real ceiling).
-//!        c. ConfigurePtt { channel:0, device_id:<ptt adapter>,
-//!           method:SERIAL_RTS|CM108|GPIO, node:/dev/..., invert:false }.
-//!        d. KeyPtt { channel:0, keyed:true } -> radio's TX LED lights; the
-//!           SubscribeEvents stream shows PttState{keyed:true}. KeyPtt{keyed:false}
-//!           drops it.
-//!        e. Transmit a short WAV/PCM buffer -> hear it on a second receiver with
-//!           PTT asserted only for the buffer's duration; PttState toggles around it.
-//!   3. Unplug the PTT adapter mid-session -> a DeviceDeparted event fires and the
-//!      next KeyPtt returns failed_precondition (eviction worked).
-//! Pass criterion: the radio keys, audio plays, PTT releases after drain, and
-//! hotplug eviction fires -- all over gRPC, with no DSP mode attached.
+
+// MANUAL REAL-HARDWARE GATE (run on a host with a sound card + radio):
+//   1. cargo run -p omnimodemd   (Phase-1 daemon over UDS)
+//   2. With grpcurl or the reference client:
+//        a. ListDevices -> confirm the USB sound card appears with a stable
+//           DeviceId (usb:VVVV:PPPP:serial or alsa:<card>).
+//        b. ConfigureAudio { channel:0, device_id:<from a>, sample_rate:48000 }
+//           -> actual_sample_rate is 48000 (or the card's real ceiling).
+//        c. ConfigurePtt { channel:0, device_id:<ptt adapter>,
+//           method:SERIAL_RTS|CM108|GPIO, node:/dev/..., invert:false }.
+//        d. KeyPtt { channel:0, keyed:true } -> radio's TX LED lights; the
+//           SubscribeEvents stream shows PttState{keyed:true}. KeyPtt{keyed:false}
+//           drops it.
+//        e. Transmit a short WAV/PCM buffer -> hear it on a second receiver with
+//           PTT asserted only for the buffer's duration; PttState toggles around it.
+//   3. Unplug the PTT adapter mid-session -> a DeviceDeparted event fires and the
+//      next KeyPtt returns failed_precondition (eviction worked).
+// Pass criterion: the radio keys, audio plays, PTT releases after drain, and
+// hotplug eviction fires -- all over gRPC, with no DSP mode attached.
 
 use omnimodemd::proto::event::Kind;
 use omnimodemd::proto::modem_control_client::ModemControlClient;
