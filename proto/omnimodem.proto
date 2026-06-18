@@ -170,6 +170,8 @@ enum PttMethod {
   PTT_METHOD_SERIAL_DTR = 4;
   PTT_METHOD_CM108 = 5;
   PTT_METHOD_GPIO = 6;
+  PTT_METHOD_RIGCTLD = 7;   // Hamlib rigctld over TCP (host:port in `node`)
+  PTT_METHOD_ANDROID = 8;   // actuated by the Android/Kotlin USB layer (method int in `pin_or_line`)
 }
 
 message ConfigurePttRequest {

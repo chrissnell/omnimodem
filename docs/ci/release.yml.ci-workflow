@@ -1,0 +1,182 @@
+name: Release
+
+# ---------------------------------------------------------------------------
+# Builds the omnimodemd daemon for every supported platform plus the Android
+# APK, and uploads each as a workflow artifact so a human can download and
+# smoke-test a real per-platform build.
+#
+# HOW TO GET THE ARTIFACTS:
+#   1. Open the run: GitHub -> Actions -> "Release" -> click the run.
+#   2. Scroll to the "Artifacts" box at the bottom of the run summary.
+#   3. Download the one for your platform (names below), unzip, run it.
+#
+# Artifact names:
+#   omnimodemd-linux-amd64     (x86_64-unknown-linux-gnu, native)
+#   omnimodemd-linux-arm64     (aarch64-unknown-linux-gnu, cross)
+#   omnimodemd-windows-amd64   (x86_64-pc-windows-msvc, omnimodemd.exe)
+#   omnimodemd-darwin-amd64    (x86_64-apple-darwin)
+#   omnimodemd-darwin-arm64    (aarch64-apple-darwin)
+#   omnimodem-debug-apk        (Android arm64-v8a + x86_64, app-debug.apk)
+#
+# Triggers: any push (so branch pushes produce testable artifacts), v* tags,
+# and manual workflow_dispatch.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon:
+    name: omnimodemd (${{ matrix.platform }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+            platform: linux
+            use_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+            platform: linux
+            use_cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: amd64
+            platform: windows
+            use_cross: false
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: amd64
+            platform: darwin
+            use_cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: arm64
+            platform: darwin
+            use_cross: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Native Linux build links ALSA + libudev directly. The cross build gets
+      # these from Cross.toml's per-target pre-build instead.
+      - name: Install ALSA + udev dev (native Linux)
+        if: matrix.platform == 'linux' && matrix.use_cross == false
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+
+      - name: Install cross (Linux arm64)
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      # Run cross from the workspace root so it mounts the whole repo (build.rs
+      # reads ../../proto/omnimodem.proto, outside the crate dir).
+      - name: Build with cross
+        if: matrix.use_cross
+        env:
+          PKG_CONFIG_ALLOW_CROSS: '1'
+          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: '/usr/lib/aarch64-linux-gnu/pkgconfig'
+          # hidapi's cc-rs compile needs libudev.h; -idirafter (not -I) keeps
+          # arch-specific headers sourced from the cross sysroot and only lets
+          # the arch-independent libudev.h fall through from /usr/include.
+          CFLAGS_aarch64_unknown_linux_gnu: '-idirafter /usr/include'
+        run: cross build --release --target ${{ matrix.target }} --bin omnimodemd
+
+      - name: Build with cargo
+        if: matrix.use_cross == false
+        run: cargo build --release --target ${{ matrix.target }} --bin omnimodemd
+
+      - name: Upload daemon (Unix)
+        if: matrix.platform != 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnimodemd-${{ matrix.platform }}-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/omnimodemd
+          retention-days: 7
+
+      - name: Upload daemon (Windows)
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnimodemd-${{ matrix.platform }}-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/omnimodemd.exe
+          retention-days: 7
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Rust + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version ^3
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # NDK 27 matches the floor cargo-ndk expects; build-tools/platform 36
+      # match android/app/build.gradle.kts (compileSdk/targetSdk/buildTools = 36).
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0 ndk;27.2.12479018'
+
+      # --info surfaces the cargo-ndk stdout that Gradle's Exec task would
+      # otherwise buffer and discard, so a Rust build failure lands a real
+      # error in the log instead of just "Process 'command 'cargo'' ... exit 1".
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --info
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnimodem-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7

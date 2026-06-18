@@ -1,7 +1,7 @@
 //! cpal audio backend. The only audio code that calls cpal. Decision logic
 //! (rate/format) lives in `super::alsa`; identity in `super::enumerate`.
 
-use super::alsa::{choose_stream_rate, pick_input_sample_format, SampleFmt};
+use super::alsa::{choose_stream_rate, pick_sample_format, SampleFmt};
 use super::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use super::{AudioChunk, AudioError, CHUNK_QUEUE_DEPTH};
 use crate::ids::DeviceId;
@@ -54,6 +54,24 @@ impl CpalBackend {
     fn input_rate_ranges(&self) -> Vec<(u32, u32)> {
         self.input_configs().iter().map(|&(_, lo, hi)| (lo, hi)).collect()
     }
+
+    /// Collect the (format, min, max) tuples cpal advertises for output.
+    fn output_configs(&self) -> Vec<(SampleFmt, u32, u32)> {
+        let Ok(ranges) = self.device.supported_output_configs() else {
+            return Vec::new();
+        };
+        ranges
+            .filter_map(|r| {
+                let fmt = match r.sample_format() {
+                    cpal::SampleFormat::I16 => SampleFmt::I16,
+                    cpal::SampleFormat::F32 => SampleFmt::F32,
+                    cpal::SampleFormat::U16 => SampleFmt::U16,
+                    _ => return None,
+                };
+                Some((fmt, r.min_sample_rate(), r.max_sample_rate()))
+            })
+            .collect()
+    }
 }
 
 impl AudioBackend for CpalBackend {
@@ -63,7 +81,7 @@ impl AudioBackend for CpalBackend {
             return Err(AudioError::NoUsableFormat { device: self.id.to_canonical_string() });
         }
         let rate = choose_stream_rate(requested_rate, &self.input_rate_ranges())?;
-        let fmt = pick_input_sample_format(&configs, rate)
+        let fmt = pick_sample_format(&configs, rate)
             .ok_or_else(|| AudioError::NoUsableFormat { device: self.id.to_canonical_string() })?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
@@ -122,7 +140,16 @@ impl AudioBackend for CpalBackend {
     }
 
     fn open_playback(&self, requested_rate: u32) -> Result<PlaybackHandle, AudioError> {
-        let rate = choose_stream_rate(requested_rate, &output_rate_ranges(&self.device))?;
+        // Enumerate the device's output configs once; derive both the rate
+        // ranges and the format choice from it.
+        let configs = self.output_configs();
+        let ranges: Vec<(u32, u32)> = configs.iter().map(|&(_, lo, hi)| (lo, hi)).collect();
+        let rate = choose_stream_rate(requested_rate, &ranges)?;
+        // Pick the output sample format the device actually offers. Cheap USB
+        // codecs deliver I16; macOS/Windows usually only offer F32. Defaulting
+        // to I16 (rather than building an I16 stream unconditionally) is the fix
+        // for the I16-only output that failed to open on those platforms.
+        let out_fmt = pick_sample_format(&configs, rate).unwrap_or(SampleFmt::I16);
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         let submitted = Arc::new(AtomicUsize::new(0));
         let drained = Arc::new(AtomicUsize::new(0));
@@ -156,26 +183,8 @@ impl AudioBackend for CpalBackend {
                     let f2 = failed.clone();
                     let q = qcb.clone();
                     let d = drained_cb.clone();
-                    let stream = device.build_output_stream(
-                        &cfg,
-                        move |out: &mut [i16], _| {
-                            let mut ql = q.lock().unwrap();
-                            for s in out.iter_mut() {
-                                // Count every sample actually pulled from the
-                                // queue (not what's left): this is the drain
-                                // watermark the no-sleep TX cycle waits on.
-                                match ql.pop_front() {
-                                    Some(v) => {
-                                        *s = v;
-                                        d.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    None => *s = 0, // underrun: emit silence
-                                }
-                            }
-                        },
-                        move |_e| f2.store(true, Ordering::Relaxed),
-                        None,
-                    );
+                    let err_fn = move |_e| f2.store(true, Ordering::Relaxed);
+                    let stream = build_output(&device, &cfg, out_fmt, q, d, err_fn);
                     let Ok(stream) = stream else {
                         backoff_wait(&mut backoff, &never_stop);
                         continue;
@@ -253,12 +262,54 @@ fn build_input(
     }
 }
 
-fn output_rate_ranges(device: &cpal::Device) -> Vec<(u32, u32)> {
-    device
-        .supported_output_configs()
-        .map(|it| it.map(|r| (r.min_sample_rate(), r.max_sample_rate())).collect())
-        .unwrap_or_default()
+/// Build a mono output stream in `fmt`, draining the shared i16 `queue` and
+/// converting each sample to the device's format. `drained` counts every
+/// sample actually pulled from the queue — the watermark the no-sleep TX cycle
+/// waits on. Underruns emit silence (uncounted).
+fn build_output(
+    device: &cpal::Device,
+    cfg: &cpal::StreamConfig,
+    fmt: SampleFmt,
+    queue: Arc<Mutex<std::collections::VecDeque<i16>>>,
+    drained: Arc<AtomicUsize>,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    macro_rules! drain {
+        ($out:ident, $conv:expr, $silence:expr) => {{
+            let mut ql = queue.lock().unwrap();
+            for s in $out.iter_mut() {
+                match ql.pop_front() {
+                    Some(v) => {
+                        *s = $conv(v);
+                        drained.fetch_add(1, Ordering::Relaxed);
+                    }
+                    None => *s = $silence,
+                }
+            }
+        }};
+    }
+    match fmt {
+        SampleFmt::I16 => device.build_output_stream(
+            cfg,
+            move |out: &mut [i16], _| drain!(out, |v: i16| v, 0i16),
+            err_fn,
+            None,
+        ),
+        SampleFmt::F32 => device.build_output_stream(
+            cfg,
+            move |out: &mut [f32], _| drain!(out, |v: i16| v as f32 / 32768.0, 0.0f32),
+            err_fn,
+            None,
+        ),
+        SampleFmt::U16 => device.build_output_stream(
+            cfg,
+            move |out: &mut [u16], _| drain!(out, |v: i16| (v as i32 + 32768) as u16, 32768u16),
+            err_fn,
+            None,
+        ),
+    }
 }
+
 
 /// Enumerate the default host's devices as `(DeviceId, CpalBackend)`. The cpal
 /// device name (an ALSA pcm id on Linux) yields an `AlsaCard` identity; the USB

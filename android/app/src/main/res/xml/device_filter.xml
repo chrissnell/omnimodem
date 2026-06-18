@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Bring the app to the foreground when a known USB radio interface is
+         attached. vendor/product IDs match UsbPttAdapter's classify():
+         CP2102N (Digirig serial), CM108 (C-Media HID), AIOC. -->
+    <usb-device vendor-id="4292"  product-id="60000"/>  <!-- 0x10C4 / 0xEA60 CP2102N -->
+    <usb-device vendor-id="3468"  product-id="18"/>     <!-- 0x0D8C / 0x0012 CM108 -->
+    <usb-device vendor-id="4617"  product-id="29576"/>  <!-- 0x1209 / 0x7388 AIOC -->
+</resources>
