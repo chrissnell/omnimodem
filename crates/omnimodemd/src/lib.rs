@@ -18,6 +18,8 @@ pub mod core;
 
 pub mod grpc;
 
+pub mod authz;
+
 use std::path::Path;
 
 /// Spawn the full control plane (core + gRPC) listening on a UDS at `path`.
