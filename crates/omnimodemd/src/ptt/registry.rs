@@ -26,6 +26,12 @@ pub enum PttMethod {
     SerialDtr { node: String },
     Cm108 { node: String, pin: u8 },
     Gpio { chip: String, line: u32 },
+    /// Hamlib `rigctld` over TCP. `addr` is `host:port`. Portable (every OS).
+    Rigctld { addr: String },
+    /// Android: PTT actuated by the Kotlin USB layer; `method` is one of the
+    /// `ptt::android` method-int consts (CP2102N_RTS, CM108_HID, …). Builds a
+    /// driver only on Android (or the host test stub); elsewhere `Unsupported`.
+    Android { method: i32 },
 }
 
 /// Opens a real driver for a config. Injectable so tests substitute MockPtt.
@@ -69,6 +75,14 @@ impl DriverOpener for RealOpener {
     fn open(&self, cfg: &PttConfig) -> Result<Box<dyn PttDriver>, PttError> {
         match &cfg.method {
             PttMethod::None | PttMethod::Vox => Ok(Box::new(NonePtt)),
+
+            // Portable, every OS: Hamlib rigctld over TCP.
+            PttMethod::Rigctld { addr } => {
+                use super::rigctld::RigctldPtt;
+                Ok(Box::new(RigctldPtt::connect(addr)?))
+            }
+
+            // Serial RTS/DTR: unix drives TIOCMSET; Windows uses EscapeCommFunction.
             #[cfg(unix)]
             PttMethod::SerialRts { node } => {
                 use super::serial::{unix::UnixSerialLines, SerialLine, SerialLinePtt};
@@ -81,18 +95,50 @@ impl DriverOpener for RealOpener {
                 let lines = UnixSerialLines::open(node)?;
                 Ok(Box::new(SerialLinePtt::new(lines, SerialLine::Dtr, cfg.invert, node.clone())?))
             }
-            #[cfg(unix)]
+            #[cfg(windows)]
+            PttMethod::SerialRts { node } => {
+                use super::serial::{SerialLine, SerialLinePtt};
+                use super::serial_win::WinSerialLines;
+                let lines = WinSerialLines::open(node)?;
+                Ok(Box::new(SerialLinePtt::new(lines, SerialLine::Rts, cfg.invert, node.clone())?))
+            }
+            #[cfg(windows)]
+            PttMethod::SerialDtr { node } => {
+                use super::serial::{SerialLine, SerialLinePtt};
+                use super::serial_win::WinSerialLines;
+                let lines = WinSerialLines::open(node)?;
+                Ok(Box::new(SerialLinePtt::new(lines, SerialLine::Dtr, cfg.invert, node.clone())?))
+            }
+
+            // CM108 HID: Linux writes /dev/hidrawN directly; macOS+Windows via hidapi.
+            #[cfg(target_os = "linux")]
             PttMethod::Cm108 { node, pin } => {
                 use super::cm108::{unix::UnixCm108Hid, Cm108Ptt};
                 let hid = UnixCm108Hid::open(node)?;
                 Ok(Box::new(Cm108Ptt::new(hid, *pin, cfg.invert)?))
             }
+            #[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+            PttMethod::Cm108 { node, pin } => {
+                use super::cm108::Cm108Ptt;
+                use super::cm108_hidapi::HidApiCm108;
+                let hid = HidApiCm108::open(node)?;
+                Ok(Box::new(Cm108Ptt::new(hid, *pin, cfg.invert)?))
+            }
+
             #[cfg(target_os = "linux")]
             PttMethod::Gpio { chip, line } => {
                 use super::gpio::{linux::LinuxGpiochip, GpioPtt};
                 let gl = LinuxGpiochip::open(chip, *line)?;
                 Ok(Box::new(GpioPtt::new(gl, cfg.invert)?))
             }
+
+            // Android: actuated by the Kotlin USB layer over JNI.
+            #[cfg(any(target_os = "android", feature = "android-test-stub"))]
+            PttMethod::Android { method } => {
+                use super::android::AndroidPtt;
+                Ok(Box::new(AndroidPtt::new(*method)))
+            }
+
             #[allow(unreachable_patterns)]
             _ => Err(PttError::Unsupported),
         }

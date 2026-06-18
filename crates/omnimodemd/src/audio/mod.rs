@@ -5,6 +5,7 @@ pub mod alsa;
 pub mod backend;
 pub mod file;
 pub mod fanout;
+pub mod identity;
 pub mod resample;
 pub mod stdin;
 

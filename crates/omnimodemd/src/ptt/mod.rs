@@ -5,15 +5,24 @@
 pub mod interlock;
 pub mod none;
 pub mod registry;
+pub mod rigctld;
 pub mod sequence;
 pub mod udev;
 
 #[cfg(target_os = "linux")]
 pub mod gpio;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod cm108;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod serial;
+
+#[cfg(windows)]
+pub mod serial_win;
+#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+pub mod cm108_hidapi;
+
+#[cfg(any(target_os = "android", feature = "android-test-stub"))]
+pub mod android;
 
 /// Structured PTT failure. Replaces Graywolf's `Result<(), String>` so callers
 /// can react: `DeviceGone` triggers registry eviction (Task 12); `PermissionDenied`

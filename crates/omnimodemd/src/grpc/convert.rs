@@ -57,6 +57,8 @@ pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig
         Ok(proto::PttMethod::Gpio) => {
             PttMethod::Gpio { chip: req.node.clone(), line: req.pin_or_line }
         }
+        Ok(proto::PttMethod::Rigctld) => PttMethod::Rigctld { addr: req.node.clone() },
+        Ok(proto::PttMethod::Android) => PttMethod::Android { method: req.pin_or_line as i32 },
         Ok(proto::PttMethod::Unspecified) | Err(_) => {
             return Err(Status::invalid_argument("ptt method must be specified"));
         }

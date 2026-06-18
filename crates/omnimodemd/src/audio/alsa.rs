@@ -1,7 +1,7 @@
 //! ALSA canonicalization + defensive rate/format selection. All pure; the cpal
 //! backend (Task 6) feeds these the values cpal reports. Lifted from Graywolf
 //! `audio/soundcard.rs` (`parse_proc_asound_cards`, `choose_stream_rate`,
-//! `pick_input_sample_format`).
+//! `pick_sample_format`).
 
 use super::{AudioError, MAX_SAMPLE_RATE};
 
@@ -83,7 +83,7 @@ pub fn choose_stream_rate(
 
 /// Pick a capture format from those advertised for `rate`. Never trusts cpal's
 /// default; prefers I16. `configs` is a list of (format, min_rate, max_rate).
-pub fn pick_input_sample_format(
+pub fn pick_sample_format(
     configs: &[(SampleFmt, u32, u32)],
     rate: u32,
 ) -> Option<SampleFmt> {
@@ -140,13 +140,13 @@ mod tests {
             (SampleFmt::F32, 8_000, 48_000),
             (SampleFmt::I16, 8_000, 48_000),
         ];
-        assert_eq!(pick_input_sample_format(&configs, 48_000), Some(SampleFmt::I16));
+        assert_eq!(pick_sample_format(&configs, 48_000), Some(SampleFmt::I16));
     }
 
     #[test]
     fn format_respects_rate_window() {
         let configs = [(SampleFmt::I16, 8_000, 16_000), (SampleFmt::F32, 8_000, 48_000)];
         // At 48k only F32 covers the rate.
-        assert_eq!(pick_input_sample_format(&configs, 48_000), Some(SampleFmt::F32));
+        assert_eq!(pick_sample_format(&configs, 48_000), Some(SampleFmt::F32));
     }
 }

@@ -160,6 +160,8 @@ fn encode_ptt(ptt: &Option<PttConfig>) -> (String, String, String, i64, i64) {
         PttMethod::SerialDtr { node } => ("serial_dtr".to_string(), node.clone(), 0),
         PttMethod::Cm108 { node, pin } => ("cm108".to_string(), node.clone(), *pin as i64),
         PttMethod::Gpio { chip, line } => ("gpio".to_string(), chip.clone(), *line as i64),
+        PttMethod::Rigctld { addr } => ("rigctld".to_string(), addr.clone(), 0),
+        PttMethod::Android { method } => ("android".to_string(), String::new(), *method as i64),
     };
     (method, dev, node, pin, p.invert as i64)
 }
@@ -176,6 +178,8 @@ fn decode_ptt(method: &str, dev: &str, node: &str, pin: i64, invert: i64) -> Opt
         "serial_dtr" => PttMethod::SerialDtr { node: node.to_string() },
         "cm108" => PttMethod::Cm108 { node: node.to_string(), pin: pin as u8 },
         "gpio" => PttMethod::Gpio { chip: node.to_string(), line: pin as u32 },
+        "rigctld" => PttMethod::Rigctld { addr: node.to_string() },
+        "android" => PttMethod::Android { method: pin as i32 },
         _ => return None,
     };
     Some(PttConfig {
