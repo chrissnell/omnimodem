@@ -54,6 +54,27 @@ impl Store {
                  ptt_invert    INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // Idempotent migration for a DB created by the Phase-1 build, whose
+        // `channels` table predates the audio/PTT columns. `CREATE TABLE` above
+        // provisions them on a fresh DB; these `ALTER`s add them to an older
+        // table. On a fresh DB each column already exists, so SQLite returns a
+        // "duplicate column name" error, which we treat as "already migrated".
+        for ddl in [
+            "ALTER TABLE channels ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 48000",
+            "ALTER TABLE channels ADD COLUMN fanout INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE channels ADD COLUMN ptt_method TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE channels ADD COLUMN ptt_device_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE channels ADD COLUMN ptt_node TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE channels ADD COLUMN ptt_pin INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE channels ADD COLUMN ptt_invert INTEGER NOT NULL DEFAULT 0",
+        ] {
+            match conn.execute(ddl, []) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                    if msg.contains("duplicate column name") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(Store { conn })
     }
 
@@ -203,6 +224,32 @@ mod tests {
         let loaded = store.load_channels().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "second");
+    }
+
+    #[test]
+    fn migrates_a_phase1_schema_and_backfills_defaults() {
+        // A Phase-1 DB: the original four columns, with one row.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channels (
+                 id        INTEGER PRIMARY KEY,
+                 name      TEXT NOT NULL,
+                 mode      TEXT NOT NULL,
+                 device_id TEXT NOT NULL
+             );
+             INSERT INTO channels (id, name, mode, device_id)
+                 VALUES (7, 'legacy', 'none', 'virtual:virtual:0');",
+        )
+        .unwrap();
+
+        // Opening through the store must add the Phase-2 columns and load.
+        let store = Store::init(conn).unwrap();
+        let loaded = store.load_channels().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, ChannelId(7));
+        assert_eq!(loaded[0].sample_rate, 48_000);
+        assert_eq!(loaded[0].fanout, 1);
+        assert!(loaded[0].ptt.is_none());
     }
 
     #[test]

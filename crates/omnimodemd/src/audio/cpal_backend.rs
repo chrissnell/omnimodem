@@ -161,9 +161,15 @@ impl AudioBackend for CpalBackend {
                         move |out: &mut [i16], _| {
                             let mut ql = q.lock().unwrap();
                             for s in out.iter_mut() {
-                                *s = ql.pop_front().unwrap_or(0);
-                                if !ql.is_empty() {
-                                    d.fetch_add(1, Ordering::Relaxed);
+                                // Count every sample actually pulled from the
+                                // queue (not what's left): this is the drain
+                                // watermark the no-sleep TX cycle waits on.
+                                match ql.pop_front() {
+                                    Some(v) => {
+                                        *s = v;
+                                        d.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    None => *s = 0, // underrun: emit silence
                                 }
                             }
                         },
