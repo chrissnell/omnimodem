@@ -1301,6 +1301,7 @@ dependencies = [
  "libc",
  "nix 0.29.0",
  "nusb",
+ "omnimodem-dsp",
  "prost",
  "rusqlite",
  "tempfile",
