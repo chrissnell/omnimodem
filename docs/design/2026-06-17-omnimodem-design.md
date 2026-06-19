@@ -1,7 +1,10 @@
 # Omnimodem — Design
 
 **Date:** 2026-06-17 · **Last reorganized:** 2026-06-18
-**Status:** Phase 1 implemented & merged; Phase 2 in planning. The document is
+**Status:** Phases 1 & 2 implemented & merged; Phase 3 (mode scaffolding &
+building-blocks toolkit) implemented — the `omnimodem-dsp` crate and the
+daemon's mode framework land with the conformance harness; no end-user mode
+ships yet (deferred to Phase 4). The document is
 organized as **Foundations** (phase-independent contracts and reference) followed
 by a **phase-by-phase delivery plan** (the source of truth for what lands when),
 then cross-cutting testing and decisions.
@@ -424,7 +427,7 @@ in the phase that owns it.
 ## Phase 1 — Program structure & gRPC control plane
 
 **Status: implemented & merged** (plan: `docs/plans/2026-06-18-omnimodem-phase1-grpc-control-plane.md`;
-code under `crates/omnimodemd/`). Phase 2 plan is in progress.
+code under `crates/omnimodemd/`).
 
 **Goal.** Stand up the workspace and the async-control-edge / sync-core split
 (Architecture) with the control plane fully working against a **stub core** — no
@@ -454,7 +457,7 @@ round-trip end-to-end — with no audio devices or DSP present.
 
 ## Phase 2 — Basic operational components: audio devices & PTT
 
-**Status: in planning.**
+**Status: implemented & merged.**
 
 **Goal.** Make the program talk to real hardware reliably — the half of goal #3
 that has nothing to do with DSP. Everything is driven over the Phase-1 gRPC
@@ -512,6 +515,11 @@ unkey-on-Drop (`tx/ptt.rs`, `modem/tx_worker.rs`). Fixes:
 radio — all over the Phase-1 gRPC surface, still with no mode attached.
 
 ## Phase 3 — Mode scaffolding & the building-blocks toolkit
+
+**Status: implemented** (plan: `docs/plans/2026-06-19-omnimodem-phase3-mode-scaffolding-and-building-blocks.md`;
+code under `crates/dsp/` plus the daemon's `crate::mode` module). The
+`omnimodem-dsp` building-block library, the mode framework, and the conformance
+harness land here; **no end-user mode ships** — only the `NullMode` fixture.
 
 The deliberate, carefully-considered phase, because this is what makes
 "best-of-breed for everything" tractable.
