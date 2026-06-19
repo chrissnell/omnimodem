@@ -220,41 +220,34 @@ mod tests {
 
     #[test]
     fn osd_recovers_where_bp_fails() {
-        let code = Ldpc::ft8();
-        let mut rng = Rng::new(123);
-
         // OSD's strength: it only needs the k most-reliable positions to be
-        // correct. We make a transmitted codeword whose low-confidence (weak)
-        // positions carry the channel errors and crank the error count past
-        // BP's correcting power, then show OSD re-encodes the right codeword.
-        let mut found = false;
-        for _ in 0..400 {
-            let (_, cw) = msg_and_cw(&code, &mut rng);
-            // Base confidence high everywhere so most positions are reliable.
-            let mut llr: Vec<Llr> = cw
-                .iter()
-                .map(|&b| if b == 0 { 6.0 } else { -6.0 })
-                .collect();
-            // Choose a set of positions to make weak, and flip (corrupt) some
-            // of them with *small* magnitude so they rank lowest in |LLR| and
-            // fall outside OSD's most-reliable basis.
-            let mut weak: Vec<usize> = (0..code.n()).collect();
-            // deterministic shuffle
-            for i in (1..weak.len()).rev() {
-                let j = (rng.next_u64() as usize) % (i + 1);
-                weak.swap(i, j);
-            }
-            let weak = &weak[..18];
-            for (idx, &pos) in weak.iter().enumerate() {
-                // Make weak; corrupt (flip sign) the first ~10 of them.
-                let mag = 0.2f32;
-                let correct = if cw[pos] == 0 { mag } else { -mag };
-                llr[pos] = if idx < 10 { -correct } else { correct };
-            }
+        // error-free, even when the total error count defeats belief
+        // propagation. On a genuine low-SNR BPSK/AWGN channel, BP fails on some
+        // frames; on those, the channel errors mostly land in low-reliability
+        // positions (outside OSD's most-reliable basis), so OSD reprocessing
+        // re-encodes the right codeword where BP could not.
+        let code = Ldpc::ft8();
+        let mut rng = Rng::new(0xB16B_00B5);
+        let sigma = 0.7f32; // near the (174,91) min-sum waterfall: BP fails often
+        let nvar = sigma * sigma;
 
-            let (_, bp_errs) = code.decode_minsum(&llr, 30);
+        let mut found = false;
+        for _ in 0..1000 {
+            let msg: Vec<u8> = (0..code.k()).map(|_| (rng.next_u64() & 1) as u8).collect();
+            let cw = code.encode(&msg);
+            // BPSK over AWGN: tx bit 0 -> +1, bit 1 -> -1; LLR = 2·rx/σ².
+            let llr: Vec<Llr> = cw
+                .iter()
+                .map(|&b| {
+                    let tx = if b == 0 { 1.0 } else { -1.0 };
+                    let rx = tx + sigma * rng.next_normal();
+                    2.0 * rx / nvar
+                })
+                .collect();
+
+            let (_, bp_errs) = code.decode_minsum(&llr, 50);
             if bp_errs == 0 {
-                continue; // not a BP-failure case; keep searching
+                continue; // BP succeeded — not the regime we're demonstrating
             }
             if let Some(out) = osd_decode(&code, &llr, 2) {
                 if out == cw {
@@ -263,6 +256,6 @@ mod tests {
                 }
             }
         }
-        assert!(found, "no case found where OSD beats a failed BP");
+        assert!(found, "expected a frame where OSD recovers but min-sum BP fails");
     }
 }

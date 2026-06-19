@@ -1,18 +1,21 @@
 //! LDPC encode + min-sum belief-propagation decode, parametric in `H`.
 //!
-//! Ships an FT8/FT4-shaped `(N=174, K=91)` code. The decoder machinery
-//! (systematic encode, sparse Tanner-graph min-sum BP with 0.75 scaling,
-//! parity check) is complete and general; it works for any binary parity
-//! matrix supplied to [`Ldpc::from_parity`].
+//! Ships the FT8/FT4 `(N=174, K=91)` code. The decoder machinery (systematic
+//! encode, sparse Tanner-graph min-sum BP with 0.75 scaling, parity check) is
+//! complete and general; it works for any binary parity matrix supplied to
+//! [`Ldpc::from_systematic`].
 //!
-//! Matrix provenance: the exact FT8 tables (`kFTX_LDPC_Nm`, `kFTX_LDPC_Mn`,
-//! `kFTX_LDPC_generator`) are to be transcribed from `ft8_lib`'s `ldpc.c` /
-//! `constants.c` in Phase 4 and KAT'd against `encode174`. Until then
-//! [`Ldpc::ft8`] builds an **internally-consistent, valid** `(174,91)` code
-//! programmatically (a deterministic seeded systematic `H = [P | I]`, giving
-//! generator `G = [I | Pᵀ]`). Only the specific matrix constants are
-//! placeholder-but-valid; the codec itself is not a stub — encode→noiseless
-//! decode round-trips and it corrects errors under AWGN.
+//! Matrix provenance: [`Ldpc::ft8`] uses the **real WSJT-X tables** transcribed
+//! byte-for-byte from `ft8_lib` (`kgoba/ft8_lib`, `ft8/constants.c`): the packed
+//! `kFTX_LDPC_generator` for systematic encode and `kFTX_LDPC_Nm` /
+//! `kFTX_LDPC_Num_rows` for the parity-check Tanner graph (see
+//! [`super::ft8_tables`]). The codeword layout matches `ft8_lib`'s `encode174`:
+//! 91 payload bits (77-bit message + 14-bit CRC) followed by 83 parity bits,
+//! all MSB-first. This is bit-exact interoperable with WSJT-X — a codeword built
+//! by [`Ldpc::encode`] satisfies every `Nm` parity check, and the `kat.rs`
+//! `ft8_ldpc_matches_reference` test confirms every systematic generator row is
+//! itself a codeword of the `Nm` parity-check matrix (`G·Hᵀ = 0`), so the two
+//! independently-transcribed tables are mutually consistent.
 
 use crate::types::Llr;
 
@@ -62,43 +65,43 @@ impl Ldpc {
         Ldpc { n, k, gen, check_vars }
     }
 
-    /// FT8/FT4-shaped `(174, 91)` code (placeholder-but-valid parity matrix —
-    /// see module docs). Deterministic seeded construction so encode/decode are
-    /// reproducible across runs.
+    /// The FT8/FT4 `(174, 91)` LDPC code, using the real WSJT-X / `ft8_lib`
+    /// tables (see module docs and [`super::ft8_tables`]).
+    ///
+    /// The systematic generator rows are unpacked from the bit-packed
+    /// `kFTX_LDPC_generator` (parity bit `c` is the XOR of the message bits its
+    /// row selects), and the Tanner graph comes straight from `kFTX_LDPC_Nm`.
+    /// Codeword layout is `[payload(91) | parity(83)]`, MSB-first, identical to
+    /// `ft8_lib`'s `encode174`.
     pub fn ft8() -> Self {
-        let k = 91;
-        let m = 174 - 91; // 83
-        let mut rng: u64 = 0x6F8B_45A2_1C3D_9E07; // fixed seed
-        let mut next = || {
-            rng ^= rng >> 12;
-            rng ^= rng << 25;
-            rng ^= rng >> 27;
-            rng.wrapping_mul(0x2545_F491_4F6C_DD1D)
-        };
-        // Build a moderately sparse P: each data column touches ~3 checks,
-        // each check row gets a handful of ones. Ensures a connected, low-
-        // density Tanner graph that BP handles well.
-        let mut p = vec![vec![0u8; k]; m];
-        #[allow(clippy::needless_range_loop)] // col indexes the inner dimension across rows
-        for col in 0..k {
-            // place 3 ones in distinct rows for this column
-            let mut placed = 0;
-            while placed < 3 {
-                let r = (next() as usize) % m;
-                if p[r][col] == 0 {
-                    p[r][col] = 1;
-                    placed += 1;
-                }
+        use super::ft8_tables::{FT8_LDPC_GENERATOR, FT8_LDPC_NM, FT8_LDPC_NUM_ROWS};
+        const N: usize = 174;
+        const K: usize = 91;
+        const M: usize = 83;
+
+        // Systematic generator: row j is e_j (bit j of the payload) followed by
+        // the parity contributions of message bit j. ft8_lib packs each parity
+        // row MSB-first, so message bit j lives in byte j/8 at bit 7-(j%8).
+        let mut gen = vec![vec![0u8; N]; K];
+        #[allow(clippy::needless_range_loop)] // c indexes the parity dimension across the packed rows
+        for (j, row) in gen.iter_mut().enumerate() {
+            row[j] = 1;
+            for c in 0..M {
+                let byte = FT8_LDPC_GENERATOR[c][j / 8];
+                row[K + c] = (byte >> (7 - (j % 8))) & 1;
             }
         }
-        // Guarantee no empty check row (every parity bit is constrained).
-        for row in p.iter_mut() {
-            if row.iter().all(|&b| b == 0) {
-                let c = (next() as usize) % k;
-                row[c] = 1;
+
+        // Parity checks: Nm lists the 1-origin codeword indices in each check,
+        // zero-padded to 7; Num_rows gives the valid count.
+        let mut check_vars = vec![Vec::new(); M];
+        for (c, vars) in check_vars.iter_mut().enumerate() {
+            for &v in FT8_LDPC_NM[c].iter().take(FT8_LDPC_NUM_ROWS[c] as usize) {
+                vars.push(v as usize - 1);
             }
         }
-        Self::from_systematic(k, &p)
+
+        Ldpc { n: N, k: K, gen, check_vars }
     }
 
     /// Systematic encode: `k` message bits → `n` codeword bits.
@@ -227,6 +230,11 @@ impl Ldpc {
     /// Re-encode a `k`-bit message into the full `n`-bit codeword.
     pub fn reencode(&self, message: &[u8]) -> Vec<u8> {
         self.encode(message)
+    }
+
+    /// Variable (codeword-bit) indices participating in parity check `c`.
+    pub fn check_vars(&self, c: usize) -> &[usize] {
+        &self.check_vars[c]
     }
 }
 

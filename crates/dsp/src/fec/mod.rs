@@ -13,3 +13,5 @@ pub mod llr;
 pub mod ldpc;
 pub mod osd;
 pub mod slicer;
+
+mod ft8_tables;

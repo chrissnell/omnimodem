@@ -13,30 +13,55 @@ pub fn demap_bpsk(soft: f32, noise_var: f32) -> Llr {
     2.0 * soft / noise_var.max(f32::MIN_POSITIVE)
 }
 
-/// Map an M-FSK symbol's per-tone powers to per-bit LLRs.
+/// WSJT-X FT8/FT4 8-FSK Gray map (`kFT8_Gray_map` in `ft8_lib`): symbol value
+/// `v` is transmitted on physical tone `FT8_GRAY_MAP[v]`. This is **not** the
+/// binary-reflected Gray code — tones 4–7 differ — so FT8 must use this table,
+/// not [`super::gray::gray_encode`], for bit-exact interoperability.
+pub const FT8_GRAY_MAP: [u8; 8] = [0, 1, 3, 2, 5, 6, 4, 7];
+
+/// Map an M-FSK symbol's per-tone powers to per-bit LLRs, using the standard
+/// binary-reflected Gray layout (symbol `v` on tone `gray_encode(v)`).
 ///
 /// `tone_powers[k]` is the (non-negative) energy in tone `k`; there are
-/// `M = tone_powers.len()` tones carrying `log2(M)` bits, **Gray-mapped** so
-/// the index↔bits mapping matches `gray::gray_encode`. Bit ordering: bit 0 is
-/// the MSB of the tone index, consistent with WSJT-X big-endian symbol bits.
+/// `M = tone_powers.len()` tones carrying `log2(M)` bits. Bit ordering: bit 0
+/// is the MSB of the symbol value, consistent with WSJT-X big-endian symbol
+/// bits.
 ///
 /// Each bit's LLR is the max-log-MAP approximation
 /// `L_b = (max_{idx: bit=0} P_idx − max_{idx: bit=1} P_idx) / noise_var`,
 /// so the sign follows the dominant tone's bit pattern and `|L|` grows with
-/// the power gap (i.e. with SNR).
+/// the power gap (i.e. with SNR). For FT8/FT4 use [`demap_fsk_ft8`], whose tone
+/// layout matches WSJT-X exactly.
 pub fn demap_fsk(tone_powers: &[f32], noise_var: f32) -> Vec<Llr> {
+    demap_fsk_with(tone_powers, noise_var, |idx| super::gray::gray_decode(idx as u32) as usize)
+}
+
+/// FT8/FT4 8-FSK soft demapper using the exact WSJT-X [`FT8_GRAY_MAP`]. Requires
+/// exactly 8 tones (3 bits/symbol, MSB first).
+pub fn demap_fsk_ft8(tone_powers: &[f32], noise_var: f32) -> Vec<Llr> {
+    assert_eq!(tone_powers.len(), 8, "FT8/FT4 is 8-FSK");
+    // Invert the symbol→tone map to recover the symbol value a tone carries.
+    let mut tone_to_sym = [0usize; 8];
+    for (sym, &tone) in FT8_GRAY_MAP.iter().enumerate() {
+        tone_to_sym[tone as usize] = sym;
+    }
+    demap_fsk_with(tone_powers, noise_var, |idx| tone_to_sym[idx])
+}
+
+/// Max-log-MAP M-FSK demapper core, parametric in the tone→symbol-value map.
+fn demap_fsk_with(tone_powers: &[f32], noise_var: f32, sym_of_tone: impl Fn(usize) -> usize) -> Vec<Llr> {
     let m = tone_powers.len();
     assert!(m >= 2 && m.is_power_of_two(), "M-FSK requires power-of-two tones ≥ 2");
     let bits = m.trailing_zeros() as usize;
     let nv = noise_var.max(f32::MIN_POSITIVE);
     let mut out = Vec::with_capacity(bits);
     for b in 0..bits {
-        // bit b is bit (bits-1-b) of the index (MSB first)
+        // bit b is bit (bits-1-b) of the symbol value (MSB first)
         let shift = bits - 1 - b;
         let mut max0 = f32::NEG_INFINITY;
         let mut max1 = f32::NEG_INFINITY;
         for (idx, &p) in tone_powers.iter().enumerate() {
-            let sym = gray_index_to_bits(idx);
+            let sym = sym_of_tone(idx);
             if (sym >> shift) & 1 == 0 {
                 max0 = max0.max(p);
             } else {
@@ -46,13 +71,6 @@ pub fn demap_fsk(tone_powers: &[f32], noise_var: f32) -> Vec<Llr> {
         out.push((max0 - max1) / nv);
     }
     out
-}
-
-/// Tone index → the symbol-value bits it carries. Tones are laid out so that
-/// symbol value `v` is sent on physical tone `gray_encode(v)`; inverting,
-/// physical tone `idx` carries bits `gray_decode(idx)`.
-fn gray_index_to_bits(idx: usize) -> usize {
-    super::gray::gray_decode(idx as u32) as usize
 }
 
 #[cfg(test)]
@@ -109,6 +127,28 @@ mod tests {
             let hard = SoftBits(llrs).hard();
             let got = ((hard[0] as usize) << 1) | hard[1] as usize;
             assert_eq!(got, sym, "sym {sym}");
+        }
+    }
+
+    #[test]
+    fn ft8_map_differs_from_binary_reflected_gray() {
+        // The whole point of demap_fsk_ft8: tones 4–7 are NOT binary-reflected.
+        let brg: [u8; 8] = std::array::from_fn(|v| super::super::gray::gray_encode(v as u32) as u8);
+        assert_eq!(FT8_GRAY_MAP, [0, 1, 3, 2, 5, 6, 4, 7]);
+        assert_ne!(FT8_GRAY_MAP, brg, "FT8 map must differ from binary-reflected Gray");
+    }
+
+    #[test]
+    fn ft8_demap_recovers_symbol_via_wsjtx_map() {
+        // For every 3-bit FT8 symbol, energy on its WSJT-X tone must decode back
+        // to the symbol's bits (MSB first). Catches any tone↔symbol mismatch.
+        for (sym, &tone_u8) in FT8_GRAY_MAP.iter().enumerate() {
+            let tone = tone_u8 as usize;
+            let mut powers = [0.0f32; 8];
+            powers[tone] = 50.0;
+            let hard = SoftBits(demap_fsk_ft8(&powers, 0.01)).hard();
+            let got = ((hard[0] as usize) << 2) | ((hard[1] as usize) << 1) | hard[2] as usize;
+            assert_eq!(got, sym, "FT8 sym {sym} on tone {tone}");
         }
     }
 }

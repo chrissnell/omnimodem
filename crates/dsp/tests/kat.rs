@@ -74,10 +74,42 @@ fn rs_corrects_within_capacity_and_detects_beyond() {
     }
 }
 
+/// LDPC tables are the real WSJT-X / `ft8_lib` `(174,91)` code, and the two
+/// independently-transcribed tables (`kFTX_LDPC_generator` and `kFTX_LDPC_Nm`)
+/// are mutually consistent: every systematic generator row is a valid codeword
+/// of the Nm parity-check matrix (`G·Hᵀ = 0`), every variable lies in exactly 3
+/// checks, and the total edge count is 522 (= 174×3). A single transcription
+/// error in either table would break `G·Hᵀ = 0`.
+#[test]
+fn ft8_ldpc_matches_reference() {
+    use omnimodem_dsp::fec::ldpc::Ldpc;
+    let code = Ldpc::ft8();
+    assert_eq!((code.n(), code.k()), (174, 91));
+
+    // G·Hᵀ = 0: encoding each unit message e_j yields generator row j, which
+    // must satisfy every parity check. Covers all 91 generator rows exactly.
+    for j in 0..91 {
+        let mut msg = vec![0u8; 91];
+        msg[j] = 1;
+        let cw = code.encode(&msg);
+        assert_eq!(code.parity_errors(&cw), 0, "generator row {j} is not a codeword of Nm");
+    }
+
+    // Structural invariants of the FT8 Tanner graph (matches kFTX_LDPC_Mn).
+    let mut var_degree = [0usize; 174];
+    let mut edges = 0usize;
+    for c in 0..83 {
+        for &v in code.check_vars(c) {
+            var_degree[v] += 1;
+            edges += 1;
+        }
+    }
+    assert!(var_degree.iter().all(|&d| d == 3), "every variable must lie in exactly 3 checks");
+    assert_eq!(edges, 522, "FT8 LDPC has 174×3 = 522 Tanner-graph edges");
+}
+
 /// LDPC: a noiseless codeword's LLRs decode back to the original 91 message
 /// bits with zero parity errors, and a moderate-SNR copy still decodes.
-/// NOTE: the (174,91) matrices here are a valid programmatic construction; the
-/// exact `ft8_lib` tables are a Phase-4 transcription (see `fec/ldpc.rs`).
 #[test]
 fn ldpc_encode_noiseless_decode() {
     use omnimodem_dsp::fec::ldpc::Ldpc;
