@@ -6,6 +6,8 @@ use crate::ids::ChannelId;
 pub enum CoreError {
     #[error("unknown channel {0:?}")]
     UnknownChannel(ChannelId),
+    #[error("unknown or unsupported mode: {0:?}")]
+    UnknownMode(String),
     #[error("persistence error: {0}")]
     Persist(String),
     #[error("audio error: {0}")]
