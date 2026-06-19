@@ -1,0 +1,24 @@
+[package]
+name = "omnimodem-dsp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustfft.workspace = true
+num-complex.workspace = true
+thiserror.workspace = true
+
+[features]
+# `testutil` exposes the seeded AWGN / channel fixtures to downstream test code.
+testutil = []
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "hotpath"
+harness = false
