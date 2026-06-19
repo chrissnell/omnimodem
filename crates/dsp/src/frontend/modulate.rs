@@ -4,7 +4,7 @@
 
 use crate::frontend::fir::design_gaussian;
 use crate::types::Sample;
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
 /// Continuous-phase FSK with optional Gaussian pulse shaping (GFSK/CPFSK).
 /// Used by FT8/FT4 (8-FSK). `tone_hz(symbol)` maps a symbol to a tone.
@@ -161,17 +161,47 @@ impl DiffPsk {
     pub fn modulate(&self, symbols: &[u32]) -> Vec<Sample> {
         let m = 1u32 << self.bps;
         let abs_phase = self.diff_encode(symbols);
-        // Raised-cosine half-sine envelope across each symbol for spectral
-        // containment; BPSK phase reversals pass through an amplitude null.
+        if abs_phase.is_empty() {
+            return Vec::new();
+        }
+        // Raised-cosine pulse shaping: each symbol's phasor is held at full
+        // amplitude at the symbol *center* (the decision instant) and the
+        // transition to its neighbour is cosine-shaped and centered on the
+        // symbol *boundary*. A 180° (BPSK) reversal therefore drags the envelope
+        // through a null exactly at the boundary, while a run of unchanged phase
+        // stays at full amplitude — this is what holds PSK31's occupied
+        // bandwidth at ~baud. QPSK phasors interpolate the same way, so a 90°
+        // step only dips partway, never to zero. The pulse weights of the two
+        // straddling symbols sum to one, giving unit envelope gain.
+        let sps = self.sps as f32;
+        let phasor = |idx: u32| {
+            let a = TAU * idx as f32 / m as f32;
+            (a.cos(), a.sin())
+        };
+        let phasors: Vec<(f32, f32)> = abs_phase.iter().map(|&p| phasor(p)).collect();
+        let last = phasors.len() - 1;
+        let mut carrier = 0.0f32; // accumulated, kept bounded for f32 precision
+        let dphi = TAU * self.carrier_hz / self.rate;
         let mut out = Vec::with_capacity(symbols.len() * self.sps);
-        let mut t = 0u64;
-        for &ph_idx in &abs_phase {
-            let sym_phase = TAU * ph_idx as f32 / m as f32;
+        for (n, &cur) in phasors.iter().enumerate() {
             for k in 0..self.sps {
-                let env = 0.5 - 0.5 * (TAU * k as f32 / self.sps as f32).cos();
-                let carrier = TAU * self.carrier_hz * t as f32 / self.rate + sym_phase;
-                out.push(env * carrier.cos());
-                t += 1;
+                let d = k as f32 - sps / 2.0; // offset from symbol center, [-sps/2, sps/2)
+                // Neighbour straddling this sample (held at the ends).
+                let nb = if d >= 0.0 {
+                    phasors[(n + 1).min(last)]
+                } else {
+                    phasors[n.saturating_sub(1)]
+                };
+                let wn = 0.5 * (1.0 + (PI * d.abs() / sps).cos()); // 1 at center -> 0.5 at boundary
+                let wo = 1.0 - wn;
+                let bi = cur.0 * wn + nb.0 * wo;
+                let bq = cur.1 * wn + nb.1 * wo;
+                // Re{ (bi + j bq) * e^{j carrier} }.
+                out.push(bi * carrier.cos() - bq * carrier.sin());
+                carrier += dphi;
+                if carrier > TAU {
+                    carrier -= TAU;
+                }
             }
         }
         out
@@ -451,5 +481,18 @@ mod tests {
         assert!(goertzel_power(&sig, 700.0, 8000.0) > 1.0);
         // The signal returns to silence (a gap) somewhere — min abs run exists.
         assert!(sig.iter().any(|&s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn diff_bpsk_envelope_nulls_only_on_reversal() {
+        // s = 0 => no phase change, s = 1 => 180° reversal (BPSK).
+        let d = DiffPsk::new(8000.0, 1000.0, 40, 1);
+        let steady = d.modulate(&[0; 8]); // no reversals => full amplitude throughout
+        let reversing = d.modulate(&[1; 8]); // reversal each symbol => envelope dips to zero
+        let energy = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>();
+        // Holding the phase keeps full power; reversals carve nulls and shed
+        // energy. A per-symbol envelope (nulling every boundary) would make these
+        // nearly equal — guards against that regression.
+        assert!(energy(&steady) > 1.5 * energy(&reversing));
     }
 }
