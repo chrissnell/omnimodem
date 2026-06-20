@@ -241,14 +241,28 @@ fn regenerate_reference_vectors_doc() {
 
 // --- Phase-3 exit criterion ----------------------------------------------
 
-/// The executable definition of "Phase 3 done": the contract-critical KATs all
-/// pass. Each underlying KAT is also its own `#[test]`; this aggregates the
-/// subset that gates the phase (design §"Phase-3 exit criterion").
+/// The executable definition of "Phase 3 done": the single named gate that runs
+/// every contract-critical KAT (`cargo test -p omnimodem-dsp --features testutil
+/// phase3_exit_criterion`). Each KAT is also its own `#[test]`; the value this
+/// aggregate adds over re-running them is *structural*, not just coverage:
+///
+/// 1. It is a **compile-checked manifest** of the contract-critical set. Each
+///    entry is a direct call, so deleting or renaming any gated KAT breaks this
+///    test's compilation — a gate cannot be silently dropped from the suite
+///    without a reviewer seeing this list change.
+/// 2. It gives CI **one** target to gate a merge on instead of an open-ended
+///    name filter that would silently pass if a KAT were removed.
+///
+/// Keep this list in sync with the contract-critical KATs above; adding a new
+/// phase-gating KAT means adding a call here (the compiler will not remind you,
+/// but a missing entry means the gate under-covers — that is the one thing this
+/// aggregate cannot self-check, so it is called out here deliberately).
 #[test]
 fn phase3_exit_criterion() {
     crc16_x25_check_value();
     crc14_ft8_is_14_bits_and_deterministic();
     rs_corrects_within_capacity_and_detects_beyond();
+    ft8_ldpc_matches_reference();
     ldpc_encode_noiseless_decode();
     ft8_costas_array_is_canonical();
     hdlc_frame_roundtrips_and_fcs_guards();
