@@ -13,6 +13,7 @@ pub mod frontend;
 pub mod sync;
 pub mod fec;
 pub mod framing;
+pub mod modes;
 
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;

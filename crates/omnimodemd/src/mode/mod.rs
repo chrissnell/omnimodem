@@ -19,12 +19,19 @@ pub enum ModeConfig {
 }
 
 impl ModeConfig {
-    /// Parse the channel's `mode` string. Phase 3 only resolves "none"; unknown
-    /// strings are rejected so a typo can't silently configure nothing.
+    /// Parse the channel's `mode` string into a parametric config. Phase 4
+    /// resolves the five first-mode labels with default parameters (richer
+    /// parametric strings are a Phase-5 extension); unknown strings are
+    /// rejected so a typo can't silently configure nothing.
     pub fn parse(s: &str) -> Option<ModeConfig> {
         match s {
             "none" | "" => Some(ModeConfig::None),
-            _ => None, // Phase 4 extends this; keep strict.
+            "afsk1200" => Some(ModeConfig::Afsk1200 { tx: true }),
+            "ft8" => Some(ModeConfig::Ft8),
+            "cw" => Some(ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }),
+            "rtty" => Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }),
+            "psk31" => Some(ModeConfig::Psk31 { center_hz: 1000.0 }),
+            _ => None,
         }
     }
     pub fn label(&self) -> &'static str {
@@ -78,9 +85,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_is_strict() {
+    fn parse_resolves_phase4_modes_with_defaults() {
+        assert_eq!(ModeConfig::parse("afsk1200"), Some(ModeConfig::Afsk1200 { tx: true }));
+        assert_eq!(ModeConfig::parse("ft8"), Some(ModeConfig::Ft8));
+        assert_eq!(ModeConfig::parse("cw"), Some(ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }));
+        assert_eq!(ModeConfig::parse("rtty"), Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }));
+        assert_eq!(ModeConfig::parse("psk31"), Some(ModeConfig::Psk31 { center_hz: 1000.0 }));
         assert_eq!(ModeConfig::parse("none"), Some(ModeConfig::None));
-        assert_eq!(ModeConfig::parse("ft8"), None); // not until Phase 4
+        assert_eq!(ModeConfig::parse(""), Some(ModeConfig::None));
         assert_eq!(ModeConfig::parse("bogus"), None);
     }
 
