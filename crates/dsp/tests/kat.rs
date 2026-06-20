@@ -61,16 +61,41 @@ fn rs_corrects_within_capacity_and_detects_beyond() {
         assert!(res.is_ok(), "nroots={nroots} fcr={fcr}: decode within capacity failed: {res:?}");
         assert_eq!(&cw[..data.len()], &data[..], "recovered payload mismatch");
 
-        // Beyond capacity: must NOT silently reproduce a wrong codeword as the
-        // original. Either Err, or a result that is not the original message.
-        let mut cw2: Vec<u8> = data.iter().chain(parity.iter()).copied().collect();
-        for b in cw2.iter_mut().take(t + 2) {
-            *b ^= 0xA5;
+        // Beyond capacity (t+1, t+2, and the full 2t = nroots errors): a
+        // bounded-distance decoder must behave honestly. For every over-the-
+        // limit corruption it must EITHER report failure (detection), OR, if it
+        // returns success, (a) never claim more than `t` corrections, and (b)
+        // never present the *original* message as a clean decode. Asserting on
+        // both arms (not just the Ok arm) removes the earlier vacuity.
+        let mut detected_at_least_once = false;
+        for extra in [1usize, 2, t.max(1)] {
+            let nerr = (t + extra).min(data.len() + nroots);
+            let mut cw2: Vec<u8> = data.iter().chain(parity.iter()).copied().collect();
+            for (i, b) in cw2.iter_mut().take(nerr).enumerate() {
+                *b ^= 0xA5 ^ (i as u8) | 1; // distinct, non-zero errors
+            }
+            match rs.decode(&mut cw2) {
+                Err(_) => detected_at_least_once = true,
+                Ok(k) => {
+                    assert!(
+                        k <= t,
+                        "nroots={nroots} fcr={fcr}: decoder claimed {k} > t={t} corrections"
+                    );
+                    assert_ne!(
+                        &cw2[..data.len()],
+                        &data[..],
+                        "nroots={nroots} fcr={fcr}: beyond-capacity miscorrected to the original"
+                    );
+                }
+            }
         }
-        let res2 = rs.decode(&mut cw2);
-        if res2.is_ok() {
-            assert_ne!(&cw2[..data.len()], &data[..], "beyond-capacity must not miscorrect to original");
-        }
+        // With 2t = nroots simultaneous errors a syndrome-based decoder cannot
+        // find a ≤t solution, so at least one of the over-limit cases must be
+        // reported as an uncorrectable failure (proves the detect path runs).
+        assert!(
+            detected_at_least_once,
+            "nroots={nroots} fcr={fcr}: no beyond-capacity corruption was detected as uncorrectable"
+        );
     }
 }
 
@@ -201,13 +226,17 @@ fn message77_standard_roundtrips() {
 #[test]
 #[ignore = "requires Direwolf/ft8_lib reference binaries (Phase-4 interop gate)"]
 fn regenerate_reference_vectors_doc() {
-    // Direwolf HDLC/AX.25:  gen_packets -o out.wav -n 1 "K1ABC>APRS:>test"
-    // Direwolf FX.25:       gen_packets -X 16 ...   (RS(255,239)-shortened)
-    // Direwolf IL2P:        gen_packets -I 1 ...    (cross-check il2p_test)
-    // ft8_lib LDPC/77-bit:  ft8code "CQ K1ABC FN42"  -> 77-bit + 174-bit codeword
+    // Documentation-only. When the reference binaries are available, run:
+    //   Direwolf HDLC/AX.25:  gen_packets -o out.wav -n 1 "K1ABC>APRS:>test"
+    //   Direwolf FX.25:       gen_packets -X 16 ...   (RS(255,239)-shortened)
+    //   Direwolf IL2P:        gen_packets -I 1 ...    (cross-check il2p_test)
+    //   ft8_lib LDPC/77-bit:  ft8code "CQ K1ABC FN42" -> 77-bit + 174-bit codeword
     // Capture the bytes into tests/vectors/*.json with this comment as the
     // provenance header, then drop the `#[ignore]` on the corresponding KAT.
-    panic!("documentation-only: see comment for regeneration commands");
+    //
+    // This body is intentionally a no-op so that running the suite with
+    // `--ignored` does not fail; the value here is the executable provenance
+    // record in the comment above.
 }
 
 // --- Phase-3 exit criterion ----------------------------------------------

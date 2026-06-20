@@ -34,7 +34,20 @@ impl Supervisor {
     /// `opener` builds real PTT drivers (production) or test doubles.
     pub fn new(store: Store, opener: Box<dyn DriverOpener>) -> Result<Self, crate::persist::StoreError> {
         let mut channels = BTreeMap::new();
-        for cfg in store.load_channels()? {
+        for mut cfg in store.load_channels()? {
+            // Enforce the invariant that a live channel's mode is always
+            // resolvable. The configure path validates before persisting, but a
+            // hand-edited or downgraded DB could carry a mode this build no
+            // longer understands; coerce it to "none" (fail-safe) rather than
+            // letting an unresolvable string survive into the runtime.
+            if crate::mode::ModeConfig::parse(&cfg.mode).is_none() {
+                tracing::warn!(
+                    channel = ?cfg.id,
+                    mode = %cfg.mode,
+                    "persisted channel mode is not resolvable; coercing to \"none\""
+                );
+                cfg.mode = "none".to_string();
+            }
             channels.insert(cfg.id, ChannelState::new(cfg));
         }
         Ok(Supervisor {

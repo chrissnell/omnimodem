@@ -47,6 +47,9 @@ pub fn sigma_for_ebn0(eb: f32, ebn0_db: f32, samples_per_bit: f32) -> f32 {
     (n0 / 2.0 * samples_per_bit).sqrt()
 }
 
+/// Parse a whitespace-tolerant hex string into bytes. **Panics** on a
+/// non-hex digit or an odd number of hex digits — intentional fail-fast for
+/// malformed KAT vectors.
 pub fn hex_to_bytes(s: &str) -> Vec<u8> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     (0..s.len())
@@ -86,5 +89,20 @@ mod tests {
     #[test]
     fn hex_roundtrips() {
         assert_eq!(bytes_to_hex(&hex_to_bytes("0a ff 10")), "0aff10");
+    }
+
+    #[test]
+    fn sigma_for_ebn0_matches_closed_form_and_is_monotonic() {
+        // sigma = sqrt(N0/2 * sps), N0 = Eb / (10^(EbN0_dB/10)). For Eb=1, sps=1:
+        //   0 dB  -> ebn0=1  -> N0=1   -> sigma = sqrt(0.5)  ≈ 0.70711
+        //   10 dB -> ebn0=10 -> N0=0.1 -> sigma = sqrt(0.05) ≈ 0.22361
+        assert!((sigma_for_ebn0(1.0, 0.0, 1.0) - 0.5f32.sqrt()).abs() < 1e-6);
+        assert!((sigma_for_ebn0(1.0, 10.0, 1.0) - 0.05f32.sqrt()).abs() < 1e-6);
+        // samples_per_bit scales the noise variance linearly.
+        let s1 = sigma_for_ebn0(1.0, 3.0, 1.0);
+        let s4 = sigma_for_ebn0(1.0, 3.0, 4.0);
+        assert!((s4 / s1 - 2.0).abs() < 1e-5, "4x sps must double sigma");
+        // Higher Eb/N0 => smaller sigma.
+        assert!(sigma_for_ebn0(1.0, 6.0, 1.0) < sigma_for_ebn0(1.0, 0.0, 1.0));
     }
 }

@@ -112,6 +112,20 @@ proptest! {
 
 // --- Corpus / deterministic round-trips (not random-friendly) ------------
 
+/// Documents the empty-payload boundary the `1..200` property range avoids: a
+/// 0-byte info field frames to only the 2-byte FCS between flags, which the
+/// deframer's minimum-length guard rejects as noise (a real AX.25 frame always
+/// carries an address). This pins that behavior so the property's lower bound
+/// isn't silently hiding a regression.
+#[test]
+fn hdlc_empty_payload_is_rejected_by_design() {
+    use omnimodem_dsp::framing::hdlc::{hdlc_deframe, hdlc_frame};
+    assert!(
+        hdlc_deframe(&hdlc_frame(&[])).is_empty(),
+        "a zero-byte payload must not deframe to a valid frame"
+    );
+}
+
 #[test]
 fn baudot_roundtrips_corpus() {
     use omnimodem_dsp::framing::baudot::{encode, Decoder};

@@ -14,12 +14,14 @@ use std::hash::Hasher;
 /// windowed mode, not here.
 pub struct DedupWindow {
     window_samples: u64,
+    /// Highest sample-offset admitted so far; the prune horizon.
+    latest: u64,
     seen: Vec<(u64, u64)>, // (content_hash, offset)
 }
 
 impl DedupWindow {
     pub fn new(window_samples: u64) -> Self {
-        DedupWindow { window_samples, seen: Vec::new() }
+        DedupWindow { window_samples, latest: 0, seen: Vec::new() }
     }
 
     fn content_hash(frame: &Frame) -> u64 {
@@ -33,6 +35,7 @@ impl DedupWindow {
     pub fn admit(&mut self, frame: &Frame) -> bool {
         let ch = Self::content_hash(frame);
         let off = frame.meta.sample_offset;
+        self.latest = self.latest.max(off);
         let dup = self
             .seen
             .iter()
@@ -45,13 +48,33 @@ impl DedupWindow {
         }
     }
 
-    /// Drop records older than `cutoff` to bound memory on a long stream.
+    /// Drop records older than `cutoff` to bound memory on a long stream. A
+    /// record at offset `o` is kept while it could still be within `±window`
+    /// of an offset at or below `cutoff`.
     pub fn prune(&mut self, cutoff_offset: u64) {
         self.seen.retain(|&(_, o)| o + self.window_samples >= cutoff_offset);
     }
 
+    /// Prune everything that has fallen outside the dedup window behind the
+    /// latest admitted offset. Called after each `feed` so the `seen` set stays
+    /// bounded on a continuous stream (a record can only ever dedup a frame
+    /// within `window_samples`, so older records are dead weight).
+    pub fn prune_to_latest(&mut self) {
+        self.prune(self.latest);
+    }
+
+    /// Number of retained dedup records (memory-bound observability / tests).
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.seen.clear();
+        self.latest = 0;
     }
 }
 
@@ -88,6 +111,9 @@ impl<D: Demodulator> Demodulator for ParallelDemodulator<D> {
                 }
             }
         }
+        // Evict dedup records that have aged out of the window so `seen` stays
+        // bounded over a long stream (the prune the plan's comment promised).
+        self.dedup.prune_to_latest();
         out
     }
 
@@ -162,5 +188,24 @@ mod tests {
         let b = OneShot { frame: frame_at(b"WORLD", 1000), fired: false };
         let mut ens = ParallelDemodulator::new(vec![a, b], 100);
         assert_eq!(ens.feed(&[0.0; 8]).len(), 2);
+    }
+
+    #[test]
+    fn dedup_set_stays_bounded_over_a_long_stream() {
+        // Admit 10_000 distinct frames marching forward in offset; with a
+        // 100-sample window the retained set must stay tiny, not grow with the
+        // stream length (regression guard for the never-pruned `seen` set).
+        let window = 100u64;
+        let mut dw = DedupWindow::new(window);
+        for i in 0..10_000u64 {
+            let off = i * 50; // each frame 50 samples past the previous
+            let f = frame_at(format!("MSG{i}").as_bytes(), off);
+            assert!(dw.admit(&f), "distinct frames are always novel");
+            dw.prune_to_latest();
+        }
+        // Only frames whose offset is within `window` behind the latest can
+        // survive: latest = 9999*50, cutoff = latest - 100, so at most a couple
+        // of records remain — certainly not 10_000.
+        assert!(dw.len() <= 4, "dedup set grew unbounded: {} records", dw.len());
     }
 }

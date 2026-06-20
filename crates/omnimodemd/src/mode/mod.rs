@@ -87,5 +87,25 @@ mod tests {
     #[test]
     fn label_round_trips_none() {
         assert_eq!(ModeConfig::None.label(), "none");
+        // "none" parses back to the variant whose label it is — the one
+        // round-trip Phase 3 can assert end-to-end.
+        assert_eq!(ModeConfig::parse(ModeConfig::None.label()), Some(ModeConfig::None));
+    }
+
+    #[test]
+    fn labels_are_distinct_and_non_empty() {
+        let labels = [
+            ModeConfig::None.label(),
+            ModeConfig::Afsk1200 { tx: false }.label(),
+            ModeConfig::Ft8.label(),
+            ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }.label(),
+            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }.label(),
+            ModeConfig::Psk31 { center_hz: 1000.0 }.label(),
+        ];
+        for l in labels {
+            assert!(!l.is_empty(), "mode label must be non-empty");
+        }
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "mode labels must be distinct");
     }
 }
