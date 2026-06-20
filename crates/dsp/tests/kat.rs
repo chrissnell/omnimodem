@@ -269,3 +269,126 @@ fn phase3_exit_criterion() {
     ax25_ui_frame_roundtrips();
     message77_standard_roundtrips();
 }
+
+// --- Phase-4: bidirectional cross-decode interop gates ------------------------
+// Design §"Cross-decode interop — the decisive test": modulate with omnimodem,
+// decode with the reference, AND the reverse. These need the reference binaries
+// (Direwolf, WSJT-X, fldigi), which are not on CI, so they are `#[ignore]`d and
+// document the exact regeneration/verification commands as executable
+// provenance. Drop the `#[ignore]` once the captured vectors exist.
+
+#[test]
+#[ignore = "requires WSJT-X ft8code/jt9 (Phase-4 interop gate)"]
+fn ft8_cross_decode_doc() {
+    // ours→ref:  write our `Ft8Mod` waveform to a .wav; `jt9 -8 our.wav` must
+    //            print "CQ K1ABC FN42".
+    // ref→ours:  `ft8sim "CQ K1ABC FN42" 1500 0 0 0 1 -10` → our `decode_window`
+    //            must recover it.
+    // byte-level: `ft8code "CQ K1ABC FN42"` prints the 77-bit payload + 174-bit
+    //            codeword; assert `ft8_symbols()` / `pack77()` agree, then drop
+    //            the `#[ignore]`.
+}
+
+#[test]
+#[ignore = "requires Direwolf gen_packets/atest (Phase-4 interop gate)"]
+fn afsk1200_cross_decode_doc() {
+    // ours→ref:  our `Afsk1200Mod` audio (48 kHz) → `atest` must decode the
+    //            AX.25 frame.
+    // ref→ours:  `gen_packets -o ref.wav "K1ABC>APRS:>test"` → our
+    //            `Afsk1200Demod` must decode it.
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-4 interop gate)"]
+fn rtty_cross_decode_doc() {
+    // Cross-check RTTY (45.45 baud / 170 Hz shift, Baudot) against fldigi's RTTY
+    // modem in both directions.
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-4 interop gate)"]
+fn psk31_cross_decode_doc() {
+    // Cross-check PSK31 (BPSK Varicode) against fldigi's PSK31 modem in both
+    // directions.
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-4 interop gate)"]
+fn cw_cross_decode_doc() {
+    // Cross-check CW (Morse) against fldigi's CW decoder in both directions.
+}
+
+// --- Phase-4 exit criterion ---------------------------------------------------
+
+/// The CI-runnable definition of "Phase 4 done": every mode self-loopbacks and
+/// recovers its exact payload. The reference-binary cross-decode gates above are
+/// the *nightly* completion of the exit criterion (design §"Definition of done
+/// for a mode"); this aggregate is the per-PR gate. Keep it in sync as modes are
+/// added — a missing entry means the gate under-covers.
+#[test]
+fn phase4_exit_criterion() {
+    use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+    use omnimodem_dsp::mode::{BlockDemodulator, Demodulator, Modulator};
+    use omnimodem_dsp::modes::{
+        afsk1200::{Afsk1200Demod, Afsk1200Mod},
+        cw::{CwDemod, CwMod},
+        ft8::{Ft8Demod, Ft8Mod, FT8_RATE, FT8_WINDOW_S},
+        psk31::{Psk31Demod, Psk31Mod},
+        rtty::{RttyDemod, RttyMod},
+    };
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[omnimodem_dsp::types::Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // AFSK 1200
+    let ax = Ax25Frame {
+        dest: Address::new("APRS", 0),
+        source: Address::new("K1ABC", 7),
+        digipeaters: vec![],
+        info: b"exit".to_vec(),
+    };
+    let s = Afsk1200Mod::new().modulate(&Frame::packet(ax.encode())).unwrap();
+    assert!(
+        Afsk1200Demod::ensemble(9)
+            .feed(&s)
+            .iter()
+            .any(|f| matches!(&f.payload, FramePayload::Packet(b) if b == &ax.encode())),
+        "AFSK1200 exit criterion"
+    );
+
+    // PSK31
+    let s = Psk31Mod::new(1000.0).modulate(&Frame::text("CQ DE K1ABC")).unwrap();
+    assert!(texts(&Psk31Demod::new(1000.0).feed(&s)).contains("CQ DE K1ABC"), "PSK31 exit");
+
+    // RTTY
+    let s = RttyMod::new(45.45, 170.0).modulate(&Frame::text("THE QUICK BROWN FOX")).unwrap();
+    assert!(
+        texts(&RttyDemod::new(45.45, 170.0).feed(&s)).contains("THE QUICK BROWN FOX"),
+        "RTTY exit"
+    );
+
+    // CW (adaptive squelch needs a noise floor)
+    let mut s = CwMod::new(20, 700.0).modulate(&Frame::text("CQ TEST")).unwrap();
+    let mut rng = Rng::new(1);
+    let mut lead = vec![0.0f32; 1600];
+    add_awgn(&mut lead, 0.02, &mut rng);
+    add_awgn(&mut s, 0.02, &mut rng);
+    let mut cw = CwDemod::new(20, 700.0);
+    cw.feed(&lead);
+    cw.feed(&s);
+    assert!(texts(&cw.finish_text()).to_uppercase().contains("CQ TEST"), "CW exit");
+
+    // FT8
+    let wave = Ft8Mod::new().modulate(&Frame::text("CQ K1ABC FN42")).unwrap();
+    let mut win = vec![0.0f32; (FT8_RATE as f32 * FT8_WINDOW_S) as usize];
+    win[..wave.len()].copy_from_slice(&wave);
+    assert!(texts(&Ft8Demod::new().decode_window(&win, 0)).contains("CQ K1ABC FN42"), "FT8 exit");
+}
