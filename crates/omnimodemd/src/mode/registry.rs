@@ -1,17 +1,47 @@
 //! The one-module mode registry. Adding a mode in Phase 4 adds one arm here and
-//! its module; nothing else in the daemon learns mode-specific details.
+//! its assembly module in `omnimodem-dsp`; nothing else in the daemon learns
+//! mode-specific details.
 
 use super::{ModeConfig, NullMode};
-use omnimodem_dsp::mode::{Demodulator, Modulator};
+use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
+use omnimodem_dsp::modes::{
+    afsk1200::{Afsk1200Demod, Afsk1200Mod},
+    cw::{CwDemod, CwMod},
+    ft8::{Ft8Demod, Ft8Mod},
+    psk31::{Psk31Demod, Psk31Mod},
+    rtty::{RttyDemod, RttyMod},
+};
 
-/// Build a streaming demodulator for a config, or `None` if the mode has no
-/// streaming demod (windowed modes return their `BlockDemodulator` elsewhere).
-pub fn build_demod(cfg: &ModeConfig) -> Option<Box<dyn Demodulator>> {
+/// What kind of demod a mode needs the RX worker to drive.
+pub enum DemodKind {
+    /// No real demod (the `NullMode` fixture); the capture is held idle.
+    None,
+    /// A continuous streaming demod.
+    Streaming(Box<dyn Demodulator>),
+    /// A windowed block demod plus its window length in seconds.
+    Windowed(Box<dyn BlockDemodulator>, f32),
+}
+
+/// Classify a mode config into the demod the RX worker should run.
+pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
     match cfg {
-        ModeConfig::None => Some(Box::new(NullMode)),
-        // Phase 4: Afsk1200/Cw/Rtty/Psk31 return their streaming demods; Ft8
-        // returns its BlockDemodulator via a separate builder.
-        _ => None,
+        ModeConfig::None => DemodKind::None,
+        ModeConfig::Afsk1200 { .. } => DemodKind::Streaming(Box::new(Afsk1200Demod::ensemble(9))),
+        ModeConfig::Cw { wpm, tone_hz } => DemodKind::Streaming(Box::new(CwDemod::new(*wpm, *tone_hz))),
+        ModeConfig::Rtty { baud, shift_hz } => {
+            DemodKind::Streaming(Box::new(RttyDemod::new(*baud, *shift_hz)))
+        }
+        ModeConfig::Psk31 { center_hz } => {
+            DemodKind::Streaming(Box::new(Psk31Demod::new(*center_hz)))
+        }
+        ModeConfig::Ft8 => {
+            let bd = Ft8Demod::new();
+            let window_s = match bd.caps().shape {
+                DemodShape::Windowed { window_s, .. } => window_s,
+                _ => 15.0,
+            };
+            DemodKind::Windowed(Box::new(bd), window_s)
+        }
     }
 }
 
@@ -19,7 +49,20 @@ pub fn build_demod(cfg: &ModeConfig) -> Option<Box<dyn Demodulator>> {
 pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
     match cfg {
         ModeConfig::None => Some(Box::new(NullMode)),
-        _ => None,
+        ModeConfig::Afsk1200 { .. } => Some(Box::new(Afsk1200Mod::new())),
+        ModeConfig::Cw { wpm, tone_hz } => Some(Box::new(CwMod::new(*wpm, *tone_hz))),
+        ModeConfig::Rtty { baud, shift_hz } => Some(Box::new(RttyMod::new(*baud, *shift_hz))),
+        ModeConfig::Psk31 { center_hz } => Some(Box::new(Psk31Mod::new(*center_hz))),
+        ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
+    }
+}
+
+/// The windowed-TX slot period for a mode, if it transmits on a time grid
+/// (FT8's 15 s slots). `None` for streaming modes (transmit as soon as queued).
+pub fn tx_slot_s(cfg: &ModeConfig) -> Option<f32> {
+    match build_modulator(cfg)?.caps().shape {
+        DemodShape::Windowed { period_s, .. } => Some(period_s),
+        DemodShape::Streaming => None,
     }
 }
 
@@ -28,14 +71,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn none_builds_nullmode() {
-        let d = build_demod(&ModeConfig::None).expect("none builds");
-        assert_eq!(d.caps().native_rate, 48_000);
+    fn demod_kind_classifies_modes() {
+        assert!(matches!(demod_kind(&ModeConfig::None), DemodKind::None));
+        assert!(matches!(
+            demod_kind(&ModeConfig::Afsk1200 { tx: true }),
+            DemodKind::Streaming(_)
+        ));
+        assert!(matches!(
+            demod_kind(&ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }),
+            DemodKind::Streaming(_)
+        ));
+        assert!(matches!(
+            demod_kind(&ModeConfig::Ft8),
+            DemodKind::Windowed(_, w) if (w - 15.0).abs() < 0.01
+        ));
     }
 
     #[test]
-    fn none_builds_modulator() {
-        let m = build_modulator(&ModeConfig::None).expect("none builds mod");
-        assert!(m.caps().native_rate == 48_000);
+    fn modulators_build_for_every_mode() {
+        for cfg in [
+            ModeConfig::None,
+            ModeConfig::Afsk1200 { tx: true },
+            ModeConfig::Ft8,
+            ModeConfig::Cw { wpm: 20, tone_hz: 700.0 },
+            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 },
+            ModeConfig::Psk31 { center_hz: 1000.0 },
+        ] {
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {cfg:?}");
+        }
+    }
+
+    #[test]
+    fn only_ft8_has_a_tx_slot() {
+        assert_eq!(tx_slot_s(&ModeConfig::Ft8), Some(15.0));
+        assert_eq!(tx_slot_s(&ModeConfig::Afsk1200 { tx: true }), None);
+        assert_eq!(tx_slot_s(&ModeConfig::Psk31 { center_hz: 1000.0 }), None);
     }
 }

@@ -22,6 +22,9 @@ pub enum Transport {
 }
 
 /// Serve the control plane over a UDS with SO_PEERCRED authorization.
+// The peer-cred interceptor returns `Result<_, Status>`; `Status` is the
+// gRPC-boundary error type, so the large-err lint does not apply.
+#[allow(clippy::result_large_err)]
 pub async fn serve_uds(
     svc: ControlService,
     path: &std::path::Path,

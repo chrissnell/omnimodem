@@ -41,6 +41,9 @@ pub fn device_descriptor_to_proto(d: &DeviceDescriptor) -> proto::DeviceInfo {
 
 /// Build a domain `PttConfig` from a `ConfigurePtt` request, validating the
 /// method and device id.
+// `tonic::Status` is intentionally the error type across the gRPC boundary; the
+// large-err lint does not apply to handler/translation code.
+#[allow(clippy::result_large_err)]
 pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig, Status> {
     if req.device_id.is_empty() {
         return Err(Status::invalid_argument("device_id must not be empty"));
@@ -134,6 +137,9 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
         }
         TelemetryEvent::PttKeyed { channel, keyed } => {
             Kind::PttState(proto::PttState { channel: channel.0, keyed })
+        }
+        TelemetryEvent::ClockOffset { offset_s, est_error_s, synchronized } => {
+            Kind::ClockOffset(proto::ClockOffset { offset_s, est_error_s, synchronized })
         }
     };
     proto::Event { kind: Some(kind) }

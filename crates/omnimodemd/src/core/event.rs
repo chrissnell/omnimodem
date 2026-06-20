@@ -29,4 +29,7 @@ pub enum TelemetryEvent {
     DeviceArrived { device_id: DeviceId, label: String },
     DeviceDeparted { device_id: DeviceId },
     PttKeyed { channel: ChannelId, keyed: bool },
+    /// Host clock-discipline metric so operators can tell a time-sync problem
+    /// (windowed modes need an accurate clock) from a signal problem.
+    ClockOffset { offset_s: f64, est_error_s: f64, synchronized: bool },
 }

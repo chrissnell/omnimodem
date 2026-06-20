@@ -122,6 +122,15 @@ impl Supervisor {
         self.channels.contains_key(&id)
     }
 
+    /// Resolve a channel's persisted mode string to its parametric config.
+    /// Unknown/absent channels resolve to `None` (the inert fixture mode).
+    pub fn channel_mode(&self, id: ChannelId) -> crate::mode::ModeConfig {
+        self.channels
+            .get(&id)
+            .and_then(|s| crate::mode::ModeConfig::parse(&s.config.mode))
+            .unwrap_or(crate::mode::ModeConfig::None)
+    }
+
     /// A cloneable handle to the per-rig RX/TX interlock.
     pub fn interlock(&self) -> RxTxInterlock {
         self.interlock.clone()

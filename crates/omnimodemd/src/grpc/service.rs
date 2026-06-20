@@ -23,6 +23,7 @@ impl ControlService {
     }
 
     /// Push a command into the core, mapping a full/closed queue to a status.
+    #[allow(clippy::result_large_err)] // `Status` is the gRPC-boundary error type
     pub(crate) fn send_command(&self, cmd: Command) -> Result<(), Status> {
         self.core
             .commands
