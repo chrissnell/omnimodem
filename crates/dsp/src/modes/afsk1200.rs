@@ -405,7 +405,7 @@ mod tests {
         let frame = Frame::packet(f.encode());
         let mut tx = Afsk1200Mod::new();
         let mut samples = tx.modulate(&frame).unwrap();
-        let mut rng = Rng::new(2026_06_20);
+        let mut rng = Rng::new(20260620);
         add_awgn(&mut samples, 0.12, &mut rng);
 
         let mut rx = Afsk1200Demod::ensemble(9);
