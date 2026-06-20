@@ -8,8 +8,8 @@ use crate::ptt::registry::PttConfig;
 pub struct ChannelConfig {
     pub id: ChannelId,
     pub name: String,
-    /// Phase 1 placeholder mode label (e.g. "none"); becomes a parametric
-    /// `ModeConfig` in Phase 3.
+    /// Mode label (e.g. "none"); the persisted form. Validated against and
+    /// resolved to a parametric `crate::mode::ModeConfig` at configure time.
     pub mode: String,
     /// Audio device this channel binds to (the durable identity).
     pub device_id: DeviceId,

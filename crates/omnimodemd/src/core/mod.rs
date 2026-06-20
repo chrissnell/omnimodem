@@ -143,7 +143,14 @@ fn handle_command(
 ) {
     match cmd {
         Command::ConfigureChannel { id, name, mode, reply } => {
-            let res = supervisor.configure_channel(id, name, mode).map_err(Into::into);
+            // Validate the mode string against the parametric registry before
+            // persisting, so a typo can't silently configure nothing. The
+            // string remains the persisted form (gRPC proto unchanged); it is
+            // resolved to a `ModeConfig` at use.
+            let res = match crate::mode::ModeConfig::parse(&mode) {
+                Some(_) => supervisor.configure_channel(id, name, mode).map_err(Into::into),
+                None => Err(CoreError::UnknownMode(mode)),
+            };
             if res.is_ok() {
                 let _ = telemetry.send(TelemetryEvent::ChannelConfigured { channel: id });
             }

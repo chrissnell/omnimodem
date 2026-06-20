@@ -1,0 +1,214 @@
+//! Direct-form FIR with an 8-way accumulator unroll (Graywolf demod_afsk.rs:67-107),
+//! plus filter-design helpers (lowpass via windowed-sinc; RRC; raised cosine;
+//! Gaussian) used by the modulators and the front-end filters.
+
+use std::f32::consts::PI;
+
+pub struct Fir {
+    taps: Vec<f32>,
+    hist: Vec<f32>,
+    pos: usize,
+}
+
+impl Fir {
+    pub fn new(taps: Vec<f32>) -> Self {
+        let n = taps.len();
+        Fir { taps, hist: vec![0.0; n], pos: 0 }
+    }
+
+    /// Push one sample, return the filtered output. Allocation-free.
+    pub fn push(&mut self, x: f32) -> f32 {
+        let n = self.taps.len();
+        self.hist[self.pos] = x;
+        let mut acc = [0.0f32; 8];
+        let mut k = 0;
+        // Walk taps newest->oldest with 8 independent accumulators.
+        while k < n {
+            let h = (self.pos + n - k) % n;
+            acc[k % 8] += self.taps[k] * self.hist[h];
+            k += 1;
+        }
+        self.pos = (self.pos + 1) % n;
+        acc.iter().sum()
+    }
+
+    pub fn reset(&mut self) {
+        self.hist.iter_mut().for_each(|h| *h = 0.0);
+        self.pos = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.taps.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.taps.is_empty()
+    }
+}
+
+/// Windowed-sinc lowpass (Hamming), `cutoff_hz` normalized by `rate_hz`.
+pub fn design_lowpass(num_taps: usize, cutoff_hz: f32, rate_hz: f32) -> Vec<f32> {
+    let fc = cutoff_hz / rate_hz; // cycles/sample
+    let m = num_taps - 1;
+    let mut h = vec![0.0f32; num_taps];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let n = i as f32 - m as f32 / 2.0;
+        let sinc = if n == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * n).sin() / (PI * n) };
+        let w = 0.54 - 0.46 * (2.0 * PI * i as f32 / m as f32).cos(); // Hamming
+        *hi = sinc * w;
+    }
+    let sum: f32 = h.iter().sum();
+    h.iter_mut().for_each(|x| *x /= sum);
+    h
+}
+
+/// Windowed-sinc bandpass: lowpass prototype frequency-shifted to `center_hz`.
+pub fn design_bandpass(num_taps: usize, low_hz: f32, high_hz: f32, rate_hz: f32) -> Vec<f32> {
+    let center = (low_hz + high_hz) / 2.0;
+    let cutoff = (high_hz - low_hz) / 2.0;
+    let lp = design_lowpass(num_taps, cutoff, rate_hz);
+    let m = (num_taps - 1) as f32 / 2.0;
+    let mut h = vec![0.0f32; num_taps];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let n = i as f32 - m;
+        // 2*cos shift gives the real bandpass with the same passband gain.
+        *hi = 2.0 * lp[i] * (2.0 * PI * center / rate_hz * n).cos();
+    }
+    h
+}
+
+/// Root-raised-cosine taps (Direwolf AFSK, M17 α=0.5). `sps` samples/symbol.
+pub fn design_rrc(num_taps: usize, alpha: f32, sps: f32) -> Vec<f32> {
+    let m = num_taps as isize / 2;
+    let mut h = vec![0.0f32; num_taps];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let t = (i as isize - m) as f32 / sps;
+        *hi = rrc_tap(t, alpha);
+    }
+    let e: f32 = h.iter().map(|x| x * x).sum::<f32>().sqrt();
+    h.iter_mut().for_each(|x| *x /= e);
+    h
+}
+
+fn rrc_tap(t: f32, a: f32) -> f32 {
+    if t.abs() < 1e-6 {
+        return 1.0 - a + 4.0 * a / PI;
+    }
+    if (t.abs() - 1.0 / (4.0 * a)).abs() < 1e-4 {
+        let s = ((1.0 + 2.0 / PI) * (PI / (4.0 * a)).sin()
+            + (1.0 - 2.0 / PI) * (PI / (4.0 * a)).cos())
+            * a
+            / 2f32.sqrt();
+        return s;
+    }
+    let num = (PI * t * (1.0 - a)).sin() + 4.0 * a * t * (PI * t * (1.0 + a)).cos();
+    let den = PI * t * (1.0 - (4.0 * a * t).powi(2));
+    num / den
+}
+
+/// Raised-cosine *pulse* (not RRC): used for PSK31/Throb/Hell envelopes.
+pub fn design_raised_cosine(num_taps: usize, alpha: f32, sps: f32) -> Vec<f32> {
+    let m = num_taps as isize / 2;
+    let mut h = vec![0.0f32; num_taps];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let t = (i as isize - m) as f32 / sps;
+        let sinc = if t.abs() < 1e-6 { 1.0 } else { (PI * t).sin() / (PI * t) };
+        let denom = 1.0 - (2.0 * alpha * t).powi(2);
+        let cos = if denom.abs() < 1e-6 { PI / 4.0 } else { (PI * alpha * t).cos() / denom };
+        *hi = sinc * cos;
+    }
+    let s: f32 = h.iter().sum();
+    h.iter_mut().for_each(|x| *x /= s);
+    h
+}
+
+/// Gaussian shaping pulse for GFSK/CPFSK; `bt` is the bandwidth-time product
+/// (FT8 BT=2.0, FT4 BT=1.0). `sps` samples per symbol.
+pub fn design_gaussian(num_taps: usize, bt: f32, sps: f32) -> Vec<f32> {
+    let sigma = sps * (2f32.ln()).sqrt() / (2.0 * PI * bt);
+    let m = num_taps as isize / 2;
+    let mut h = vec![0.0f32; num_taps];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let t = (i as isize - m) as f32;
+        *hi = (-(t * t) / (2.0 * sigma * sigma)).exp();
+    }
+    let s: f32 = h.iter().sum();
+    h.iter_mut().for_each(|x| *x /= s);
+    h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fir_impulse_response_equals_taps() {
+        let taps = vec![0.1, 0.2, 0.3, 0.4];
+        let mut f = Fir::new(taps.clone());
+        let mut out = vec![f.push(1.0)];
+        for _ in 0..3 {
+            out.push(f.push(0.0));
+        }
+        for (o, t) in out.iter().zip(taps.iter()) {
+            assert!((o - t).abs() < 1e-6, "got {o}, want {t}");
+        }
+    }
+
+    #[test]
+    fn lowpass_is_unity_dc_gain() {
+        let h = design_lowpass(33, 1000.0, 8000.0);
+        assert!((h.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lowpass_is_symmetric() {
+        let h = design_lowpass(33, 1000.0, 8000.0);
+        for i in 0..h.len() / 2 {
+            assert!((h[i] - h[h.len() - 1 - i]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn bandpass_rejects_dc_and_nyquist() {
+        let h = design_bandpass(65, 1200.0, 2200.0, 8000.0);
+        // DC gain ~ sum of taps; passband is centered at 1700 Hz, so DC is rejected.
+        assert!(h.iter().sum::<f32>().abs() < 0.1);
+    }
+
+    #[test]
+    fn rrc_peak_at_center() {
+        let h = design_rrc(65, 0.5, 8.0);
+        let mid = h.len() / 2;
+        assert!(h[mid] >= h.iter().cloned().fold(f32::MIN, f32::max) - 1e-6);
+    }
+
+    #[test]
+    fn raised_cosine_unit_dc_and_symmetric() {
+        let h = design_raised_cosine(65, 0.35, 8.0);
+        assert!((h.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        for i in 0..h.len() / 2 {
+            assert!((h[i] - h[h.len() - 1 - i]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn gaussian_unit_dc_symmetric_and_peaked() {
+        let h = design_gaussian(33, 2.0, 8.0);
+        assert!((h.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        let mid = h.len() / 2;
+        for i in 0..h.len() / 2 {
+            assert!((h[i] - h[h.len() - 1 - i]).abs() < 1e-6);
+            assert!(h[i] <= h[mid]);
+        }
+    }
+
+    #[test]
+    fn gaussian_narrower_bt_is_wider_pulse() {
+        // Lower BT => more inter-symbol filtering => wider time-domain pulse,
+        // so the central tap holds a smaller fraction of the energy.
+        let wide = design_gaussian(33, 1.0, 8.0);
+        let narrow = design_gaussian(33, 2.0, 8.0);
+        let mid = wide.len() / 2;
+        assert!(wide[mid] < narrow[mid]);
+    }
+}

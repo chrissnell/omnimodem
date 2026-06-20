@@ -20,6 +20,8 @@ pub mod ptt;
 
 pub mod supervisor;
 
+pub mod mode;
+
 pub mod core;
 
 pub mod grpc;
