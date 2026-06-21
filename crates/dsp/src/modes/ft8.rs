@@ -10,7 +10,7 @@
 //! fallback) → CRC-14 check → `unpack77`. Single-pass BP+OSD per sync candidate
 //! (SIC and a-priori decoding are Phase-5 differentiators).
 
-use crate::fec::crc::{crc, CRC14_FT8};
+use crate::fec::crc::ftx_compute_crc;
 use crate::fec::ldpc::Ldpc;
 use crate::fec::llr::{demap_fsk_ft8, FT8_GRAY_MAP};
 use crate::fec::osd::osd_decode;
@@ -44,6 +44,17 @@ fn is_costas_symbol(s: usize) -> bool {
     FT8_COSTAS_STARTS.iter().any(|&start| (start..start + 7).contains(&s))
 }
 
+/// FT8 CRC-14 over the 77-bit payload, byte-exact with ft8_lib `ftx_add_crc`:
+/// the 10-byte payload (low 3 bits of byte 9 are the message pad = 0) is
+/// zero-extended to 82 bits (a trailing zero byte supplies bits 80..81) and
+/// CRCed over `96 - 14 = 82` bits.
+fn ft8_payload_crc(payload: &[u8; 10]) -> u16 {
+    let mut buf = [0u8; 11];
+    buf[..10].copy_from_slice(payload);
+    buf[9] &= 0xF8; // clear the 3 bits after the 77-bit payload (already 0)
+    ftx_compute_crc(&buf, 82)
+}
+
 // ---------------------------------------------------------------------------
 // Transmit
 // ---------------------------------------------------------------------------
@@ -52,13 +63,7 @@ fn is_costas_symbol(s: usize) -> bool {
 /// data symbols interleaved with the three Costas sync groups.
 pub fn ft8_symbols(message: &str) -> [u8; FT8_NSYM] {
     let payload = pack77(message); // [u8;10]: 77 message bits MSB-first + 3 zero pad
-    // CRC-14 over the 80-bit payload representation. This is loopback-self-
-    // consistent (the RX reconstructs the identical 80-bit payload and checks
-    // the same way), but the input *framing* is not yet byte-exact with
-    // `ft8_lib` (which CRCs 82 bits with the CRC region zeroed). Real
-    // WSJT-X-decodable output therefore awaits the byte-exact framing, which is
-    // verified by the still-`#[ignore]`d `ft8_cross_decode_doc` gate in kat.rs.
-    let cksum = crc(&CRC14_FT8, &payload);
+    let cksum = ft8_payload_crc(&payload);
 
     // 91 message+CRC bits: 77 message bits, then 14 CRC bits (MSB-first).
     let mut bits91 = vec![0u8; K91];
@@ -318,7 +323,7 @@ impl BlockDemodulator for Ft8Demod {
             for i in 0..CRC_BITS {
                 rx_crc = (rx_crc << 1) | cw[MSG_BITS + i] as u16;
             }
-            if crc(&CRC14_FT8, &payload) as u16 != rx_crc {
+            if ft8_payload_crc(&payload) != rx_crc {
                 continue;
             }
 
