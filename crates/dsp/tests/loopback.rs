@@ -2,6 +2,10 @@
 //! a single CI-visible target. The decisive *cross*-decode against reference
 //! binaries is in `kat.rs` (gated `#[ignore]`); this proves internal
 //! self-consistency: a frame we transmit, we decode back exactly.
+//!
+//! Uses the `testutil` AWGN fixtures (CW needs a noise floor), so it is gated on
+//! the `testutil` feature; a plain `cargo test` compiles it to an empty target.
+#![cfg(feature = "testutil")]
 
 use omnimodem_dsp::mode::{BlockDemodulator, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
@@ -67,10 +71,12 @@ fn cw_loopback() {
     add_awgn(&mut lead, 0.02, &mut rng);
     add_awgn(&mut s, 0.02, &mut rng);
     let mut rx = CwDemod::new(20, 700.0);
-    rx.feed(&lead);
-    rx.feed(&s);
-    let frames = rx.finish_text();
-    assert!(texts(&frames).to_uppercase().contains(msg), "CW loopback failed");
+    // Words can emit live during `feed` (on their trailing gap) or at flush.
+    let mut frames = rx.feed(&lead);
+    frames.extend(rx.feed(&s));
+    frames.extend(rx.finish_text());
+    let up = texts(&frames).to_uppercase();
+    assert!(up.contains("CQ") && up.contains("TEST"), "CW loopback failed: {up:?}");
 }
 
 #[test]

@@ -71,8 +71,19 @@ impl Modulator for CwMod {
     }
 }
 
+/// A key-up gap at least this many dot-units long ends a word; on seeing one we
+/// flush the completed word. Sits between the inter-character gap (3 units) and
+/// the inter-word gap (7 units), matching `MorseDecoder`'s own word threshold.
+const WORD_GAP_UNITS: f32 = 5.0;
+
 /// CW receiver: envelope-keyed run-length classifier feeding a Morse decoder.
+/// Unlike a framed mode, CW has no terminator per character, so it emits one
+/// `Frame` per *word* — flushed when the trailing inter-word gap (or end-of-
+/// stream silence) is seen. This is what makes it produce output through the
+/// daemon's `feed()`-only RX path, not just via `flush()`.
 pub struct CwDemod {
+    wpm: u16,
+    tone_hz: f32,
     dc: DownConverter,
     env: EnvelopeDetector,
     dec: MorseDecoder,
@@ -84,6 +95,10 @@ pub struct CwDemod {
     run: u32,
     /// True until the first key-down is seen (leading silence is not a gap).
     started: bool,
+    /// Set once the current silence run has flushed its word, so the run is not
+    /// flushed again nor re-fed to the next word's decoder.
+    word_flushed: bool,
+    sample_index: u64,
 }
 
 impl CwDemod {
@@ -92,6 +107,8 @@ impl CwDemod {
         // holds through the intra-tone envelope ripple; the slow floor adapts to
         // noise only while closed and opens the gate well above it.
         CwDemod {
+            wpm,
+            tone_hz,
             dc: DownConverter::new(tone_hz, RATE),
             env: EnvelopeDetector::new(0.02, 0.02, 0.02, 2.5),
             dec: MorseDecoder::new(),
@@ -99,6 +116,8 @@ impl CwDemod {
             keyed: false,
             run: 0,
             started: false,
+            word_flushed: false,
+            sample_index: 0,
         }
     }
 
@@ -106,14 +125,23 @@ impl CwDemod {
         run as f32 / self.unit_samples
     }
 
-    /// Push the completed mark/space run into the decoder.
-    fn commit(&mut self, was_keyed: bool, run: u32) {
-        let u = self.units(run);
-        if was_keyed {
-            self.dec.key_down(u);
-        } else if self.started {
-            self.dec.key_up(u);
+    /// Decode and emit the accumulated word, resetting the decoder for the next
+    /// one. Returns `None` if nothing decoded.
+    fn flush_word(&mut self) -> Option<Frame> {
+        let text = std::mem::take(&mut self.dec).finish();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return None;
         }
+        Some(Frame {
+            payload: FramePayload::Text(text),
+            meta: crate::types::FrameMeta {
+                crc_ok: true,
+                sample_offset: self.sample_index,
+                decoder: Some("cw".into()),
+                ..Default::default()
+            },
+        })
     }
 }
 
@@ -123,46 +151,68 @@ impl Demodulator for CwDemod {
     }
 
     fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
+        let mut out = Vec::new();
         for &x in samples {
+            self.sample_index += 1;
             let mag = self.dc.push(x).norm();
             self.env.push(mag);
             let open = self.env.squelch_open();
             if open == self.keyed {
                 self.run += 1;
+                // A long enough silence ends the current word — flush it now so
+                // output appears live (this is also how the final word emits
+                // once trailing silence accumulates).
+                if !open
+                    && self.started
+                    && !self.word_flushed
+                    && self.units(self.run) >= WORD_GAP_UNITS
+                {
+                    if let Some(f) = self.flush_word() {
+                        out.push(f);
+                    }
+                    self.word_flushed = true;
+                }
             } else {
                 let was_keyed = self.keyed;
                 let run = self.run;
                 if was_keyed {
+                    // A mark ended; feed its duration.
                     self.started = true;
+                    self.dec.key_down(self.units(run));
+                } else if self.started {
+                    // A silence ended (a mark is starting). If that silence was
+                    // already flushed as a word gap, don't re-feed it to the
+                    // fresh decoder; otherwise it's an intra-word gap.
+                    if self.word_flushed {
+                        self.word_flushed = false;
+                    } else {
+                        self.dec.key_up(self.units(run));
+                    }
                 }
-                self.commit(was_keyed, run);
                 self.keyed = open;
                 self.run = 1;
             }
         }
-        Vec::new()
+        out
     }
 
     fn reset(&mut self) {
-        *self = CwDemod {
-            dc: std::mem::replace(&mut self.dc, DownConverter::new(0.0, RATE)),
-            env: EnvelopeDetector::new(0.02, 0.02, 0.02, 2.5),
-            dec: MorseDecoder::new(),
-            unit_samples: self.unit_samples,
-            keyed: false,
-            run: 0,
-            started: false,
-        };
+        *self = CwDemod::new(self.wpm, self.tone_hz);
+    }
+
+    fn flush(&mut self) -> Vec<Frame> {
+        self.finish_text()
     }
 }
 
 impl CwDemod {
     /// Flush accumulated state at end-of-stream into a text [`Frame`]. The final
-    /// keyed element (no trailing key-up follows it) is committed here.
+    /// keyed element (no trailing key-up follows it) is committed here. Called
+    /// by the trait `flush()` on capture teardown, and usable directly in tests.
     pub fn finish_text(&mut self) -> Vec<Frame> {
         if self.keyed && self.run > 0 {
             let run = self.run;
-            self.commit(true, run);
+            self.dec.key_down(self.units(run));
             self.keyed = false;
             self.run = 0;
         }
@@ -212,20 +262,62 @@ mod tests {
         add_awgn(&mut sig, 0.02, &mut rng);
 
         let mut d = CwDemod::new(wpm, tone);
-        d.feed(&lead);
-        d.feed(&sig);
-        let frames = d.finish_text();
+        // Words may emit live during `feed` (on their trailing gap) or at
+        // `finish_text` — collect from both.
+        let mut frames = d.feed(&lead);
+        frames.extend(d.feed(&sig));
+        frames.extend(d.finish_text());
 
         let decoded: String = frames
             .iter()
             .map(|f| match &f.payload {
-                FramePayload::Text(t) => t.clone(),
+                FramePayload::Text(t) => format!(" {t}"),
                 _ => String::new(),
             })
             .collect();
         assert!(
-            decoded.to_uppercase().contains("CQ TEST"),
-            "loopback decoded {decoded:?}, want it to contain \"CQ TEST\""
+            decoded.to_uppercase().contains("CQ") && decoded.to_uppercase().contains("TEST"),
+            "loopback decoded {decoded:?}, want CQ and TEST"
         );
+    }
+
+    #[test]
+    fn chunked_feed_emits_words_via_daemon_path() {
+        // The daemon drives streaming demods with `feed()` per ~20 ms chunk and
+        // `flush()` on capture teardown — it never calls `finish_text`. CW must
+        // still produce its words. Append trailing silence so the last word's
+        // gap is seen during streaming.
+        use crate::testutil::{add_awgn, Rng};
+        let (wpm, tone) = (20u16, 700.0);
+        let mut sig = CwMod::new(wpm, tone).modulate(&Frame::text("CQ TEST")).unwrap();
+        let mut rng = Rng::new(2);
+        let mut lead = vec![0.0f32; 1600];
+        add_awgn(&mut lead, 0.02, &mut rng);
+        add_awgn(&mut sig, 0.02, &mut rng);
+        // Trailing silence (with the same light noise floor) for the final word.
+        let mut tail = vec![0.0f32; 8000];
+        add_awgn(&mut tail, 0.02, &mut rng);
+
+        let mut d = CwDemod::new(wpm, tone);
+        let mut text = String::new();
+        for chunk in lead.iter().chain(sig.iter()).chain(tail.iter()).copied()
+            .collect::<Vec<_>>()
+            .chunks(160)
+        {
+            for f in d.feed(chunk) {
+                if let FramePayload::Text(t) = &f.payload {
+                    text.push(' ');
+                    text.push_str(t);
+                }
+            }
+        }
+        for f in d.flush() {
+            if let FramePayload::Text(t) = &f.payload {
+                text.push(' ');
+                text.push_str(t);
+            }
+        }
+        let up = text.to_uppercase();
+        assert!(up.contains("CQ") && up.contains("TEST"), "daemon-path decoded {text:?}");
     }
 }

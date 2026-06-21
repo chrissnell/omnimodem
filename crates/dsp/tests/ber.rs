@@ -13,7 +13,7 @@ use omnimodem_dsp::modes::{
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
 };
-use omnimodem_dsp::testutil::{add_awgn, decode_rate, Rng};
+use omnimodem_dsp::testutil::{add_awgn, decode_rate, Rng, WattersonChannel};
 use omnimodem_dsp::types::{Frame, FramePayload};
 
 fn has_text(frames: &[Frame], msg: &str) -> bool {
@@ -79,9 +79,19 @@ fn cw_decode_rate() {
         add_awgn(&mut lead, 0.01, &mut rng);
         add_awgn(&mut s, 0.01, &mut rng);
         let mut rx = CwDemod::new(20, 700.0);
-        rx.feed(&lead);
-        rx.feed(&s);
-        has_text(&rx.finish_text(), msg)
+        // Words emit live during `feed` (trailing gap) or at finish — collect both.
+        let mut frames = rx.feed(&lead);
+        frames.extend(rx.feed(&s));
+        frames.extend(rx.finish_text());
+        let text: String = frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.to_uppercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.contains("CQ") && text.contains("TEST")
     });
     eprintln!("CW decode rate @ sigma=0.01: {rate}");
     assert!(rate >= 0.9, "CW decode rate {rate} below floor 0.9");
@@ -100,4 +110,34 @@ fn ft8_decode_rate() {
     });
     eprintln!("FT8 decode rate @ sigma=0.30: {rate}");
     assert!(rate >= 0.85, "FT8 decode rate {rate} below floor 0.85");
+}
+
+/// Channel simulators, not just AWGN (design §"Channel simulators"): the modes
+/// target fading HF channels, so AWGN-only testing overstates performance. This
+/// exercises the seedable Watterson HF-fading fixture end-to-end on the robust
+/// AFSK ensemble (amplitude fading + a delayed second path + light AWGN). It
+/// makes the required fading fixture an actual gate rather than dead code.
+#[test]
+fn afsk1200_decode_rate_watterson_fading() {
+    use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+    let ax = Ax25Frame {
+        dest: Address::new("APRS", 0),
+        source: Address::new("N0CALL", 2),
+        digipeaters: vec![],
+        info: b"watterson".to_vec(),
+    };
+    let want = ax.encode();
+    let chan = WattersonChannel::ccir_good(48_000.0);
+    let rate = decode_rate(20, |seed| {
+        let clean = Afsk1200Mod::new().modulate(&Frame::packet(want.clone())).unwrap();
+        let mut rng = Rng::new(500 + seed as u64);
+        let mut faded = chan.apply(&clean, &mut rng);
+        add_awgn(&mut faded, 0.05, &mut rng);
+        Afsk1200Demod::ensemble(9)
+            .feed(&faded)
+            .iter()
+            .any(|f| matches!(&f.payload, FramePayload::Packet(b) if b == &want))
+    });
+    eprintln!("AFSK1200 decode rate over CCIR-good Watterson fading: {rate}");
+    assert!(rate >= 0.8, "AFSK1200 fading decode rate {rate} below floor 0.8");
 }

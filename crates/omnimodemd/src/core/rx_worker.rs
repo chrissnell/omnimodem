@@ -15,17 +15,28 @@ use crate::ptt::interlock::RxTxInterlock;
 use omnimodem_dsp::frontend::resample::Resampler;
 use omnimodem_dsp::mode::{BlockDemodulator, Demodulator};
 use omnimodem_dsp::types::{FramePayload, Sample};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// A running RX worker. Joining (or dropping the upstream capture) stops it.
+/// How often the worker re-checks its stop flag while no audio is arriving.
+const STOP_POLL: Duration = Duration::from_millis(200);
+
+/// A running RX worker. `stop()` (or dropping the handle) signals the thread to
+/// exit, which drops the `CaptureHandle` it owns and tears the capture stream
+/// down — essential for the real (never-EOF) cpal capture, where without an
+/// explicit stop the thread would run forever.
 pub struct RxWorker {
+    running: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
 impl RxWorker {
     /// Spawn a streaming-demod RX worker. `capture` is moved into the thread;
-    /// the thread runs until the capture stream ends.
+    /// the thread runs until the capture ends or the worker is stopped.
     pub fn spawn_streaming(
         channel: ChannelId,
         rig: DeviceId,
@@ -36,23 +47,39 @@ impl RxWorker {
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
+        let running = Arc::new(AtomicBool::new(true));
+        let run = running.clone();
         let join = std::thread::Builder::new()
             .name(format!("omnimodem-rx-{}", channel.0))
             .spawn(move || {
                 let mut resampler =
                     (in_rate != native).then(|| Resampler::new(in_rate, native, 16));
-                while let Ok(chunk) = capture.rx.recv() {
-                    if interlock.is_muted(&rig) {
-                        continue; // our TX is keyed on this rig; don't self-decode
+                loop {
+                    if !run.load(Ordering::Relaxed) {
+                        break;
                     }
-                    let samples = resample(&mut resampler, to_f32(&chunk));
-                    for f in demod.feed(&samples) {
-                        emit(&frames, channel, &f.payload);
+                    match capture.rx.recv_timeout(STOP_POLL) {
+                        Ok(chunk) => {
+                            if interlock.is_muted(&rig) {
+                                continue; // our TX is keyed on this rig
+                            }
+                            let samples = resample(&mut resampler, to_f32(&chunk));
+                            for f in demod.feed(&samples) {
+                                emit(&frames, channel, &f.payload);
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => continue, // re-check `run`
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
+                }
+                // Stream ended: flush any buffered partial decode (e.g. CW's
+                // final word, which has no trailing terminator).
+                for f in demod.flush() {
+                    emit(&frames, channel, &f.payload);
                 }
             })
             .expect("spawn rx worker");
-        RxWorker { join: Some(join) }
+        RxWorker { running, join: Some(join) }
     }
 
     /// Spawn a windowed (block) RX worker. Buffers `window_s` of samples at the
@@ -72,6 +99,8 @@ impl RxWorker {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
         let win_samples = (native as f32 * window_s) as usize;
+        let running = Arc::new(AtomicBool::new(true));
+        let run = running.clone();
         let join = std::thread::Builder::new()
             .name(format!("omnimodem-rx-win-{}", channel.0))
             .spawn(move || {
@@ -79,25 +108,34 @@ impl RxWorker {
                     (in_rate != native).then(|| Resampler::new(in_rate, native, 16));
                 let mut buf: Vec<Sample> = Vec::with_capacity(win_samples);
                 let mut muted_window = false;
-                while let Ok(chunk) = capture.rx.recv() {
-                    if interlock.is_muted(&rig) {
-                        muted_window = true; // a TX overlapped this window
+                let ended = loop {
+                    if !run.load(Ordering::Relaxed) {
+                        break false; // stopped: skip the trailing-window decode
                     }
-                    buf.extend_from_slice(&resample(&mut resampler, to_f32(&chunk)));
-                    while buf.len() >= win_samples {
-                        let window: Vec<Sample> = buf.drain(..win_samples).collect();
-                        if !muted_window {
-                            for f in demod.decode_window(&window, 0) {
-                                emit(&frames, channel, &f.payload);
+                    match capture.rx.recv_timeout(STOP_POLL) {
+                        Ok(chunk) => {
+                            if interlock.is_muted(&rig) {
+                                muted_window = true; // a TX overlapped this window
+                            }
+                            buf.extend_from_slice(&resample(&mut resampler, to_f32(&chunk)));
+                            while buf.len() >= win_samples {
+                                let window: Vec<Sample> = buf.drain(..win_samples).collect();
+                                if !muted_window {
+                                    for f in demod.decode_window(&window, 0) {
+                                        emit(&frames, channel, &f.payload);
+                                    }
+                                }
+                                muted_window = false;
                             }
                         }
-                        muted_window = false;
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break true,
                     }
-                }
-                // Decode a trailing partial window padded to full length (the
-                // file path's single window may be exactly `win_samples`; this
-                // also handles a short remainder).
-                if !buf.is_empty() && !muted_window {
+                };
+                // On a natural end, decode a trailing partial window padded to
+                // full length (the file path's single window may be exactly
+                // `win_samples`; this also handles a short remainder).
+                if ended && !buf.is_empty() && !muted_window {
                     buf.resize(win_samples, 0.0);
                     for f in demod.decode_window(&buf, 0) {
                         emit(&frames, channel, &f.payload);
@@ -105,14 +143,32 @@ impl RxWorker {
                 }
             })
             .expect("spawn windowed rx worker");
-        RxWorker { join: Some(join) }
+        RxWorker { running, join: Some(join) }
     }
 
-    /// Wait for the worker thread to finish (capture must have ended).
+    /// Signal the worker to stop and wait for it (used in tests / graceful paths).
+    pub fn stop(mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+
+    /// Wait for the worker to finish on its own (capture must end on its own,
+    /// e.g. the file backend's finite replay).
     pub fn join(mut self) {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+impl Drop for RxWorker {
+    fn drop(&mut self) {
+        // Signal stop and detach. The thread exits within one `STOP_POLL` and
+        // drops its `CaptureHandle`, stopping the underlying stream — so the
+        // core's `remove()` is non-blocking and never leaks the thread/device.
+        self.running.store(false, Ordering::Relaxed);
     }
 }
 
@@ -152,6 +208,28 @@ mod tests {
 
     fn to_i16(f: &[f32]) -> Vec<i16> {
         f.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect()
+    }
+
+    #[test]
+    fn stop_halts_a_worker_on_an_infinite_capture() {
+        // Simulate the real cpal capture, which never EOFs: keep the producer
+        // sender alive and never disconnect. `stop()` must still return (the old
+        // recv-forever loop would hang here, leaking the thread).
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(4);
+        let capture = CaptureHandle::new(rx, 48_000, || {});
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(0),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(Afsk1200Demod::ensemble(9)),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+        );
+        // Worker is blocked in recv_timeout with no data. stop() joins it.
+        let start = std::time::Instant::now();
+        worker.stop();
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "stop() hung");
+        drop(tx); // producer outlived the worker, as cpal's would
     }
 
     #[test]

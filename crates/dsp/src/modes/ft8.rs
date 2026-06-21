@@ -52,6 +52,12 @@ fn is_costas_symbol(s: usize) -> bool {
 /// data symbols interleaved with the three Costas sync groups.
 pub fn ft8_symbols(message: &str) -> [u8; FT8_NSYM] {
     let payload = pack77(message); // [u8;10]: 77 message bits MSB-first + 3 zero pad
+    // CRC-14 over the 80-bit payload representation. This is loopback-self-
+    // consistent (the RX reconstructs the identical 80-bit payload and checks
+    // the same way), but the input *framing* is not yet byte-exact with
+    // `ft8_lib` (which CRCs 82 bits with the CRC region zeroed). Real
+    // WSJT-X-decodable output therefore awaits the byte-exact framing, which is
+    // verified by the still-`#[ignore]`d `ft8_cross_decode_doc` gate in kat.rs.
     let cksum = crc(&CRC14_FT8, &payload);
 
     // 91 message+CRC bits: 77 message bits, then 14 CRC bits (MSB-first).

@@ -40,6 +40,13 @@ pub trait Demodulator: Send {
     fn feed(&mut self, samples: &[Sample]) -> Vec<Frame>;
     /// Drop all soft state (DPLL lock, AGC, partial frames).
     fn reset(&mut self);
+    /// Flush any buffered partial decode at end-of-stream (capture teardown).
+    /// Default: nothing. Modes that batch output until a terminator — e.g. CW,
+    /// which emits a word once its trailing gap is seen — override this so the
+    /// final unterminated unit is not lost when the stream ends.
+    fn flush(&mut self) -> Vec<Frame> {
+        Vec::new()
+    }
 }
 
 /// Windowed/block multi-pass demodulation (FT8/JS8/WSPR).

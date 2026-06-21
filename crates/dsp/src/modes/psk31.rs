@@ -4,7 +4,7 @@
 //! cosine DBPSK at `center_hz`. RX: Costas carrier recovery + Gardner timing →
 //! differential decode → Varicode decode.
 
-use crate::fec::gray::{diff_bpsk_decode, diff_bpsk_encode};
+use crate::fec::gray::diff_bpsk_encode;
 use crate::framing::varicode::{decode as vari_decode, encode as vari_encode, PSK31};
 use crate::frontend::modulate::DiffPsk;
 use crate::frontend::nco::DownConverter;
@@ -66,6 +66,11 @@ impl Modulator for Psk31Mod {
     }
 }
 
+/// Cap on the in-progress Varicode bit buffer. A real codeword is short and is
+/// followed by a `00` separator; if this many bits accumulate with no boundary
+/// the stream is noise, so the buffer is dropped rather than growing unbounded.
+const MAX_PENDING_BITS: usize = 512;
+
 pub struct Psk31Demod {
     center_hz: f32,
     nco: DownConverter,
@@ -75,7 +80,11 @@ pub struct Psk31Demod {
     acc_i: f32,
     prev_i: f32,
     have_prev: bool,
-    sym_bits: Vec<u8>,
+    /// Previous reversal bit, for the incremental second differential layer.
+    diff_prev: u8,
+    /// Varicode data bits not yet resolved into a completed character; drained
+    /// at each `00` separator so this stays bounded (no whole-stream re-decode).
+    pending: Vec<u8>,
     sample_index: u64,
 }
 
@@ -91,18 +100,29 @@ impl Psk31Demod {
             acc_i: 0.0,
             prev_i: 0.0,
             have_prev: false,
-            sym_bits: Vec::new(),
+            diff_prev: 0,
+            pending: Vec::new(),
             sample_index: 0,
         }
     }
 
-    fn drain_text(&mut self) -> Vec<Frame> {
-        if self.sym_bits.len() < 2 {
+    /// Emit characters completed since the last call. Decodes only up to the
+    /// last `00` separator and drains those bits, so each character is decoded
+    /// and emitted exactly once and `pending` never holds more than the current
+    /// in-progress codeword.
+    fn drain_completed(&mut self) -> Vec<Frame> {
+        // Find the last character boundary (a `00` pair).
+        let last_sep = (1..self.pending.len())
+            .rev()
+            .find(|&i| self.pending[i] == 0 && self.pending[i - 1] == 0);
+        let Some(idx) = last_sep else {
+            if self.pending.len() > MAX_PENDING_BITS {
+                self.pending.clear(); // runaway noise, no boundary in sight
+            }
             return Vec::new();
-        }
-        // Differential-decode the reversal stream, then Varicode-decode.
-        let data = diff_bpsk_decode(&self.sym_bits);
-        let text = vari_decode(&PSK31, &data);
+        };
+        let text = vari_decode(&PSK31, &self.pending[..=idx]);
+        self.pending.drain(..=idx);
         if text.is_empty() {
             return Vec::new();
         }
@@ -144,15 +164,20 @@ impl Demodulator for Psk31Demod {
                 // symbol. `diff_bpsk_encode` flips polarity on a data `1`, so a
                 // reversal (sign change) decodes to symbol `1`.
                 if self.have_prev {
-                    let bit = u8::from(sym * self.prev_i < 0.0);
-                    self.sym_bits.push(bit);
+                    let reversal = u8::from(sym * self.prev_i < 0.0);
+                    // Second differential layer, applied incrementally (the
+                    // streaming equivalent of `diff_bpsk_decode`): data bit =
+                    // reversal XOR previous reversal.
+                    let data_bit = reversal ^ self.diff_prev;
+                    self.diff_prev = reversal;
+                    self.pending.push(data_bit);
                 }
                 self.prev_i = sym;
                 self.have_prev = true;
             }
         }
-        // PSK31 is unframed; opportunistically decode the accumulated stream.
-        self.drain_text()
+        // Emit any characters whose `00` separator has now arrived.
+        self.drain_completed()
     }
 
     fn reset(&mut self) {
@@ -213,5 +238,31 @@ mod tests {
         let frames = rx.feed(&samples);
         let text = recovered_text(&frames);
         assert!(text.contains(msg), "recovered: {text:?}");
+    }
+
+    #[test]
+    fn chunked_feed_emits_each_char_once_and_bounds_memory() {
+        // The daemon RX worker streams ~20 ms chunks, not the whole signal. The
+        // concatenation of all emitted frames must equal the message exactly —
+        // no duplicate/partial frames — and `pending` must stay bounded.
+        let msg = "CQ DE K1ABC";
+        let mut tx = Psk31Mod::new(1000.0);
+        let samples = tx.modulate(&Frame::text(msg)).unwrap();
+
+        let mut rx = Psk31Demod::new(1000.0);
+        let mut text = String::new();
+        let mut max_pending = 0;
+        for chunk in samples.chunks(160) {
+            for f in rx.feed(chunk) {
+                if let FramePayload::Text(t) = &f.payload {
+                    text.push_str(t);
+                }
+            }
+            max_pending = max_pending.max(rx.pending.len());
+        }
+        assert!(text.contains(msg), "recovered {text:?}");
+        // No runaway accumulation: the pending buffer never holds more than a
+        // couple of codewords' worth of bits.
+        assert!(max_pending < MAX_PENDING_BITS, "pending grew to {max_pending}");
     }
 }

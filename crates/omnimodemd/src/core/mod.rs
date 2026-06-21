@@ -376,6 +376,13 @@ fn key_ptt(
         .get(&channel)
         .map(|(d, _)| d.clone())
         .or_else(|| live.ptt_dev.get(&channel).cloned());
+    // On a moded channel the PTT driver is owned by the TX worker, which keys
+    // the rig as part of transmitting. Manual keying isn't available there.
+    if live.tx_workers.contains_key(&channel) {
+        return Err(CoreError::Ptt(PttError::Config(
+            "channel is in a mode; the TX worker keys PTT during transmit — use Transmit, not manual key".into(),
+        )));
+    }
     let driver = live
         .drivers
         .get_mut(&channel)

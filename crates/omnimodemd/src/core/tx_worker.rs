@@ -15,7 +15,9 @@ use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::PttDriver;
 use omnimodem_dsp::mode::Modulator;
 use omnimodem_dsp::types::{Frame, FramePayload};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -51,6 +53,8 @@ pub struct TxWorkerCfg {
 /// Handle to a running TX worker.
 pub struct TxWorker {
     queue: SyncSender<TxJob>,
+    /// Set to drop any not-yet-started jobs and stop the worker promptly.
+    cancel: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -64,43 +68,70 @@ impl TxWorker {
         })
     }
 
-    /// Stop the worker: close the queue and join the thread.
+    /// Stop the worker and wait for it (graceful shutdown / tests). May block up
+    /// to the in-flight cycle's airtime; the core uses `Drop` instead, which
+    /// does not block.
     pub fn shutdown(mut self) {
-        self.join_inner();
-    }
-
-    fn join_inner(&mut self) {
-        // Dropping the only sender closes the queue so the thread's recv ends.
-        // Replace with a disconnected sender to drop ours without UB.
-        let (dead, _) = std::sync::mpsc::sync_channel(1);
-        let _ = std::mem::replace(&mut self.queue, dead);
+        self.cancel.store(true, Ordering::Relaxed);
+        self.close_queue();
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+
+    /// Drop our queue sender so the worker's `recv` ends, without UB.
+    fn close_queue(&mut self) {
+        let (dead, _) = std::sync::mpsc::sync_channel(1);
+        let _ = std::mem::replace(&mut self.queue, dead);
     }
 }
 
 impl Drop for TxWorker {
     fn drop(&mut self) {
-        self.join_inner();
+        // Signal cancel and close the queue, but DETACH (no join): the core
+        // thread calls `remove()` to evict a worker and must never block on the
+        // worker's in-flight transmit (which can be a full FT8 slot of airtime).
+        // The worker finishes at most its current cycle, then exits on its own.
+        self.cancel.store(true, Ordering::Relaxed);
+        self.close_queue();
     }
 }
 
 /// Spawn a TX worker thread for one channel.
 pub fn spawn(cfg: TxWorkerCfg) -> TxWorker {
     let (tx, rx) = std::sync::mpsc::sync_channel(TX_QUEUE_DEPTH);
+    let cancel = Arc::new(AtomicBool::new(false));
     let join = std::thread::Builder::new()
         .name(format!("omnimodem-tx-{}", cfg.channel.0))
-        .spawn(move || run(cfg, rx))
+        .spawn({
+            let cancel = cancel.clone();
+            move || run(cfg, rx, cancel)
+        })
         .expect("spawn tx worker");
-    TxWorker { queue: tx, join: Some(join) }
+    TxWorker { queue: tx, cancel, join: Some(join) }
 }
 
-fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>) {
+fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
     while let Ok(job) = rx.recv() {
+        // Drop pending jobs promptly once cancelled (e.g. the rig departed).
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let samples = match cfg.modulator.modulate(&job.frame) {
             Ok(s) => s,
-            Err(_) => continue, // payload not valid for this mode; drop the job
+            Err(_) => {
+                // Payload not valid for this mode: surface start+complete so a
+                // client awaiting this transmit id isn't left hanging.
+                let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
+                    channel: cfg.channel,
+                    transmit_id: job.transmit_id,
+                });
+                let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
+                    channel: cfg.channel,
+                    transmit_id: job.transmit_id,
+                });
+                continue;
+            }
         };
         let pcm: Vec<i16> =
             samples.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();

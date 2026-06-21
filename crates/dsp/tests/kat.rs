@@ -382,9 +382,11 @@ fn phase4_exit_criterion() {
     add_awgn(&mut lead, 0.02, &mut rng);
     add_awgn(&mut s, 0.02, &mut rng);
     let mut cw = CwDemod::new(20, 700.0);
-    cw.feed(&lead);
-    cw.feed(&s);
-    assert!(texts(&cw.finish_text()).to_uppercase().contains("CQ TEST"), "CW exit");
+    let mut cw_frames = cw.feed(&lead);
+    cw_frames.extend(cw.feed(&s));
+    cw_frames.extend(cw.finish_text());
+    let cw_text = texts(&cw_frames).to_uppercase();
+    assert!(cw_text.contains("CQ") && cw_text.contains("TEST"), "CW exit");
 
     // FT8
     let wave = Ft8Mod::new().modulate(&Frame::text("CQ K1ABC FN42")).unwrap();
