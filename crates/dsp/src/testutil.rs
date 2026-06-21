@@ -39,6 +39,65 @@ pub fn add_awgn(signal: &mut [Sample], sigma: f32, rng: &mut Rng) {
     }
 }
 
+/// Fraction of `trials` for which `decoded(i)` holds. A declarative helper for
+/// BER / decode-rate sweeps.
+pub fn decode_rate(trials: usize, mut decoded: impl FnMut(usize) -> bool) -> f32 {
+    let ok = (0..trials).filter(|&i| decoded(i)).count();
+    ok as f32 / trials.max(1) as f32
+}
+
+/// Watterson HF channel: two independent slowly-fading paths with a fixed delay
+/// and a Doppler spread (CCIR good/moderate/poor presets). Deterministic given a
+/// seeded [`Rng`]. Simplified (two taps, one-pole-filtered fading) — the design
+/// requires a seedable fading fixture for the BER sweeps, not a bit-exact model.
+pub struct WattersonChannel {
+    rate: f32,
+    delay_samples: usize,
+    doppler_hz: f32,
+}
+
+impl WattersonChannel {
+    pub fn new(rate: f32, delay_ms: f32, doppler_hz: f32) -> Self {
+        WattersonChannel { rate, delay_samples: (delay_ms * 1e-3 * rate) as usize, doppler_hz }
+    }
+    pub fn ccir_good(rate: f32) -> Self {
+        Self::new(rate, 0.5, 0.1)
+    }
+    pub fn ccir_moderate(rate: f32) -> Self {
+        Self::new(rate, 1.0, 0.5)
+    }
+    pub fn ccir_poor(rate: f32) -> Self {
+        Self::new(rate, 2.0, 1.0)
+    }
+
+    /// Apply the channel: each path is scaled by a band-limited fading envelope
+    /// (one-pole-filtered Gaussian at `doppler_hz`), then summed and normalized.
+    pub fn apply(&self, signal: &[Sample], rng: &mut Rng) -> Vec<Sample> {
+        let n = signal.len();
+        let g0 = self.fading_envelope(n, rng);
+        let g1 = self.fading_envelope(n, rng);
+        let mut out = vec![0.0f32; n];
+        for (i, o) in out.iter_mut().enumerate() {
+            let direct = signal[i] * g0[i];
+            let delayed =
+                if i >= self.delay_samples { signal[i - self.delay_samples] * g1[i] } else { 0.0 };
+            *o = 0.707 * (direct + delayed); // normalize two equal-power paths
+        }
+        out
+    }
+
+    fn fading_envelope(&self, n: usize, rng: &mut Rng) -> Vec<f32> {
+        let alpha = (-2.0 * std::f32::consts::PI * self.doppler_hz / self.rate).exp();
+        let mut env = Vec::with_capacity(n);
+        let mut state = 0.0f32;
+        for _ in 0..n {
+            state = alpha * state + (1.0 - alpha) * rng.next_normal();
+            env.push(1.0 + 0.5 * state);
+        }
+        env
+    }
+}
+
 /// `sigma` for a target Eb/N0 (dB) given energy per bit and samples per bit.
 pub fn sigma_for_ebn0(eb: f32, ebn0_db: f32, samples_per_bit: f32) -> f32 {
     let ebn0 = 10f32.powf(ebn0_db / 10.0);
@@ -89,6 +148,24 @@ mod tests {
     #[test]
     fn hex_roundtrips() {
         assert_eq!(bytes_to_hex(&hex_to_bytes("0a ff 10")), "0aff10");
+    }
+
+    #[test]
+    fn watterson_preserves_length_and_is_deterministic() {
+        let mut a = Rng::new(1);
+        let mut b = Rng::new(1);
+        let sig: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.1).sin()).collect();
+        let chan = WattersonChannel::ccir_good(8_000.0);
+        let out1 = chan.apply(&sig, &mut a);
+        let out2 = chan.apply(&sig, &mut b);
+        assert_eq!(out1.len(), sig.len());
+        assert_eq!(out1, out2, "same seed → identical fading");
+    }
+
+    #[test]
+    fn decode_rate_counts_successes() {
+        assert_eq!(decode_rate(10, |i| i % 2 == 0), 0.5);
+        assert_eq!(decode_rate(4, |_| true), 1.0);
     }
 
     #[test]

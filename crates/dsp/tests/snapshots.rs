@@ -67,3 +67,51 @@ fn cw_keyer_fingerprint() {
     let fp = fingerprint(&m.modulate("-.-. --.-"), 256);
     snap!("cw_cq", &fp);
 }
+
+// --- Phase-4 mode-level modulator fingerprints --------------------------------
+// These snapshot the *assembly*-level on-air output (mode framing + FEC +
+// modulation), not just the raw Phase-3 modulator blocks above, so any change to
+// a mode's encoding is caught in review.
+
+use omnimodem_dsp::mode::Modulator;
+use omnimodem_dsp::modes::{
+    afsk1200::Afsk1200Mod, cw::CwMod, ft8::Ft8Mod, psk31::Psk31Mod, rtty::RttyMod,
+};
+use omnimodem_dsp::types::Frame;
+
+#[test]
+fn afsk1200_frame_fingerprint() {
+    use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+    let ax = Ax25Frame {
+        dest: Address::new("APRS", 0),
+        source: Address::new("K1ABC", 0),
+        digipeaters: vec![],
+        info: b"snap".to_vec(),
+    };
+    let fp = fingerprint(&Afsk1200Mod::new().modulate(&Frame::packet(ax.encode())).unwrap(), 256);
+    snap!("afsk1200_frame", &fp);
+}
+
+#[test]
+fn psk31_message_fingerprint() {
+    let fp = fingerprint(&Psk31Mod::new(1000.0).modulate(&Frame::text("CQ")).unwrap(), 256);
+    snap!("psk31_message", &fp);
+}
+
+#[test]
+fn rtty_message_fingerprint() {
+    let fp = fingerprint(&RttyMod::new(45.45, 170.0).modulate(&Frame::text("RYRY")).unwrap(), 256);
+    snap!("rtty_message", &fp);
+}
+
+#[test]
+fn cw_message_fingerprint() {
+    let fp = fingerprint(&CwMod::new(20, 700.0).modulate(&Frame::text("CQ TEST")).unwrap(), 256);
+    snap!("cw_message", &fp);
+}
+
+#[test]
+fn ft8_message_fingerprint() {
+    let fp = fingerprint(&Ft8Mod::new().modulate(&Frame::text("CQ K1ABC FN42")).unwrap(), 256);
+    snap!("ft8_message", &fp);
+}

@@ -25,6 +25,31 @@ pub const CRC16_X25: CrcSpec =
 pub const CRC14_FT8: CrcSpec =
     CrcSpec { width: 14, poly: 0x2757, init: 0x0000, refin: false, refout: false, xorout: 0x0000 };
 
+/// FT8/FT4 14-bit CRC over an exact **bit count**, a faithful port of ft8_lib's
+/// `ftx_compute_crc` (`crc.c`). FT8 CRCs the source-encoded message zero-extended
+/// from 77 to **82** bits — not a whole number of bytes — so the generic
+/// byte-wise [`crc`] cannot express it. `message` is fed MSB-first; only the
+/// first `num_bits` bits are used (the byte holding bit `num_bits-1` must exist).
+pub fn ftx_compute_crc(message: &[u8], num_bits: usize) -> u16 {
+    const WIDTH: u32 = 14;
+    const TOPBIT: u16 = 1 << (WIDTH - 1);
+    const POLY: u16 = 0x2757;
+    let mut remainder: u16 = 0;
+    let mut idx_byte = 0usize;
+    for idx_bit in 0..num_bits {
+        if idx_bit % 8 == 0 {
+            remainder ^= (message[idx_byte] as u16) << (WIDTH - 8);
+            idx_byte += 1;
+        }
+        if remainder & TOPBIT != 0 {
+            remainder = (remainder << 1) ^ POLY;
+        } else {
+            remainder <<= 1;
+        }
+    }
+    remainder & ((TOPBIT << 1) - 1)
+}
+
 fn reflect(mut v: u32, bits: u8) -> u32 {
     let mut r = 0;
     for _ in 0..bits {
@@ -86,6 +111,29 @@ mod tests {
             &[0x00, 0xA5, 0x5A][..],
         ] {
             assert_eq!(crc(&CRC14_FT8, v), reference_ft8(v), "mismatch on {v:?}");
+        }
+    }
+
+    #[test]
+    fn ftx_compute_crc_matches_ft8_lib_golden() {
+        // 82-bit framing (77 message + 5 zero), per ft8_lib `ftx_add_crc`: the
+        // 10-byte payload followed by a zero byte, CRCed over 96-14 = 82 bits.
+        // Golden CRC values produced by ft8_lib itself (tests/vectors/
+        // ft8_reference.json). "CQ K1ABC FN42" payload -> CRC 2862 (0x0b2e).
+        let cases: &[(&str, u16)] = &[
+            ("000000204def1a8a1988", 2862),  // CQ K1ABC FN42
+            ("0c293b804def1a8a1988", 5041),  // W9XYZ K1ABC FN42
+            ("09bde3506149dc1fa4c8", 11883), // K1ABC W9XYZ RR73
+            ("000000201e5292084008", 13896), // CQ N0CALL EM48
+            ("039ddad02b9ddb1fa448", 1873),  // HELLO WORLD
+            ("05b96a609f51de9fa448", 482),   // TEST 123
+        ];
+        for (hex, want) in cases {
+            let mut payload = [0u8; 11]; // 10 payload bytes + 1 zero byte
+            for i in 0..10 {
+                payload[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            assert_eq!(ftx_compute_crc(&payload, 82), *want, "CRC mismatch for {hex}");
         }
     }
 

@@ -7,13 +7,20 @@
 //! `DeviceDeparted` are emitted and a departed device's handles are evicted —
 //! all without a second thread sharing the enumerator.
 
+pub mod clock;
 pub mod command;
 pub mod error;
 pub mod event;
+pub mod rx_worker;
+pub mod tx_worker;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
+use crate::core::clock::ClockSource;
+use crate::core::rx_worker::RxWorker;
+use crate::core::tx_worker::{TxJob, TxWorker, TxWorkerCfg};
 use crate::device::{DeviceEnumerator, HotplugEvent, HotplugWatcher};
 use crate::ids::{ChannelId, DeviceId, TransmitId};
+use crate::mode::registry::{self, DemodKind};
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::{PttDriver, PttError};
 use crate::supervisor::Supervisor;
@@ -22,8 +29,11 @@ use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+
+/// How often the idle tick samples and publishes the host clock offset.
+const CLOCK_METRIC_PERIOD: Duration = Duration::from_secs(1);
 
 /// Bounded depth of the command queue (command-side backpressure).
 pub const COMMAND_QUEUE_DEPTH: usize = 64;
@@ -79,19 +89,22 @@ pub fn spawn(
     (handle, join)
 }
 
-/// Per-channel live audio/PTT bindings owned by the core loop. Audio capture
-/// handles are held to keep their streams alive even though no DSP consumes
-/// them yet (Phase 3).
+/// Per-channel live audio/PTT bindings owned by the core loop. For a moded
+/// channel the capture is consumed by an `RxWorker` and the sink+driver by a
+/// `TxWorker`; for `ModeConfig::None` they stay here on the legacy path.
 #[derive(Default)]
 struct LiveBindings {
     sinks: HashMap<ChannelId, PlaybackHandle>,
-    #[allow(dead_code)]
     captures: HashMap<ChannelId, CaptureHandle>,
     /// Audio device + working rate per channel (the rig the interlock gates).
     audio: HashMap<ChannelId, (DeviceId, u32)>,
     drivers: HashMap<ChannelId, Box<dyn PttDriver>>,
     /// PTT device id per channel (for eviction on hotplug).
     ptt_dev: HashMap<ChannelId, DeviceId>,
+    /// Per-channel RX demod worker (moded channels only).
+    rx_workers: HashMap<ChannelId, RxWorker>,
+    /// Per-channel TX worker: cooperative queue → modulate → on-air.
+    tx_workers: HashMap<ChannelId, TxWorker>,
 }
 
 /// The core loop. Blocks on `recv_timeout`; on a command, handles it; on the
@@ -101,13 +114,16 @@ fn run(
     enumerator: Box<dyn DeviceEnumerator>,
     audio_factory: AudioBackendFactory,
     commands: Receiver<Command>,
-    _frames: broadcast::Sender<FrameEvent>,
+    frames: broadcast::Sender<FrameEvent>,
     telemetry: broadcast::Sender<TelemetryEvent>,
 ) {
     let mut next_tx_id: u64 = 1;
     let mut live = LiveBindings::default();
     let interlock = supervisor.interlock();
     let mut watcher = HotplugWatcher::new();
+    let clock = ClockSource::new();
+    // Initialize in the past so the first idle tick publishes immediately.
+    let mut last_clock = Instant::now() - CLOCK_METRIC_PERIOD * 2;
 
     loop {
         match commands.recv_timeout(HOTPLUG_POLL) {
@@ -120,10 +136,20 @@ fn run(
                 &interlock,
                 &mut live,
                 &mut next_tx_id,
+                &frames,
                 &telemetry,
             ),
             Err(RecvTimeoutError::Timeout) => {
                 poll_hotplug(&mut watcher, &*enumerator, &mut supervisor, &mut live, &telemetry);
+                if last_clock.elapsed() >= CLOCK_METRIC_PERIOD {
+                    let r = clock.read();
+                    let _ = telemetry.send(TelemetryEvent::ClockOffset {
+                        offset_s: r.offset_s,
+                        est_error_s: r.est_error_s,
+                        synchronized: r.synchronized,
+                    });
+                    last_clock = Instant::now();
+                }
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -139,6 +165,7 @@ fn handle_command(
     interlock: &crate::ptt::interlock::RxTxInterlock,
     live: &mut LiveBindings,
     next_tx_id: &mut u64,
+    frames: &broadcast::Sender<FrameEvent>,
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
     match cmd {
@@ -158,13 +185,21 @@ fn handle_command(
         }
 
         Command::ConfigureAudio { id, device_id, sample_rate, fanout, reply } => {
-            let _ = reply.send(configure_audio(
+            let res = configure_audio(
                 supervisor, enumerator, audio_factory, live, id, device_id, sample_rate, fanout,
-            ));
+            );
+            if res.is_ok() {
+                try_spawn_workers(id, supervisor, live, interlock, frames, telemetry);
+            }
+            let _ = reply.send(res);
         }
 
         Command::ConfigurePtt { id, ptt, reply } => {
-            let _ = reply.send(configure_ptt(supervisor, live, id, ptt));
+            let res = configure_ptt(supervisor, live, id, ptt);
+            if res.is_ok() {
+                try_spawn_workers(id, supervisor, live, interlock, frames, telemetry);
+            }
+            let _ = reply.send(res);
         }
 
         Command::KeyPtt { channel, keyed, reply } => {
@@ -261,6 +296,73 @@ fn configure_ptt(
     Ok(())
 }
 
+/// Spawn the per-channel RX/TX workers once their prerequisites exist. Called
+/// after audio and after PTT config, since either may arrive first. Idempotent:
+/// a worker is spawned at most once per channel. For `ModeConfig::None` no
+/// worker is spawned — that channel stays on the legacy capture-idle / raw-PCM
+/// transmit path.
+fn try_spawn_workers(
+    channel: ChannelId,
+    supervisor: &Supervisor,
+    live: &mut LiveBindings,
+    interlock: &crate::ptt::interlock::RxTxInterlock,
+    frames: &broadcast::Sender<FrameEvent>,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) {
+    let mode = supervisor.channel_mode(channel);
+    let rig = live.audio.get(&channel).map(|(d, _)| d.clone());
+
+    // RX worker: needs a capture and a real demod. Consume the held capture.
+    if !live.rx_workers.contains_key(&channel) {
+        if let (Some(rig), Some(capture)) = (rig.clone(), live.captures.remove(&channel)) {
+            match registry::demod_kind(&mode) {
+                DemodKind::Streaming(demod) => {
+                    let w = RxWorker::spawn_streaming(
+                        channel, rig, capture, demod, interlock.clone(), frames.clone(),
+                    );
+                    live.rx_workers.insert(channel, w);
+                }
+                DemodKind::Windowed(bd, window_s) => {
+                    let w = RxWorker::spawn_windowed(
+                        channel, rig, capture, bd, interlock.clone(), frames.clone(), window_s,
+                    );
+                    live.rx_workers.insert(channel, w);
+                }
+                DemodKind::None => {
+                    live.captures.insert(channel, capture); // hold idle
+                }
+            }
+        }
+    }
+
+    // TX worker: needs a sink, a driver, and a modulating mode (not None).
+    if !live.tx_workers.contains_key(&channel)
+        && !matches!(mode, crate::mode::ModeConfig::None)
+        && live.sinks.contains_key(&channel)
+        && live.drivers.contains_key(&channel)
+    {
+        if let (Some((rig, rate)), Some(modulator)) =
+            (live.audio.get(&channel).cloned(), registry::build_modulator(&mode))
+        {
+            let sink = live.sinks.remove(&channel).unwrap();
+            let driver = live.drivers.remove(&channel).unwrap();
+            let slot_s = registry::tx_slot_s(&mode);
+            let w = tx_worker::spawn(TxWorkerCfg {
+                channel,
+                rig,
+                rate,
+                modulator,
+                sink,
+                driver,
+                interlock: interlock.clone(),
+                telemetry: telemetry.clone(),
+                slot_s,
+            });
+            live.tx_workers.insert(channel, w);
+        }
+    }
+}
+
 fn key_ptt(
     supervisor: &mut Supervisor,
     interlock: &crate::ptt::interlock::RxTxInterlock,
@@ -274,6 +376,13 @@ fn key_ptt(
         .get(&channel)
         .map(|(d, _)| d.clone())
         .or_else(|| live.ptt_dev.get(&channel).cloned());
+    // On a moded channel the PTT driver is owned by the TX worker, which keys
+    // the rig as part of transmitting. Manual keying isn't available there.
+    if live.tx_workers.contains_key(&channel) {
+        return Err(CoreError::Ptt(PttError::Config(
+            "channel is in a mode; the TX worker keys PTT during transmit — use Transmit, not manual key".into(),
+        )));
+    }
     let driver = live
         .drivers
         .get_mut(&channel)
@@ -320,10 +429,24 @@ fn transmit(
     payload: Vec<u8>,
     tx_id: TransmitId,
 ) -> Result<TransmitId, CoreError> {
+    // Moded channel with a live TX worker: interpret the payload per-mode,
+    // enqueue, and return immediately ("accepted onto the queue, not when it
+    // leaves the air"). The worker emits TransmitStarted/Complete itself.
+    if live.tx_workers.contains_key(&channel) {
+        let mode = supervisor.channel_mode(channel);
+        let frame = tx_worker::payload_to_frame(&mode, payload);
+        let worker = live.tx_workers.get(&channel).unwrap();
+        return match worker.enqueue(TxJob { frame, transmit_id: tx_id }) {
+            Ok(()) => Ok(tx_id),
+            Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
+        };
+    }
+
     let _ = telemetry.send(TelemetryEvent::TransmitStarted { channel, transmit_id: tx_id });
 
-    // Real cycle only when both audio and PTT are bound; otherwise fall back to
-    // the Phase-1 simulation (announce start/complete, ignore payload).
+    // Legacy path (ModeConfig::None / unmoded): a real cycle only when both
+    // audio and PTT are bound; otherwise fall back to the Phase-1 simulation
+    // (announce start/complete, ignore payload).
     let have_audio = live.sinks.contains_key(&channel) && live.audio.contains_key(&channel);
     let have_ptt = live.drivers.contains_key(&channel);
 
@@ -369,6 +492,7 @@ fn evict_on_gone(
 ) {
     if matches!(e, PttError::DeviceGone { .. }) {
         live.drivers.remove(&channel);
+        live.tx_workers.remove(&channel);
         if let Some(id) = live.ptt_dev.remove(&channel) {
             supervisor.ptt_registry_mut().evict(&id);
         }
@@ -406,6 +530,8 @@ fn poll_hotplug(
                     live.sinks.remove(&c);
                     live.captures.remove(&c);
                     live.audio.remove(&c);
+                    live.rx_workers.remove(&c); // stop RX on the departed rig
+                    live.tx_workers.remove(&c);
                 }
                 let ptt_chans: Vec<ChannelId> = live
                     .ptt_dev
@@ -416,6 +542,7 @@ fn poll_hotplug(
                 for c in ptt_chans {
                     live.drivers.remove(&c);
                     live.ptt_dev.remove(&c);
+                    live.tx_workers.remove(&c);
                 }
             }
         }
@@ -595,6 +722,138 @@ mod tests {
             }
         });
 
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    async fn configure_channel(core: &CoreHandle, id: ChannelId, mode: &str) {
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::ConfigureChannel { id, name: "ch".into(), mode: mode.into(), reply: tx })
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    async fn configure_audio_ch(core: &CoreHandle, id: ChannelId, dev: DeviceId) {
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::ConfigureAudio {
+                id,
+                device_id: dev,
+                sample_rate: 48_000,
+                fanout: 1,
+                reply: tx,
+            })
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    fn loop_device() -> DeviceDescriptor {
+        DeviceDescriptor {
+            id: DeviceId::AlsaCard { card_name: "loop".into() },
+            label: "loop".into(),
+            has_capture: true,
+            has_playback: true,
+        }
+    }
+
+    #[test]
+    fn configuring_an_afsk_channel_spawns_rx_and_emits_frames() {
+        use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+        use omnimodem_dsp::mode::Modulator;
+        use omnimodem_dsp::modes::afsk1200::Afsk1200Mod;
+        use omnimodem_dsp::types::Frame as DspFrame;
+
+        let ax = Ax25Frame {
+            dest: Address::new("APRS", 0),
+            source: Address::new("K1ABC", 1),
+            digipeaters: vec![],
+            info: b"core rx".to_vec(),
+        };
+        let f32s = Afsk1200Mod::new().modulate(&DspFrame::packet(ax.encode())).unwrap();
+        let i16s: Vec<i16> = f32s.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let samples = i16s.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(move |_| Box::new(FileBackend::from_samples(samples.clone(), 48_000))),
+        );
+        let mut frames = core.frames.subscribe();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            let got = tokio::time::timeout(std::time::Duration::from_secs(10), frames.recv())
+                .await
+                .expect("frame within timeout")
+                .unwrap();
+            let FrameEvent::RxFrame { data, .. } = got;
+            assert_eq!(data, ax.encode());
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn transmit_on_moded_channel_enqueues_and_completes() {
+        use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let mut tele_rx = core.telemetry.subscribe();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::ConfigurePtt {
+                    id: ChannelId(0),
+                    ptt: PttConfig {
+                        device_id: dev_id.clone(),
+                        method: PttMethod::None,
+                        invert: false,
+                    },
+                    reply: tx,
+                })
+                .unwrap();
+            rx.await.unwrap().unwrap();
+
+            let ax = Ax25Frame {
+                dest: Address::new("APRS", 0),
+                source: Address::new("K1ABC", 1),
+                digipeaters: vec![],
+                info: b"moded tx".to_vec(),
+            };
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::Transmit { channel: ChannelId(0), payload: ax.encode(), reply: tx })
+                .unwrap();
+            // Accepted onto the queue immediately with a transmit id.
+            assert_eq!(rx.await.unwrap().unwrap(), TransmitId(1));
+
+            // The TX worker modulates and runs the cycle, ending in
+            // TransmitComplete for this id.
+            let done = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitComplete { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        return transmit_id;
+                    }
+                }
+            })
+            .await
+            .expect("TransmitComplete within timeout");
+            assert_eq!(done, TransmitId(1));
+        });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
     }

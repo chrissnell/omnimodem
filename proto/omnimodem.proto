@@ -101,10 +101,18 @@ message Event {
     DeviceArrived device_arrived = 8;   // LOSSY
     DeviceDeparted device_departed = 9; // LOSSY
     PttState ptt_state = 10;            // LOSSY
+    ClockOffset clock_offset = 11;      // LOSSY
   }
 }
 
 message ChannelConfigured { uint32 channel = 1; }
+
+// Host clock-discipline metric (windowed modes need an accurate clock).
+message ClockOffset {
+  double offset_s = 1;      // NTP offset estimate (seconds)
+  double est_error_s = 2;   // estimated error (seconds)
+  bool synchronized = 3;    // kernel reports the clock as synchronized
+}
 
 message TransmitStarted {
   uint32 channel = 1;

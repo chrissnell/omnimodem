@@ -1,462 +1,744 @@
-//! WSJT-X 77-bit message codec (FT8/FT4/MSK144), transcribed structurally from
-//! `ft8_lib pack.c` / `unpack.c` / `text.c`.
+//! WSJT-X 77-bit message codec (FT8/FT4/MSK144), ported byte-exact from
+//! `ft8_lib` (`ft8/message.c`, `ft8/text.c`).
 //!
 //! A 77-bit message is `[71 payload bits | 3-bit i3]` (with an `n3` sub-type
-//! inside i3=0 messages). This module implements the most common types:
-//!   - i3 = 1: standard `Std Std Grid` (call+call+grid/report) — full 28-bit
-//!     callsign compression and 15-bit Maidenhead grid + report packing.
-//!   - i3 = 0, n3 = 0: free text (13 chars from a 42-symbol alphabet, 71 bits).
-//!   - i3 = 4: hashed-callsign / nonstandard call form using a 12-bit callsign
-//!     hash (shared hash table).
+//! inside i3=0 messages), stored MSB-first big-endian across 10 bytes (the last
+//! 3 bits of byte 9 are zero pad). This module reproduces ft8_lib's packing
+//! bit-for-bit for the common message types:
+//!   - i3 = 1 / 2: standard `Std Std Grid` (two 28+1-bit callsigns + 16-bit
+//!     grid/report). i3=2 carries a `/P` suffix.
+//!   - i3 = 0, n3 = 0: free text (13 chars over the 42-symbol FULL table).
+//!   - i3 = 4: nonstandard call (one call hashed to 12 bits, the other packed to
+//!     58 bits over ALPHANUM_SPACE_SLASH).
 //!
-//! Bit order: WSJT-X packs the 77 bits **MSB-first big-endian** into 10 bytes
-//! (the last 3 bits of byte 9 are zero pad → 80 bits stored). The LDPC encoder
-//! consumes them in that order. This module produces/consumes that exact
-//! `[u8; 10]` layout and asserts the bit order in tests.
-//!
-//! NOTE: exact on-air payload equality with the `ft8code` reference binary is a
-//! Phase-4 cross-check (the published 28-bit token offsets and the hash
-//! multiplier are pinned there). The codec here is **complete and fully
-//! working**: real 28-bit callsign compression, real 15-bit grid packing, and a
-//! real callsign hash, so `unpack77(pack77(m)) == m` holds for the supported
-//! message types. The constants are internally consistent and round-trip; only
-//! their byte-for-byte agreement with `ft8code` is deferred.
+//! The callsign hash (`save_callsign` in ft8_lib) packs the call into a 58-bit
+//! base-38 integer and computes `n22 = (47055833459 * n58) >> 42 & 0x3FFFFF`;
+//! `n12 = n22 >> 10`, `n10 = n22 >> 12`. A shared table maps n22 back to the
+//! call so hashed forms round-trip after the full call has been seen.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 const NTOKENS: u32 = 2063592;
 const MAX22: u32 = 4194304; // 2^22
+const MAXGRID4: u16 = 32400;
 
-/// Alphabets used by ft8_lib (`text.c`).
-const A0: &[u8] = b" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 37
-const A1: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 36
-const A2: &[u8] = b"0123456789"; // 10
-const A4: &[u8] = b" ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 27
-/// Free-text alphabet (42 symbols).
-const AF: &[u8] = b" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?";
+// Char tables from ft8_lib `text.h`.
+const FULL: &[u8] = b" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?"; // 42
+const ALPHANUM_SPACE: &[u8] = b" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 37
+const ALPHANUM: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 36
+const NUMERIC: &[u8] = b"0123456789"; // 10
+const LETTERS_SPACE: &[u8] = b" ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 27
+const ALPHANUM_SPACE_SLASH: &[u8] = b" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ/"; // 38
 
-fn idx(alpha: &[u8], c: u8) -> Option<u32> {
-    alpha.iter().position(|&x| x == c).map(|p| p as u32)
+fn nchar(c: u8, table: &[u8]) -> Option<i32> {
+    table.iter().position(|&x| x == c).map(|p| p as i32)
 }
 
-/// Shared callsign hash table (maps 22/12/10-bit hashes back to callsigns).
+fn charn(n: usize, table: &[u8]) -> u8 {
+    table[n]
+}
+
+/// Shared callsign hash table (maps 22-bit hashes back to callsigns), mirroring
+/// ft8_lib's `ftx_callsign_hash_interface_t`.
 static HASHES: Mutex<Option<HashMap<u32, String>>> = Mutex::new(None);
 
-fn remember_hash(call: &str) {
-    let h22 = hash22(call);
+/// Compute n22/n12/n10 for a callsign and store it (ft8_lib `save_callsign`).
+/// Returns the 22-bit hash, or `None` if the call has a char outside the base.
+fn save_callsign(callsign: &str) -> Option<u32> {
+    let bytes = callsign.as_bytes();
+    let mut n58: u64 = 0;
+    let mut i = 0;
+    while i < bytes.len() && i < 11 {
+        let j = nchar(bytes[i], ALPHANUM_SPACE_SLASH)?;
+        n58 = 38u64.wrapping_mul(n58).wrapping_add(j as u64);
+        i += 1;
+    }
+    // Pad with trailing spaces (index 0) up to 11 chars.
+    while i < 11 {
+        n58 = 38u64.wrapping_mul(n58);
+        i += 1;
+    }
+    let n22 = ((47055833459u64.wrapping_mul(n58)) >> (64 - 22)) & 0x3FFFFF;
+    let n22 = n22 as u32;
     let mut g = HASHES.lock().unwrap();
-    g.get_or_insert_with(HashMap::new).insert(h22, call.to_string());
+    g.get_or_insert_with(HashMap::new).insert(n22, callsign.to_string());
+    Some(n22)
 }
 
-fn lookup_hash(h: u32, bits: u8) -> Option<String> {
+fn lookup_callsign(hash: u32, bits: u8) -> Option<String> {
     let shift = 22 - bits;
     let g = HASHES.lock().unwrap();
     g.as_ref()?
         .iter()
-        .find(|(k, _)| (*k >> shift) == h)
+        .find(|(k, _)| (*k >> shift) == hash)
         .map(|(_, v)| v.clone())
 }
 
-/// 22-bit callsign hash (ft8_lib `ihashcall`): pack call into a 38-bit integer
-/// over the 38-char base, multiply by a fixed constant, take the top 22 bits.
+/// Public hash helpers (n22 and its truncations).
 pub fn hash22(call: &str) -> u32 {
-    let mut n: u64 = 0;
-    let padded = format!("{call:<11}");
-    for c in padded.bytes().take(11) {
-        let v = idx(A0, c).unwrap_or(0) as u64;
-        n = n.wrapping_mul(38).wrapping_add(v);
+    let bytes = call.as_bytes();
+    let mut n58: u64 = 0;
+    let mut i = 0;
+    while i < bytes.len() && i < 11 {
+        let j = nchar(bytes[i], ALPHANUM_SPACE_SLASH).unwrap_or(0);
+        n58 = 38u64.wrapping_mul(n58).wrapping_add(j as u64);
+        i += 1;
     }
-    // Knuth multiplicative hash, keep the top 22 bits of the 64-bit product.
-    let prod = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (prod >> 42) as u32 & (MAX22 - 1)
+    while i < 11 {
+        n58 = 38u64.wrapping_mul(n58);
+        i += 1;
+    }
+    (((47055833459u64.wrapping_mul(n58)) >> (64 - 22)) & 0x3FFFFF) as u32
 }
 
 pub fn hash12(call: &str) -> u32 {
     hash22(call) >> 10
 }
+
 pub fn hash10(call: &str) -> u32 {
     hash22(call) >> 12
 }
 
-/// Compress a standard callsign to 28 bits (ft8_lib `pack28`). Returns `None`
-/// for callsigns that don't fit the standard grammar.
-fn pack28(call: &str) -> Option<u32> {
-    // Special tokens.
-    if call == "DE" {
-        return Some(0);
-    }
-    if call == "QRZ" {
-        return Some(1);
-    }
-    if call == "CQ" {
-        return Some(2);
-    }
-    if let Some(rest) = call.strip_prefix("CQ ") {
-        // CQ nnn numeric.
-        if rest.len() == 3 && rest.bytes().all(|b| b.is_ascii_digit()) {
-            let n: u32 = rest.parse().ok()?;
-            return Some(3 + n);
+// Small string predicates mirroring ft8_lib `text.c`.
+fn is_digit(c: u8) -> bool {
+    c.is_ascii_digit()
+}
+fn is_letter(c: u8) -> bool {
+    c.is_ascii_alphabetic()
+}
+
+/// ft8_lib `parse_cq_modifier`: returns the numeric value for "CQ nnn" or
+/// "CQ a[bcd]", else `None`. `s` is the full message starting with "CQ ".
+fn parse_cq_modifier(s: &[u8]) -> Option<i32> {
+    let mut nnum = 0;
+    let mut nlet = 0;
+    let mut m: i32 = 0;
+    let mut i = 3;
+    while i < 8 && i < s.len() {
+        let c = s[i];
+        if c == b' ' {
+            break;
+        } else if is_digit(c) {
+            nnum += 1;
+        } else if is_letter(c) {
+            nlet += 1;
+            m = 27 * m + (c - b'A' + 1) as i32;
+        } else {
+            return None;
         }
+        i += 1;
     }
-
-    let c = standardize(call)?;
-    let b = c.as_bytes();
-    // 6-char field layout (ft8_lib `pack28`):
-    //   f0 ∈ A0 (37: space+0-9+A-Z), f1 ∈ A1 (36: 0-9+A-Z), f2 ∈ A2 (10: 0-9),
-    //   f3..f5 ∈ A4 (27: space+A-Z).
-    let mut n = idx(A0, b[0])?;
-    n = n * 36 + idx(A1, b[1])?;
-    n = n * 10 + idx(A2, b[2])?;
-    n = n * 27 + idx(A4, b[3])?;
-    n = n * 27 + idx(A4, b[4])?;
-    n = n * 27 + idx(A4, b[5])?;
-    Some(NTOKENS + 4 + n)
+    if nnum == 3 && nlet == 0 {
+        // atoi of the 3 digits after "CQ "
+        let digits = std::str::from_utf8(&s[3..6]).ok()?;
+        digits.parse::<i32>().ok()
+    } else if nnum == 0 && nlet <= 4 {
+        Some(1000 + m)
+    } else {
+        None
+    }
 }
 
-fn unpack28(n: u32) -> Option<String> {
-    match n {
-        0 => return Some("DE".into()),
-        1 => return Some("QRZ".into()),
-        2 => return Some("CQ".into()),
-        3..=1002 => return Some(format!("CQ {:03}", n - 3)),
-        _ => {}
-    }
-    if n < NTOKENS + 4 {
+/// ft8_lib `pack_basecall`: pack a standard base call into a 28-bit integer, or
+/// `None` if it is not a standard callsign. `length` excludes any /P or /R.
+fn pack_basecall(callsign: &str, length: usize) -> Option<i32> {
+    if length <= 2 {
         return None;
     }
-    let mut m = n - NTOKENS - 4;
-    let f5 = (m % 27) as usize;
-    m /= 27;
-    let f4 = (m % 27) as usize;
-    m /= 27;
-    let f3 = (m % 27) as usize;
-    m /= 27;
-    let f2 = (m % 10) as usize;
-    m /= 10;
-    let f1 = (m % 36) as usize;
-    m /= 36;
-    let f0 = (m % 37) as usize;
-    let s: String = [
-        A0[f0] as char,
-        A1[f1] as char,
-        A2[f2] as char,
-        A4[f3] as char,
-        A4[f4] as char,
-        A4[f5] as char,
-    ]
-    .iter()
-    .collect();
-    Some(s.trim().to_string())
+    let src = callsign.as_bytes();
+    let mut c6 = [b' '; 6];
+
+    if callsign.starts_with("3DA0") && length > 4 && length <= 7 {
+        // Swaziland: 3DA0XYZ -> 3D0XYZ
+        c6[..3].copy_from_slice(b"3D0");
+        c6[3..3 + (length - 4)].copy_from_slice(&src[4..length]);
+    } else if callsign.starts_with("3X") && length >= 3 && is_letter(src[2]) && length <= 7 {
+        // Guinea: 3XA0XYZ -> QA0XYZ
+        c6[0] = b'Q';
+        c6[1..1 + (length - 2)].copy_from_slice(&src[2..length]);
+    } else if length >= 3 && is_digit(src[2]) && length <= 6 {
+        // AB0XYZ
+        c6[..length].copy_from_slice(&src[..length]);
+    } else if length >= 2 && is_digit(src[1]) && length <= 5 {
+        // A0XYZ -> " A0XYZ"
+        c6[1..1 + length].copy_from_slice(&src[..length]);
+    }
+
+    let i0 = nchar(c6[0], ALPHANUM_SPACE)?;
+    let i1 = nchar(c6[1], ALPHANUM)?;
+    let i2 = nchar(c6[2], NUMERIC)?;
+    let i3 = nchar(c6[3], LETTERS_SPACE)?;
+    let i4 = nchar(c6[4], LETTERS_SPACE)?;
+    let i5 = nchar(c6[5], LETTERS_SPACE)?;
+
+    let mut n = i0;
+    n = n * 36 + i1;
+    n = n * 10 + i2;
+    n = n * 27 + i3;
+    n = n * 27 + i4;
+    n = n * 27 + i5;
+    Some(n)
 }
 
-/// Right-justify a callsign into the 6-char `[A1][A1][A2][A3][A3][A3]` template
-/// so the prefix digit/letter and the numeral land in their fields.
-fn standardize(call: &str) -> Option<String> {
-    let c = call.to_ascii_uppercase();
-    if c.len() < 3 || c.len() > 6 || !c.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return None;
+/// ft8_lib `pack28`: pack a special token, 22-bit hash, or base call into a
+/// 28-bit value. Returns the value and sets `ip` (the /R or /P suffix flag).
+fn pack28(callsign: &str) -> Option<(i32, u8)> {
+    if callsign == "DE" {
+        return Some((0, 0));
     }
-    // Find the digit position (the call area number).
-    let dpos = c.bytes().position(|b| b.is_ascii_digit())?;
-    // Field 2 (index 2) must hold the digit. Pad so digit lands at index 2.
-    let pad = 2usize.checked_sub(dpos)?;
-    let mut s = String::new();
-    for _ in 0..pad {
-        s.push(' ');
+    if callsign == "QRZ" {
+        return Some((1, 0));
     }
-    s.push_str(&c);
-    while s.len() < 6 {
-        s.push(' ');
+    if callsign == "CQ" {
+        return Some((2, 0));
     }
-    if s.len() != 6 {
-        return None;
-    }
-    // Validate each field against its alphabet.
-    let b = s.as_bytes();
-    idx(A0, b[0])?;
-    idx(A1, b[1])?;
-    idx(A2, b[2])?;
-    idx(A4, b[3])?;
-    idx(A4, b[4])?;
-    idx(A4, b[5])?;
-    Some(s)
-}
 
-/// Pack a 4-char Maidenhead grid (e.g. `FN42`) into 15 bits, or a signed
-/// report into the same field (ft8_lib `pack_grid`).
-fn pack_grid(token: &str) -> Option<u32> {
-    let b = token.as_bytes();
-    if b.len() == 4
-        && b[0].is_ascii_uppercase()
-        && b[1].is_ascii_uppercase()
-        && b[2].is_ascii_digit()
-        && b[3].is_ascii_digit()
-    {
-        let j1 = (b[0] - b'A') as u32;
-        let j2 = (b[1] - b'A') as u32;
-        let j3 = (b[2] - b'0') as u32;
-        let j4 = (b[3] - b'0') as u32;
-        let n = ((j1 * 18 + j2) * 10 + j3) * 10 + j4;
-        return Some(n); // < 18*18*10*10 = 32400 < 2^15
+    let length = callsign.len();
+    if callsign.starts_with("CQ ") && length < 8 {
+        let v = parse_cq_modifier(callsign.as_bytes())?;
+        return Some((3 + v, 0));
     }
+
+    let mut ip = 0u8;
+    let mut length_base = length;
+    if callsign.ends_with("/P") || callsign.ends_with("/R") {
+        ip = 1;
+        length_base = length - 2;
+    }
+
+    if let Some(n28) = pack_basecall(callsign, length_base) {
+        // Standard callsign with optional /P or /R suffix.
+        save_callsign(callsign)?;
+        return Some((NTOKENS as i32 + MAX22 as i32 + n28, ip));
+    }
+
+    if (3..=11).contains(&length) {
+        // Nonstandard call: 22-bit hash.
+        let n22 = save_callsign(callsign)?;
+        return Some((NTOKENS as i32 + n22 as i32, 0));
+    }
+
     None
 }
 
-fn unpack_grid(n: u32) -> Option<String> {
-    if n >= 32400 {
+/// ft8_lib `unpack28`: turn a 28-bit value + suffix flag back into a callsign.
+fn unpack28(n28: u32, ip: u8, i3: u8) -> Option<String> {
+    if n28 < NTOKENS {
+        if n28 <= 2 {
+            return Some(match n28 {
+                0 => "DE",
+                1 => "QRZ",
+                _ => "CQ",
+            }
+            .to_string());
+        }
+        if n28 <= 1002 {
+            return Some(format!("CQ {:03}", n28 - 3));
+        }
+        if n28 <= 532443 {
+            let mut n = n28 - 1003;
+            let mut aaaa = [0u8; 4];
+            for i in (0..4).rev() {
+                aaaa[i] = charn((n % 27) as usize, LETTERS_SPACE);
+                n /= 27;
+            }
+            let tail = std::str::from_utf8(&aaaa).ok()?.trim_start();
+            return Some(format!("CQ {tail}"));
+        }
         return None;
     }
-    let j4 = n % 10;
-    let n = n / 10;
-    let j3 = n % 10;
-    let n = n / 10;
-    let j2 = n % 18;
-    let j1 = n / 18;
-    Some(
-        [
-            (b'A' + j1 as u8) as char,
-            (b'A' + j2 as u8) as char,
-            (b'0' + j3 as u8) as char,
-            (b'0' + j4 as u8) as char,
-        ]
-        .iter()
-        .collect(),
-    )
-}
 
-/// MSB-first bit writer over the fixed 77-bit field.
-struct BitWriter {
-    bits: Vec<u8>,
-}
-impl BitWriter {
-    fn new() -> Self {
-        BitWriter { bits: Vec::with_capacity(77) }
+    let n28 = n28 - NTOKENS;
+    if n28 < MAX22 {
+        // 22-bit hash.
+        let call = lookup_callsign(n28, 22).unwrap_or_else(|| "...".to_string());
+        return Some(format!("<{call}>"));
     }
-    fn put(&mut self, value: u32, n: u8) {
-        for i in (0..n).rev() {
-            self.bits.push(((value >> i) & 1) as u8);
-        }
-    }
-    fn finish(mut self) -> [u8; 10] {
-        self.bits.resize(80, 0); // pad 77 -> 80 (3 zero bits)
-        let mut out = [0u8; 10];
-        for (i, chunk) in self.bits.chunks(8).enumerate() {
-            let mut b = 0u8;
-            for (j, &bit) in chunk.iter().enumerate() {
-                b |= bit << (7 - j);
-            }
-            out[i] = b;
-        }
-        out
-    }
-}
 
-struct BitReader {
-    bits: Vec<u8>,
-    pos: usize,
-}
-impl BitReader {
-    fn new(bytes: &[u8; 10]) -> Self {
-        let mut bits = Vec::with_capacity(80);
-        for &b in bytes {
-            for i in (0..8).rev() {
-                bits.push((b >> i) & 1);
-            }
-        }
-        BitReader { bits, pos: 0 }
-    }
-    fn get(&mut self, n: u8) -> u32 {
-        let mut v = 0u32;
-        for _ in 0..n {
-            v = (v << 1) | self.bits[self.pos] as u32;
-            self.pos += 1;
-        }
-        v
-    }
-}
+    let mut n = n28 - MAX22;
+    let mut c = [0u8; 6];
+    c[5] = charn((n % 27) as usize, LETTERS_SPACE);
+    n /= 27;
+    c[4] = charn((n % 27) as usize, LETTERS_SPACE);
+    n /= 27;
+    c[3] = charn((n % 27) as usize, LETTERS_SPACE);
+    n /= 27;
+    c[2] = charn((n % 10) as usize, NUMERIC);
+    n /= 10;
+    c[1] = charn((n % 36) as usize, ALPHANUM);
+    n /= 36;
+    c[0] = charn((n % 37) as usize, ALPHANUM_SPACE);
 
-/// Pack a free-text message (up to 13 chars from the 42-symbol alphabet) into
-/// 71 bits + i3=0/n3=0.
-fn pack_free_text(text: &str) -> [u8; 10] {
-    let mut s: Vec<u8> = text.to_ascii_uppercase().into_bytes();
-    s.retain(|c| AF.contains(c));
-    s.truncate(13);
-    while s.len() < 13 {
-        s.insert(0, b' ');
-    }
-    // Accumulate base-42 into a 71-bit big integer (split across two u64s).
-    let mut hi: u64 = 0;
-    let mut lo: u64 = 0;
-    for &c in &s {
-        let d = idx(AF, c).unwrap() as u64;
-        // value = value * 42 + d, across 128 bits.
-        let new_lo = lo.wrapping_mul(42).wrapping_add(d);
-        let carry = ((lo as u128 * 42 + d as u128) >> 64) as u64;
-        hi = hi.wrapping_mul(42).wrapping_add(carry);
-        lo = new_lo;
-    }
-    // 71 payload bits: top 7 from hi, then 64 from lo. Then i3=0 (000), n3 in
-    // the low 3 of the type — for free text i3=0,n3=0 so trailing 6 bits = 0.
-    let mut w = BitWriter::new();
-    w.put((hi & 0x7F) as u32, 7);
-    w.put((lo >> 32) as u32, 32);
-    w.put(lo as u32, 32);
-    w.put(0, 3); // i3 = 0
-    w.put(0, 3); // n3 = 0 (within the 77 — using last 3 of the 71+3+3 layout)
-    // The above wrote 7+32+32+3+3 = 77 bits.
-    w.finish()
-}
-
-fn unpack_free_text(r: &mut BitReader) -> String {
-    let hi = r.get(7) as u64;
-    let lo_hi = r.get(32) as u64;
-    let lo_lo = r.get(32) as u64;
-    let lo = (lo_hi << 32) | lo_lo;
-    // Reconstruct the base-42 digits.
-    let mut value: u128 = ((hi as u128) << 64) | (lo as u128);
-    let mut chars = [b' '; 13];
-    for slot in chars.iter_mut().rev() {
-        let d = (value % 42) as usize;
-        value /= 42;
-        *slot = AF[d];
-    }
-    String::from_utf8_lossy(&chars).trim().to_string()
-}
-
-/// Pack a WSJT-X message string to 77 bits (10 bytes). Supports `CQ`/standard
-/// call + grid, free text, and hashed-callsign forms.
-pub fn pack77(message: &str) -> [u8; 10] {
-    let msg = message.trim();
-    let parts: Vec<&str> = msg.split_whitespace().collect();
-
-    // Hashed-callsign form (i3 = 4): "<CALL1> CALL2 GRID" sends CALL1 as a
-    // 12-bit hash and CALL2 as a full 28-bit standard call.
-    if parts.len() == 3 && parts[0].starts_with('<') && parts[0].ends_with('>') {
-        if let Some(p) = try_pack_hashed(&parts) {
-            return p;
-        }
-    }
-    // Try standard "CALL1 CALL2 GRID" (i3 = 1).
-    if parts.len() == 3 {
-        if let Some(p) = try_pack_standard(&parts) {
-            return p;
-        }
-    }
-    if parts.len() == 2 {
-        // "CQ CALL" — CQ has token 2 then call + blank grid.
-        if let Some(p) = try_pack_standard(&[parts[0], parts[1], ""]) {
-            return p;
-        }
-    }
-    // Fallback: free text.
-    pack_free_text(msg)
-}
-
-fn try_pack_standard(parts: &[&str]) -> Option<[u8; 10]> {
-    let c1 = pack28(parts[0])?;
-    let c2 = pack28(parts[1])?;
-    if parts[0] != "CQ" && parts[0] != "DE" && parts[0] != "QRZ" {
-        remember_hash(parts[0]);
-    }
-    remember_hash(parts[1]);
-    // Grid (or blank = 0 with a "no grid" flag via grid value 32401).
-    let grid = if parts[2].is_empty() {
-        32401 // sentinel: blank grid
+    let raw = std::str::from_utf8(&c).ok()?;
+    let mut result = if raw.starts_with("3D0") && c[3] != b' ' {
+        format!("3DA0{}", raw[3..].trim())
+    } else if c[0] == b'Q' && is_letter(c[1]) {
+        format!("3X{}", raw[1..].trim())
     } else {
-        pack_grid(parts[2])?
+        raw.trim().to_string()
     };
-    let mut w = BitWriter::new();
-    w.put(c1, 28);
-    w.put(c2, 28);
-    w.put(1, 1); // R bit
-    w.put(grid, 16); // 15-bit grid + 1 flag bit (we use 16 here for headroom)
-    // Body = 73 bits; pad to 74 so the 3-bit i3 type field lands at bits 74..76
-    // — the same fixed position used by every message type so the unpacker can
-    // route unambiguously.
-    w.put(0, 1);
-    w.put(1, 3); // i3 = 1 (standard)
-    Some(w.finish())
+
+    if result.len() < 3 {
+        return None;
+    }
+    if ip != 0 {
+        match i3 {
+            1 => result.push_str("/R"),
+            2 => result.push_str("/P"),
+            _ => return None,
+        }
+    }
+    save_callsign(&result);
+    Some(result)
 }
 
-/// Pack "<CALL1> CALL2 GRID": CALL1 → 12-bit hash, CALL2 → 28-bit standard
-/// call, then the 15-bit grid. Type field i3 = 4.
-fn try_pack_hashed(parts: &[&str]) -> Option<[u8; 10]> {
-    let call1 = parts[0].trim_start_matches('<').trim_end_matches('>');
-    remember_hash(call1);
-    let h12 = hash12(call1);
-    let c2 = pack28(parts[1])?;
-    remember_hash(parts[1]);
-    let grid = pack_grid(parts[2])?;
-    let mut w = BitWriter::new();
-    w.put(h12, 12);
-    w.put(c2, 28);
-    w.put(grid, 16);
-    // Body = 56 bits; pad to 74 so i3 lands at the fixed 74..76 position.
-    w.put(0, 18);
-    w.put(4, 3); // i3 = 4 (hashed callsign)
-    Some(w.finish())
+/// ft8_lib `pack58`: pack a (possibly bracketed) call into a 58-bit base-38
+/// integer over ALPHANUM_SPACE_SLASH, and store the trimmed call in the hash
+/// table.
+fn pack58(callsign: &str) -> Option<u64> {
+    let mut bytes = callsign.as_bytes();
+    if bytes.first() == Some(&b'<') {
+        bytes = &bytes[1..];
+    }
+    let mut result: u64 = 0;
+    let mut c11: Vec<u8> = Vec::with_capacity(11);
+    for &c in bytes {
+        if c == b'<' || c11.len() >= 11 {
+            break;
+        }
+        let j = nchar(c, ALPHANUM_SPACE_SLASH)?;
+        result = result.wrapping_mul(38).wrapping_add(j as u64);
+        c11.push(c);
+    }
+    let trimmed = std::str::from_utf8(&c11).ok()?;
+    save_callsign(trimmed)?;
+    Some(result)
 }
 
-/// Read the 3-bit i3 type field, which lives at the fixed bit positions
-/// 74..76 (MSB-first) for every message type.
-fn read_i3(bytes: &[u8; 10]) -> u32 {
-    let mut r = BitReader::new(bytes);
-    let _ = r.get(74);
-    r.get(3)
+/// ft8_lib `unpack58`: reconstruct a call from a 58-bit value, store it.
+fn unpack58(mut n58: u64) -> String {
+    let mut c11 = [0u8; 11];
+    for i in (0..11).rev() {
+        c11[i] = charn((n58 % 38) as usize, ALPHANUM_SPACE_SLASH);
+        n58 /= 38;
+    }
+    let call = std::str::from_utf8(&c11).unwrap_or("").trim().to_string();
+    if call.len() >= 3 {
+        save_callsign(&call);
+    }
+    call
 }
 
-/// Unpack a 77-bit message (10 bytes) to its text form. Routes on the i3 type
-/// field at bits 74..76.
+/// ft8_lib `packgrid`: 4-char grid / report / token into a 16-bit field.
+fn packgrid(grid4: &str) -> u16 {
+    if grid4.is_empty() {
+        return MAXGRID4 + 1;
+    }
+    if grid4 == "RRR" {
+        return MAXGRID4 + 2;
+    }
+    if grid4 == "RR73" {
+        return MAXGRID4 + 3;
+    }
+    if grid4 == "73" {
+        return MAXGRID4 + 4;
+    }
+
+    let b = grid4.as_bytes();
+    if b.len() == 4
+        && (b'A'..=b'R').contains(&b[0])
+        && (b'A'..=b'R').contains(&b[1])
+        && is_digit(b[2])
+        && is_digit(b[3])
+    {
+        let mut g = (b[0] - b'A') as u16;
+        g = g * 18 + (b[1] - b'A') as u16;
+        g = g * 10 + (b[2] - b'0') as u16;
+        g = g * 10 + (b[3] - b'0') as u16;
+        return g;
+    }
+
+    // Report: +dd / -dd / R+dd / R-dd
+    if b[0] == b'R' {
+        let dd = dd_to_int(&grid4[1..]);
+        let irpt = (35 + dd) as u16;
+        (MAXGRID4 + irpt) | 0x8000
+    } else {
+        let dd = dd_to_int(grid4);
+        let irpt = (35 + dd) as u16;
+        MAXGRID4 + irpt
+    }
+}
+
+/// ft8_lib `dd_to_int` (width 3): parse a signed 2-digit report.
+fn dd_to_int(s: &str) -> i32 {
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return 0;
+    }
+    let (negative, mut i) = match b[0] {
+        b'-' => (true, 1),
+        b'+' => (false, 1),
+        _ => (false, 0),
+    };
+    let mut result = 0i32;
+    while i < b.len() && i < 3 {
+        if !is_digit(b[i]) {
+            break;
+        }
+        result = result * 10 + (b[i] - b'0') as i32;
+        i += 1;
+    }
+    if negative {
+        -result
+    } else {
+        result
+    }
+}
+
+/// ft8_lib `unpackgrid`.
+fn unpackgrid(igrid4: u16, ir: u8) -> String {
+    if igrid4 <= MAXGRID4 {
+        let mut prefix = String::new();
+        if ir > 0 {
+            prefix.push_str("R ");
+        }
+        let mut n = igrid4;
+        let mut g = [0u8; 4];
+        g[3] = b'0' + (n % 10) as u8;
+        n /= 10;
+        g[2] = b'0' + (n % 10) as u8;
+        n /= 10;
+        g[1] = b'A' + (n % 18) as u8;
+        n /= 18;
+        g[0] = b'A' + (n % 18) as u8;
+        prefix.push_str(std::str::from_utf8(&g).unwrap());
+        prefix
+    } else {
+        let irpt = igrid4 - MAXGRID4;
+        match irpt {
+            1 => String::new(),
+            2 => "RRR".to_string(),
+            3 => "RR73".to_string(),
+            4 => "73".to_string(),
+            _ => {
+                let mut s = String::new();
+                if ir > 0 {
+                    s.push('R');
+                }
+                let val = irpt as i32 - 35;
+                s.push_str(&format!("{val:+03}"));
+                s
+            }
+        }
+    }
+}
+
+/// ft8_lib `ftx_message_encode_std` (i3 = 1 or 2).
+fn encode_std(call_to: &str, call_de: &str, extra: &str) -> Option<[u8; 10]> {
+    let (n28a, ipa) = pack28(call_to)?;
+    let (n28b, ipb) = pack28(call_de)?;
+    if n28a < 0 || n28b < 0 {
+        return None;
+    }
+
+    let mut i3 = 1u8;
+    if call_to.ends_with("/P") || call_de.ends_with("/P") {
+        i3 = 2;
+        if call_to.ends_with("/R") || call_de.ends_with("/R") {
+            return None; // suffix error
+        }
+    }
+
+    // Reject nonstandard /-call in call_de when call_to is CQ — needs type 4.
+    let icq = call_to == "CQ" || call_to.starts_with("CQ ");
+    if let Some(pos) = call_de.find('/') {
+        if pos >= 2 && icq && call_de[pos..] != *"/P" && call_de[pos..] != *"/R" {
+            return None;
+        }
+    }
+
+    let igrid4 = packgrid(extra);
+
+    let mut n29a = ((n28a as u32) << 1) | ipa as u32;
+    let n29b = ((n28b as u32) << 1) | ipb as u32;
+    if call_to.ends_with("/R") {
+        n29a |= 1;
+    } else if call_to.ends_with("/P") {
+        n29a |= 1;
+        i3 = 2;
+    }
+
+    let mut p = [0u8; 10];
+    p[0] = (n29a >> 21) as u8;
+    p[1] = (n29a >> 13) as u8;
+    p[2] = (n29a >> 5) as u8;
+    p[3] = ((n29a << 3) as u8) | (n29b >> 26) as u8;
+    p[4] = (n29b >> 18) as u8;
+    p[5] = (n29b >> 10) as u8;
+    p[6] = (n29b >> 2) as u8;
+    p[7] = ((n29b << 6) as u8) | (igrid4 >> 10) as u8;
+    p[8] = (igrid4 >> 2) as u8;
+    p[9] = ((igrid4 << 6) as u8) | (i3 << 3);
+    Some(p)
+}
+
+/// ft8_lib `ftx_message_encode_nonstd` (i3 = 4).
+fn encode_nonstd(call_to: &str, call_de: &str, extra: &str) -> Option<[u8; 10]> {
+    let i3 = 4u8;
+    let icq = call_to == "CQ" || call_to.starts_with("CQ ");
+
+    if !icq && call_to.len() < 3 {
+        return None;
+    }
+    if call_de.len() < 3 {
+        return None;
+    }
+
+    let iflip: u8;
+    let mut n12: u16 = 0;
+    let call58: &str;
+
+    if !icq {
+        // call_de is plain-text unless it is the bracketed (hashed) one.
+        iflip = if call_de.starts_with('<') && call_de.ends_with('>') {
+            1
+        } else {
+            0
+        };
+        let (call12, c58) = if iflip == 0 {
+            (call_to, call_de)
+        } else {
+            (call_de, call_to)
+        };
+        let h = save_callsign(call12.trim_start_matches('<').trim_end_matches('>'))?;
+        n12 = (h >> 10) as u16;
+        call58 = c58;
+    } else {
+        iflip = 0;
+        call58 = call_de;
+    }
+
+    let n58 = pack58(call58)?;
+
+    let nrpt: u8 = if icq {
+        0
+    } else if extra == "RRR" {
+        1
+    } else if extra == "RR73" {
+        2
+    } else if extra == "73" {
+        3
+    } else {
+        0
+    };
+    let icq_bit = icq as u8;
+
+    let mut p = [0u8; 10];
+    p[0] = (n12 >> 4) as u8;
+    p[1] = ((n12 << 4) as u8) | (n58 >> 54) as u8;
+    p[2] = (n58 >> 46) as u8;
+    p[3] = (n58 >> 38) as u8;
+    p[4] = (n58 >> 30) as u8;
+    p[5] = (n58 >> 22) as u8;
+    p[6] = (n58 >> 14) as u8;
+    p[7] = (n58 >> 6) as u8;
+    p[8] = ((n58 << 2) as u8) | (iflip << 1) | (nrpt >> 1);
+    p[9] = (nrpt << 7) | (icq_bit << 6) | (i3 << 3);
+    Some(p)
+}
+
+/// ft8_lib `ftx_message_encode_free` + `ftx_message_encode_telemetry` (i3 = 0).
+fn encode_free(text: &str) -> Option<[u8; 10]> {
+    if text.len() > 13 {
+        return None;
+    }
+    let tb = text.as_bytes();
+    let mut b71 = [0u8; 9];
+    for idx in 0..13 {
+        let c = if idx < tb.len() { tb[idx] } else { b' ' };
+        let cid = nchar(c, FULL)?;
+        let mut rem: u16 = cid as u16;
+        for i in (0..9).rev() {
+            rem += b71[i] as u16 * 42;
+            b71[i] = (rem & 0xff) as u8;
+            rem >>= 8;
+        }
+    }
+    // encode_telemetry: shift b71 left 1 bit into payload.
+    let mut p = [0u8; 10];
+    let mut carry = 0u8;
+    for i in (0..9).rev() {
+        p[i] = (b71[i] << 1) | (carry >> 7);
+        carry = b71[i] & 0x80;
+    }
+    p[9] = 0; // i3.n3 = 0.0
+    Some(p)
+}
+
+/// Tokenize like ft8_lib `copy_token`: whitespace-delimited, merging runs.
+fn tokens(s: &str) -> Vec<&str> {
+    s.split(' ').filter(|t| !t.is_empty()).collect()
+}
+
+/// Pack a WSJT-X message string to 77 bits (10 bytes), dispatching exactly like
+/// ft8_lib `ftx_message_encode`: ≤3 tokens → try std, then nonstd; else free.
+pub fn pack77(message: &str) -> [u8; 10] {
+    let msg = message;
+    let (call_to, call_de, extra, leftover);
+
+    if let Some(rest) = msg.strip_prefix("CQ ") {
+        let toks = tokens(rest);
+        if let Some(v) = parse_cq_modifier(msg.as_bytes()) {
+            let _ = v;
+            // "CQ nnn" / "CQ a[bcd]" is a single call_to token.
+            call_to = format!("CQ {}", toks.first().copied().unwrap_or(""));
+            call_de = toks.get(1).copied().unwrap_or("").to_string();
+            extra = toks.get(2).copied().unwrap_or("").to_string();
+            leftover = toks.len() > 3;
+        } else {
+            call_to = "CQ".to_string();
+            call_de = toks.first().copied().unwrap_or("").to_string();
+            extra = toks.get(1).copied().unwrap_or("").to_string();
+            leftover = toks.len() > 2;
+        }
+    } else {
+        let toks = tokens(msg);
+        call_to = toks.first().copied().unwrap_or("").to_string();
+        call_de = toks.get(1).copied().unwrap_or("").to_string();
+        extra = toks.get(2).copied().unwrap_or("").to_string();
+        leftover = toks.len() > 3;
+    }
+
+    if !leftover {
+        if let Some(p) = encode_std(&call_to, &call_de, &extra) {
+            return p;
+        }
+        if let Some(p) = encode_nonstd(&call_to, &call_de, &extra) {
+            return p;
+        }
+    }
+    encode_free(message).unwrap_or([0u8; 10])
+}
+
+fn get_i3(p: &[u8; 10]) -> u8 {
+    (p[9] >> 3) & 0x07
+}
+
+fn get_n3(p: &[u8; 10]) -> u8 {
+    ((p[8] << 2) & 0x04) | ((p[9] >> 6) & 0x03)
+}
+
+/// ft8_lib `ftx_message_decode_std`.
+fn decode_std(p: &[u8; 10]) -> String {
+    let n29a = ((p[0] as u32) << 21)
+        | ((p[1] as u32) << 13)
+        | ((p[2] as u32) << 5)
+        | ((p[3] as u32) >> 3);
+    let n29b = (((p[3] & 0x07) as u32) << 26)
+        | ((p[4] as u32) << 18)
+        | ((p[5] as u32) << 10)
+        | ((p[6] as u32) << 2)
+        | ((p[7] as u32) >> 6);
+    let ir = (p[7] & 0x20) >> 5;
+    let igrid4 = (((p[7] & 0x1F) as u16) << 10) | ((p[8] as u16) << 2) | ((p[9] as u16) >> 6);
+    let i3 = get_i3(p);
+
+    let call_to = match unpack28(n29a >> 1, (n29a & 1) as u8, i3) {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let call_de = match unpack28(n29b >> 1, (n29b & 1) as u8, i3) {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let extra = unpackgrid(igrid4, ir);
+    join3(&call_to, &call_de, &extra)
+}
+
+/// ft8_lib `ftx_message_decode_nonstd`.
+fn decode_nonstd(p: &[u8; 10]) -> String {
+    let n12 = (((p[0] as u16) << 4) | ((p[1] as u16) >> 4)) & 0x0FFF;
+    let n58 = (((p[1] & 0x0F) as u64) << 54)
+        | ((p[2] as u64) << 46)
+        | ((p[3] as u64) << 38)
+        | ((p[4] as u64) << 30)
+        | ((p[5] as u64) << 22)
+        | ((p[6] as u64) << 14)
+        | ((p[7] as u64) << 6)
+        | ((p[8] as u64) >> 2);
+    let iflip = (p[8] >> 1) & 0x01;
+    let nrpt = ((p[8] & 0x01) << 1) | (p[9] >> 7);
+    let icq = (p[9] >> 6) & 0x01;
+
+    let call_decoded = unpack58(n58);
+    let call_3 = lookup_callsign(n12 as u32, 12)
+        .map(|c| format!("<{c}>"))
+        .unwrap_or_else(|| "<...>".to_string());
+
+    let (call_1, call_2) = if iflip != 0 {
+        (call_decoded.clone(), call_3.clone())
+    } else {
+        (call_3.clone(), call_decoded.clone())
+    };
+
+    let (call_to, extra) = if icq == 0 {
+        let e = match nrpt {
+            1 => "RRR",
+            2 => "RR73",
+            3 => "73",
+            _ => "",
+        };
+        (call_1, e.to_string())
+    } else {
+        ("CQ".to_string(), String::new())
+    };
+    join3(&call_to, &call_2, &extra)
+}
+
+/// ft8_lib `ftx_message_decode_free`.
+fn decode_free(p: &[u8; 10]) -> String {
+    // decode_telemetry: shift payload right 1 bit.
+    let mut b71 = [0u8; 9];
+    let mut carry = 0u8;
+    for i in 0..9 {
+        b71[i] = (carry << 7) | (p[i] >> 1);
+        carry = p[i] & 0x01;
+    }
+    let mut c14 = [b' '; 13];
+    for slot in c14.iter_mut().rev() {
+        let mut rem: u16 = 0;
+        for byte in b71.iter_mut() {
+            rem = (rem << 8) | *byte as u16;
+            *byte = (rem / 42) as u8;
+            rem %= 42;
+        }
+        *slot = charn(rem as usize, FULL);
+    }
+    std::str::from_utf8(&c14).unwrap_or("").trim().to_string()
+}
+
+fn join3(f1: &str, f2: &str, f3: &str) -> String {
+    let mut out = f1.to_string();
+    if !f2.is_empty() {
+        out.push(' ');
+        out.push_str(f2);
+    }
+    if !f3.is_empty() {
+        out.push(' ');
+        out.push_str(f3);
+    }
+    out
+}
+
+/// Unpack a 77-bit message (10 bytes) to its text form, routing on i3/n3.
 pub fn unpack77(bytes: &[u8; 10]) -> String {
-    match read_i3(bytes) {
-        4 => {
-            // Hashed callsign: h12(12) | c2(28) | grid(16) | pad | i3.
-            let mut r = BitReader::new(bytes);
-            let h12 = r.get(12);
-            let c2 = r.get(28);
-            let grid = r.get(16);
-            if let Some(s2) = unpack28(c2) {
-                let call1 = lookup_hash(h12, 12).unwrap_or_else(|| "...".to_string());
-                let g = unpack_grid(grid).unwrap_or_default();
-                let mut out = format!("<{call1}> {s2}");
-                if !g.is_empty() {
-                    out.push(' ');
-                    out.push_str(&g);
-                }
-                return out.trim().to_string();
-            }
-            String::new()
-        }
-        1 => {
-            // Standard: c1(28) | c2(28) | R(1) | grid(16) | pad | i3.
-            let mut r = BitReader::new(bytes);
-            let c1 = r.get(28);
-            let c2 = r.get(28);
-            let _rbit = r.get(1);
-            let grid = r.get(16);
-            match (unpack28(c1), unpack28(c2)) {
-                (Some(s1), Some(s2)) => {
-                    let g = if grid == 32401 {
-                        String::new()
-                    } else {
-                        unpack_grid(grid).unwrap_or_default()
-                    };
-                    let mut out = format!("{s1} {s2}");
-                    if !g.is_empty() {
-                        out.push(' ');
-                        out.push_str(&g);
-                    }
-                    out.trim().to_string()
-                }
-                _ => String::new(),
-            }
-        }
-        // i3 == 0 => free text.
-        _ => {
-            let mut r = BitReader::new(bytes);
-            unpack_free_text(&mut r)
-        }
+    match get_i3(bytes) {
+        1 | 2 => decode_std(bytes),
+        4 => decode_nonstd(bytes),
+        0 if get_n3(bytes) == 0 => decode_free(bytes),
+        _ => String::new(),
     }
 }
 
@@ -464,93 +746,95 @@ pub fn unpack77(bytes: &[u8; 10]) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn standard_cq_grid_roundtrip() {
-        let m = "CQ K1ABC FN42";
-        let packed = pack77(m);
-        assert_eq!(unpack77(&packed), m);
+    fn hex(p: &[u8; 10]) -> String {
+        p.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]
-    fn standard_call_call_grid_roundtrip() {
-        let m = "W9XYZ K1ABC FN42";
-        let packed = pack77(m);
-        assert_eq!(unpack77(&packed), m);
-    }
-
-    #[test]
-    fn msb_first_bit_order() {
-        // i3 = 1 lives in bits 74..76 (MSB-first). For a standard message the
-        // 3-bit i3 field must read back as 1.
-        let packed = pack77("CQ K1ABC FN42");
-        let mut r = BitReader::new(&packed);
-        let _ = r.get(74);
-        assert_eq!(r.get(3), 1, "i3 type field must be 1 (MSB-first)");
-    }
-
-    #[test]
-    fn hashed_callsign_roundtrip() {
-        // Prime the shared hash table by packing the call once as a full call,
-        // then reference it via its 12-bit hash.
-        let _ = pack77("CQ PJ4ABC FN42");
-        let m = "<PJ4ABC> K1ABC FN42";
-        let packed = pack77(m);
-        assert_eq!(unpack77(&packed), m);
-    }
-
-    #[test]
-    fn type_field_routes_by_i3() {
-        // i3 lives at the fixed bits 74..76 for every type.
-        assert_eq!(read_i3(&pack77("CQ K1ABC FN42")), 1);
-        let _ = pack77("CQ PJ4ABC FN42");
-        assert_eq!(read_i3(&pack77("<PJ4ABC> K1ABC FN42")), 4);
-        assert_eq!(read_i3(&pack77("HELLO WORLD")), 0);
-    }
-
-    #[test]
-    fn free_text_roundtrip() {
-        for m in ["HELLO WORLD", "TEST 123", "DE N0CALL K"] {
-            let packed = pack77(m);
-            assert_eq!(unpack77(&packed), m);
+    fn byte_exact_with_ft8_lib() {
+        let cases = [
+            ("CQ K1ABC FN42", "000000204def1a8a1988"),
+            ("W9XYZ K1ABC FN42", "0c293b804def1a8a1988"),
+            ("K1ABC W9XYZ RR73", "09bde3506149dc1fa4c8"),
+            ("CQ N0CALL EM48", "000000201e5292084008"),
+            ("HELLO WORLD", "039ddad02b9ddb1fa448"),
+            ("TEST 123", "05b96a609f51de9fa448"),
+            // i3 = 4 nonstandard-call form (reference: ft8_lib ftx_message_encode).
+            ("CQ PJ4ABC/MM", "000001a3a1224cfb3460"),
+        ];
+        for (msg, expected) in cases {
+            assert_eq!(hex(&pack77(msg)), expected, "payload mismatch for {msg}");
         }
     }
 
     #[test]
-    fn callsign_hash_is_deterministic_and_layered() {
+    fn vectors_file_matches() {
+        let raw = include_str!("../../tests/vectors/ft8_reference.json");
+        // Minimal extraction: find each {"msg":"...","payload":"..."} pair.
+        for line in raw.lines() {
+            let Some(mi) = line.find("\"msg\":\"") else { continue };
+            let ms = &line[mi + 7..];
+            let me = ms.find('"').unwrap();
+            let msg = &ms[..me];
+            let Some(pi) = line.find("\"payload\":\"") else { continue };
+            let ps = &line[pi + 11..];
+            let pe = ps.find('"').unwrap();
+            let payload = &ps[..pe];
+            assert_eq!(hex(&pack77(msg)), payload, "payload mismatch for {msg}");
+        }
+    }
+
+    #[test]
+    fn standard_roundtrip() {
+        // Calls that pack as standard base calls round-trip identically.
+        for m in ["CQ K1ABC FN42", "W9XYZ K1ABC FN42", "K1ABC W9XYZ RR73", "PJ4ABC K1ABC FN42"] {
+            assert_eq!(unpack77(&pack77(m)), m, "roundtrip failed for {m}");
+        }
+    }
+
+    #[test]
+    fn nonstandard_hash_roundtrip() {
+        // Nonstandard tokens are sent as 22-bit hashes and decode bracketed,
+        // exactly like ft8_lib (verified against the reference decoder).
+        assert_eq!(unpack77(&pack77("HELLO WORLD")), "<HELLO> <WORLD>");
+        assert_eq!(unpack77(&pack77("TEST 123")), "<TEST> 123");
+        assert_eq!(unpack77(&pack77("CQ N0CALL EM48")), "CQ <N0CALL> EM48");
+    }
+
+    #[test]
+    fn hashed_callsign_roundtrip() {
+        // Prime the table with the full call, then the 22-bit hash token in a
+        // standard message resolves back to the bracketed call.
+        let _ = pack77("PJ4ABC/MM K1ABC RR73");
+        let out = unpack77(&pack77("PJ4ABC/MM K1ABC RR73"));
+        assert_eq!(out, "<PJ4ABC/MM> K1ABC RR73", "hashed roundtrip: got {out}");
+
+        // True i3 = 4 nonstandard-call form (CQ + slashed call).
+        let m = "CQ PJ4ABC/MM";
+        assert_eq!(get_i3(&pack77(m)), 4);
+        assert_eq!(unpack77(&pack77(m)), m, "nonstd roundtrip: got {}", unpack77(&pack77(m)));
+    }
+
+    #[test]
+    fn type_field_routes_by_i3() {
+        assert_eq!(get_i3(&pack77("CQ K1ABC FN42")), 1);
+        // "HELLO WORLD" packs as i3=1 with both tokens hashed (ft8_lib behavior).
+        assert_eq!(get_i3(&pack77("HELLO WORLD")), 1);
+        assert_eq!(get_i3(&pack77("CQ PJ4ABC/MM")), 4);
+    }
+
+    #[test]
+    fn hash_layers() {
         let h22 = hash22("K1ABC");
         assert_eq!(hash12("K1ABC"), h22 >> 10);
         assert_eq!(hash10("K1ABC"), h22 >> 12);
-        // Different calls hash differently (with very high probability).
         assert_ne!(hash22("K1ABC"), hash22("W9XYZ"));
     }
 
     #[test]
     fn pack28_special_tokens() {
-        assert_eq!(pack28("DE"), Some(0));
-        assert_eq!(pack28("QRZ"), Some(1));
-        assert_eq!(pack28("CQ"), Some(2));
-    }
-
-    #[test]
-    fn grid_packs_to_15_bits() {
-        let g = pack_grid("FN42").unwrap();
-        assert!(g < (1 << 15));
-        assert_eq!(unpack_grid(g).as_deref(), Some("FN42"));
-    }
-
-    #[test]
-    fn corpus_property_roundtrip() {
-        // All standard-format calls: digit lands in field-2 (the A2 slot) when
-        // right-justified into the 6-char template.
-        let calls = ["K1ABC", "W9XYZ", "G3PLX", "VK2DEF", "JA1XYZ", "DL5ABC"];
-        let grids = ["FN42", "EM79", "JO22", "QF56", "PM95"];
-        for (i, &c1) in calls.iter().enumerate() {
-            for &c2 in &calls {
-                let g = grids[i % grids.len()];
-                let m = format!("{c1} {c2} {g}");
-                let packed = pack77(&m);
-                assert_eq!(unpack77(&packed), m, "roundtrip failed for {m}");
-            }
-        }
+        assert_eq!(pack28("DE").map(|(n, _)| n), Some(0));
+        assert_eq!(pack28("QRZ").map(|(n, _)| n), Some(1));
+        assert_eq!(pack28("CQ").map(|(n, _)| n), Some(2));
     }
 }

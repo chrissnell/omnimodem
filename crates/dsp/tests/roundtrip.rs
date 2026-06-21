@@ -139,7 +139,12 @@ fn baudot_roundtrips_corpus() {
 #[test]
 fn message77_roundtrips_corpus() {
     use omnimodem_dsp::framing::message77::{pack77, unpack77};
-    for &m in &["CQ K1ABC FN42", "W9XYZ K1ABC FN42", "HELLO WORLD"] {
+    // Standard messages with real callsigns round-trip exactly (byte-exact with
+    // ft8_lib). Note: ft8_lib packs bare non-callsign words as 22-bit hash
+    // tokens inside a standard message, so e.g. "HELLO WORLD" comes back as
+    // "<HELLO> <WORLD>"; that genuine reference behavior is covered by the
+    // message77 inline tests. This corpus checks exact round-trips.
+    for &m in &["CQ K1ABC FN42", "W9XYZ K1ABC FN42", "K1ABC W9XYZ RR73"] {
         assert_eq!(unpack77(&pack77(m)), m, "message {m:?} must round-trip");
     }
 }
