@@ -79,11 +79,51 @@ pub fn validate_transport(t: &Transport) -> Result<Option<String>, tls::TlsError
     }
 }
 
+/// SHA-256 fingerprint (lowercase hex) of a DER-encoded certificate.
+fn cert_fingerprint(der: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, der);
+    digest.as_ref().iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// Per-peer authorization for the routable mTLS path, symmetric with the UDS
+/// SO_PEERCRED interceptor but keyed on the client certificate. The TLS layer
+/// already requires a cert chained to the configured client CA; this interceptor
+/// (a) fails closed if no verified peer cert is present, and (b) if
+/// `OMNIMODEM_TLS_ALLOWED_FINGERPRINTS` is set (comma-separated SHA-256 hex),
+/// restricts access to those specific client certs. With the env var unset, any
+/// CA-verified client is allowed — the client CA is the trust boundary.
+#[allow(clippy::result_large_err)]
+fn routable_peer_authz(req: Request<()>) -> Result<Request<()>, Status> {
+    use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
+    let certs = req
+        .extensions()
+        .get::<TlsConnectInfo<TcpConnectInfo>>()
+        .and_then(|i| i.peer_certs())
+        .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
+    let leaf = certs
+        .first()
+        .ok_or_else(|| Status::unauthenticated("empty client certificate chain"))?;
+    if let Ok(allow) = std::env::var("OMNIMODEM_TLS_ALLOWED_FINGERPRINTS") {
+        let fp = cert_fingerprint(leaf.as_ref());
+        let permitted = allow.split(',').map(|s| s.trim().to_ascii_lowercase()).any(|a| a == fp);
+        if !permitted {
+            return Err(Status::permission_denied(format!(
+                "client certificate {fp} not in OMNIMODEM_TLS_ALLOWED_FINGERPRINTS"
+            )));
+        }
+    }
+    Ok(req)
+}
+
 /// Serve the control plane over a routable TCP interface under mTLS. Client
 /// certificates are REQUIRED (the config is built from the cert/key/client-CA in
-/// the environment); the bind fails closed if any TLS material is absent. mTLS
-/// peer identity replaces the UDS path's SO_PEERCRED check as the authorization
-/// boundary for routable interfaces.
+/// the environment); the bind fails closed if any TLS material is absent. The
+/// `routable_peer_authz` interceptor then enforces per-peer authorization on the
+/// verified client cert — symmetric with the UDS path's SO_PEERCRED check.
 pub async fn serve_routable(
     svc: ControlService,
     addr: std::net::SocketAddr,
@@ -91,7 +131,7 @@ pub async fn serve_routable(
     let tls = tls::routable_tls_config(tls::TlsPaths::from_env())?;
     tonic::transport::Server::builder()
         .tls_config(tls)?
-        .add_service(ModemControlServer::new(svc))
+        .add_service(ModemControlServer::with_interceptor(svc, routable_peer_authz))
         .serve(addr)
         .await?;
     Ok(())
@@ -117,5 +157,14 @@ mod tests {
     fn routable_fails_closed() {
         let t = Transport::Routable { addr: "0.0.0.0:9000".parse().unwrap() };
         assert!(validate_transport(&t).is_err());
+    }
+
+    #[test]
+    fn cert_fingerprint_is_deterministic_lowercase_hex_sha256() {
+        let fp = cert_fingerprint(b"some-der-bytes");
+        assert_eq!(fp.len(), 64, "SHA-256 hex is 64 chars");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(fp, cert_fingerprint(b"some-der-bytes"));
+        assert_ne!(fp, cert_fingerprint(b"other-der-bytes"));
     }
 }

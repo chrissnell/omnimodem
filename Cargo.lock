@@ -1303,6 +1303,7 @@ dependencies = [
  "nusb",
  "omnimodem-dsp",
  "prost",
+ "ring",
  "rusqlite",
  "tempfile",
  "thiserror 1.0.69",
