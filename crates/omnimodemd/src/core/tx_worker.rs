@@ -141,8 +141,11 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             samples.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
 
         // Exclusive TX lease: if another channel holds this rig, drop the job
-        // without keying. Surface start+complete so a waiting client isn't hung.
-        if !cfg.lease.may_transmit(&cfg.rig, cfg.channel) {
+        // without keying. Checked up front to avoid a pointless slot-wait, then
+        // RE-checked after the wait (a windowed slot can be ~minutes, during
+        // which another channel could acquire the lease — closes the TOCTOU).
+        let lease_blocked = |worker: &TxWorkerCfg| !worker.lease.may_transmit(&worker.rig, worker.channel);
+        if lease_blocked(&cfg) {
             let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
                 channel: cfg.channel,
                 transmit_id: job.transmit_id,
@@ -160,6 +163,19 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             if !delay.is_zero() {
                 std::thread::sleep(delay);
             }
+        }
+
+        // Re-check the lease after the slot wait, immediately before keying.
+        if lease_blocked(&cfg) {
+            let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
+                channel: cfg.channel,
+                transmit_id: job.transmit_id,
+            });
+            let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
+                channel: cfg.channel,
+                transmit_id: job.transmit_id,
+            });
+            continue;
         }
 
         let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
