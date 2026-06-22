@@ -3,6 +3,7 @@
 //! eviction, no-sleep TX sequencing, and the RX/TX interlock. No DSP.
 
 pub mod interlock;
+pub mod lease;
 pub mod none;
 pub mod registry;
 pub mod sequence;
