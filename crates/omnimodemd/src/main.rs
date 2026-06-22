@@ -24,7 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sock_path = runtime_dir.join("omnimodem.sock");
     let db_path = runtime_dir.join("omnimodem.sqlite");
 
-    let transport = Transport::Uds { path: sock_path.clone() };
+    // Routable mTLS bind if OMNIMODEM_ROUTABLE_ADDR is set, else the UDS default.
+    let routable_addr = std::env::var("OMNIMODEM_ROUTABLE_ADDR")
+        .ok()
+        .and_then(|a| a.parse::<std::net::SocketAddr>().ok());
+    let transport = match routable_addr {
+        Some(addr) => Transport::Routable { addr },
+        None => Transport::Uds { path: sock_path.clone() },
+    };
+    // Fails closed here for a routable bind without TLS material.
     if let Some(warning) = authz::validate_transport(&transport)? {
         tracing::warn!("{warning}");
     }

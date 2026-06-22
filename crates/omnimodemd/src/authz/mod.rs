@@ -70,12 +70,31 @@ pub fn validate_transport(t: &Transport) -> Result<Option<String>, tls::TlsError
             "loopback TCP exposes every local user; no per-peer authorization is enforced"
                 .to_string(),
         )),
-        // Fails closed: routable requires mTLS, unimplemented in Phase 1.
+        // Fails closed: routable requires mTLS material (cert/key/client-CA) in
+        // the environment. Building the config validates it can be loaded.
         Transport::Routable { .. } => {
-            tls::routable_tls_config()?;
+            tls::routable_tls_config(tls::TlsPaths::from_env())?;
             Ok(None)
         }
     }
+}
+
+/// Serve the control plane over a routable TCP interface under mTLS. Client
+/// certificates are REQUIRED (the config is built from the cert/key/client-CA in
+/// the environment); the bind fails closed if any TLS material is absent. mTLS
+/// peer identity replaces the UDS path's SO_PEERCRED check as the authorization
+/// boundary for routable interfaces.
+pub async fn serve_routable(
+    svc: ControlService,
+    addr: std::net::SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tls = tls::routable_tls_config(tls::TlsPaths::from_env())?;
+    tonic::transport::Server::builder()
+        .tls_config(tls)?
+        .add_service(ModemControlServer::new(svc))
+        .serve(addr)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
