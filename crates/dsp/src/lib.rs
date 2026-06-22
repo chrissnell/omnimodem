@@ -26,7 +26,10 @@ pub use modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Ensemble, Afsk1200Mod},
     cw::{CwDemod, CwMod},
     ft8::{Ft8Demod, Ft8Mod},
+    jt65::{Jt65Demod, Jt65Mod},
+    jt9::{Jt9Demod, Jt9Mod},
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
+    wspr::{WsprDemod, WsprMod},
 };
 pub use types::{Cplx, Frame, FrameMeta, FramePayload, Llr, Sample, SoftBits};
