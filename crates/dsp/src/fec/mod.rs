@@ -14,4 +14,13 @@ pub mod ldpc;
 pub mod osd;
 pub mod slicer;
 
+// Phase 5 (WS-A) building-block groups: the convolutional/Viterbi/Fano/FHT/
+// interleaver/Golay/soft-RS toolkit the breadth modes (WS-B/C) assemble from.
+pub mod conv;
+pub mod fano;
+pub mod fht;
+pub mod interleave;
+pub mod golay;
+pub mod rs_gf64;
+
 mod ft8_tables;
