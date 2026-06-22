@@ -9,18 +9,23 @@
 
 use crate::audio::backend::CaptureHandle;
 use crate::audio::AudioChunk;
-use crate::core::event::FrameEvent;
+use crate::core::event::{FrameEvent, TelemetryEvent};
 use crate::ids::{ChannelId, DeviceId};
+use crate::metrics::ChannelMetrics;
 use crate::ptt::interlock::RxTxInterlock;
 use omnimodem_dsp::frontend::resample::Resampler;
 use omnimodem_dsp::mode::{BlockDemodulator, Demodulator};
-use omnimodem_dsp::types::{FramePayload, Sample};
+use omnimodem_dsp::types::{Frame, FramePayload, Sample};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::broadcast;
+
+/// Shared per-channel metrics accumulator: the RX worker writes it on each
+/// decode, the core reads its latest snapshot to answer `GetMetrics`.
+pub type SharedMetrics = Arc<Mutex<ChannelMetrics>>;
 
 /// How often the worker re-checks its stop flag while no audio is arriving.
 const STOP_POLL: Duration = Duration::from_millis(200);
@@ -35,6 +40,7 @@ pub struct RxWorker {
 }
 
 impl RxWorker {
+    #[allow(clippy::too_many_arguments)]
     /// Spawn a streaming-demod RX worker. `capture` is moved into the thread;
     /// the thread runs until the capture ends or the worker is stopped.
     pub fn spawn_streaming(
@@ -44,6 +50,8 @@ impl RxWorker {
         mut demod: Box<dyn Demodulator>,
         interlock: RxTxInterlock,
         frames: broadcast::Sender<FrameEvent>,
+        telemetry: broadcast::Sender<TelemetryEvent>,
+        metrics: SharedMetrics,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -64,8 +72,14 @@ impl RxWorker {
                                 continue; // our TX is keyed on this rig
                             }
                             let samples = resample(&mut resampler, to_f32(&chunk));
+                            let mut produced = false;
                             for f in demod.feed(&samples) {
+                                record(&metrics, &f);
                                 emit(&frames, channel, &f.payload);
+                                produced = true;
+                            }
+                            if produced {
+                                emit_metrics(&telemetry, channel, &metrics);
                             }
                         }
                         Err(RecvTimeoutError::Timeout) => continue, // re-check `run`
@@ -74,14 +88,21 @@ impl RxWorker {
                 }
                 // Stream ended: flush any buffered partial decode (e.g. CW's
                 // final word, which has no trailing terminator).
+                let mut produced = false;
                 for f in demod.flush() {
+                    record(&metrics, &f);
                     emit(&frames, channel, &f.payload);
+                    produced = true;
+                }
+                if produced {
+                    emit_metrics(&telemetry, channel, &metrics);
                 }
             })
             .expect("spawn rx worker");
         RxWorker { running, join: Some(join) }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Spawn a windowed (block) RX worker. Buffers `window_s` of samples at the
     /// demod's native rate, calls `decode_window`, then advances by one window.
     /// Production aligns the window to the wall-clock slot via `SlotClock`; this
@@ -94,6 +115,8 @@ impl RxWorker {
         mut demod: Box<dyn BlockDemodulator>,
         interlock: RxTxInterlock,
         frames: broadcast::Sender<FrameEvent>,
+        telemetry: broadcast::Sender<TelemetryEvent>,
+        metrics: SharedMetrics,
         window_s: f32,
     ) -> Self {
         let in_rate = capture.sample_rate;
@@ -121,8 +144,14 @@ impl RxWorker {
                             while buf.len() >= win_samples {
                                 let window: Vec<Sample> = buf.drain(..win_samples).collect();
                                 if !muted_window {
+                                    let mut produced = false;
                                     for f in demod.decode_window(&window, 0) {
+                                        record(&metrics, &f);
                                         emit(&frames, channel, &f.payload);
+                                        produced = true;
+                                    }
+                                    if produced {
+                                        emit_metrics(&telemetry, channel, &metrics);
                                     }
                                 }
                                 muted_window = false;
@@ -137,8 +166,14 @@ impl RxWorker {
                 // `win_samples`; this also handles a short remainder).
                 if ended && !buf.is_empty() && !muted_window {
                     buf.resize(win_samples, 0.0);
+                    let mut produced = false;
                     for f in demod.decode_window(&buf, 0) {
+                        record(&metrics, &f);
                         emit(&frames, channel, &f.payload);
+                        produced = true;
+                    }
+                    if produced {
+                        emit_metrics(&telemetry, channel, &metrics);
                     }
                 }
             })
@@ -187,6 +222,41 @@ fn emit(frames: &broadcast::Sender<FrameEvent>, channel: ChannelId, payload: &Fr
     let _ = frames.send(FrameEvent::RxFrame { channel, data: frame_bytes(payload), timestamp_ns: 0 });
 }
 
+/// Fold one decoded frame into the shared accumulator: count it good/bad by CRC,
+/// remember the decoder, and absorb whatever signal-quality fields the DSP layer
+/// measured.
+fn record(metrics: &SharedMetrics, f: &Frame) {
+    let mut m = metrics.lock().unwrap();
+    m.record_frame(f.meta.crc_ok, f.meta.decoder.as_deref());
+    if let Some(s) = f.meta.snr_db {
+        m.snr_db = s;
+    }
+    if let Some(off) = f.meta.freq_offset_hz {
+        m.afc_offset_hz = off;
+    }
+}
+
+/// Publish the latest accumulator state on the lossy telemetry channel. Called
+/// once per audio chunk/window that produced at least one frame, so a busy
+/// channel doesn't flood the (lossy) broadcast with per-frame churn.
+fn emit_metrics(
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+    channel: ChannelId,
+    metrics: &SharedMetrics,
+) {
+    let m = metrics.lock().unwrap();
+    let _ = telemetry.send(TelemetryEvent::ChannelMetrics {
+        channel,
+        good_frames: m.good_frames,
+        bad_frames: m.bad_frames,
+        snr_db: m.snr_db,
+        dbfs: m.dbfs,
+        afc_offset_hz: m.afc_offset_hz,
+        dcd: m.dcd,
+        last_decoder: m.last_decoder.clone(),
+    });
+}
+
 /// Flatten a decoded payload to the opaque bytes the proto `RxFrame.data`
 /// carries. Text/message decode to UTF-8; packets/vocoder pass through.
 fn frame_bytes(p: &FramePayload) -> Vec<u8> {
@@ -210,6 +280,10 @@ mod tests {
         f.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect()
     }
 
+    fn test_metrics() -> SharedMetrics {
+        Arc::new(Mutex::new(ChannelMetrics::default()))
+    }
+
     #[test]
     fn stop_halts_a_worker_on_an_infinite_capture() {
         // Simulate the real cpal capture, which never EOFs: keep the producer
@@ -224,6 +298,8 @@ mod tests {
             Box::new(Afsk1200Demod::ensemble(9)),
             RxTxInterlock::new(),
             broadcast::channel(8).0,
+            broadcast::channel(8).0,
+            test_metrics(),
         );
         // Worker is blocked in recv_timeout with no data. stop() joins it.
         let start = std::time::Instant::now();
@@ -253,6 +329,8 @@ mod tests {
             Box::new(Afsk1200Demod::ensemble(9)),
             RxTxInterlock::new(),
             tx_b,
+            broadcast::channel(8).0,
+            test_metrics(),
         );
         worker.join();
 
@@ -290,6 +368,8 @@ mod tests {
             Box::new(Afsk1200Demod::ensemble(9)),
             interlock,
             tx_b,
+            broadcast::channel(8).0,
+            test_metrics(),
         );
         worker.join();
         assert!(rx_b.try_recv().is_err(), "muted worker emitted a frame");
@@ -312,6 +392,8 @@ mod tests {
             Box::new(Ft8Demod::new()),
             RxTxInterlock::new(),
             tx_b,
+            broadcast::channel(8).0,
+            test_metrics(),
             FT8_WINDOW_S,
         );
         worker.join();
@@ -321,5 +403,47 @@ mod tests {
             texts.push(String::from_utf8_lossy(&data).to_string());
         }
         assert!(texts.iter().any(|t| t == "CQ K1ABC FN42"), "got {texts:?}");
+    }
+
+    #[test]
+    fn rx_worker_emits_channel_metrics_after_decode() {
+        // Replay a valid AFSK frame and assert the worker both updates the shared
+        // accumulator (good_frames >= 1) and publishes a ChannelMetrics telemetry
+        // event reflecting it.
+        use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+        let ax = Ax25Frame {
+            dest: Address::new("APRS", 0),
+            source: Address::new("K1ABC", 2),
+            digipeaters: vec![],
+            info: b"metrics".to_vec(),
+        };
+        let f32s = Afsk1200Mod::new().modulate(&Frame::packet(ax.encode())).unwrap();
+        let backend = FileBackend::from_samples(to_i16(&f32s), 48_000);
+        let capture = backend.open_capture(48_000).unwrap();
+
+        let (tele_tx, mut tele_rx) = broadcast::channel(64);
+        let metrics = test_metrics();
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(3),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(Afsk1200Demod::ensemble(9)),
+            RxTxInterlock::new(),
+            broadcast::channel(64).0,
+            tele_tx,
+            metrics.clone(),
+        );
+        worker.join();
+
+        assert!(metrics.lock().unwrap().good_frames >= 1, "accumulator not updated");
+        let mut saw = false;
+        while let Ok(ev) = tele_rx.try_recv() {
+            if let TelemetryEvent::ChannelMetrics { channel, good_frames, .. } = ev {
+                if channel == ChannelId(3) && good_frames >= 1 {
+                    saw = true;
+                }
+            }
+        }
+        assert!(saw, "no ChannelMetrics telemetry emitted");
     }
 }

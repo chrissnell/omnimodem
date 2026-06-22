@@ -32,4 +32,15 @@ pub enum TelemetryEvent {
     /// Host clock-discipline metric so operators can tell a time-sync problem
     /// (windowed modes need an accurate clock) from a signal problem.
     ClockOffset { offset_s: f64, est_error_s: f64, synchronized: bool },
+    /// Per-channel decode/health metrics (lossy: only the latest matters).
+    ChannelMetrics {
+        channel: ChannelId,
+        good_frames: u64,
+        bad_frames: u64,
+        snr_db: f32,
+        dbfs: f32,
+        afc_offset_hz: f32,
+        dcd: bool,
+        last_decoder: Option<String>,
+    },
 }
