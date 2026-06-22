@@ -65,11 +65,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let svc = ControlService::new(core_handle);
 
-    tracing::info!(socket = %sock_path.display(), "omnimodemd {} serving", omnimodemd::VERSION);
-
-    // serve_uds runs until the process is signalled; Ctrl-C tears it down.
+    // Serve over the selected transport until signalled; Ctrl-C tears it down.
+    let serve = async {
+        match &transport {
+            Transport::Routable { addr } => {
+                tracing::info!(%addr, "omnimodemd {} serving (routable mTLS)", omnimodemd::VERSION);
+                authz::serve_routable(svc, *addr).await
+            }
+            _ => {
+                tracing::info!(socket = %sock_path.display(), "omnimodemd {} serving (uds)", omnimodemd::VERSION);
+                authz::serve_uds(svc, &sock_path).await
+            }
+        }
+    };
     tokio::select! {
-        res = authz::serve_uds(svc, &sock_path) => { res?; }
+        res = serve => { res?; }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutdown signal received");
         }
