@@ -25,6 +25,7 @@ pub use mode::{
 pub use modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Ensemble, Afsk1200Mod},
     cw::{CwDemod, CwMod},
+    ft4::{Ft4Demod, Ft4Mod},
     ft8::{Ft8Demod, Ft8Mod},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
