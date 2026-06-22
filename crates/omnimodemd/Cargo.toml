@@ -21,6 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 cpal.workspace = true
+ring = "0.17"
 omnimodem-dsp = { path = "../dsp" }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]

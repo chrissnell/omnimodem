@@ -170,6 +170,50 @@ impl ModemControl for ControlService {
         Ok(Response::new(proto::SuggestUdevRuleResponse { rule, instructions }))
     }
 
+    async fn get_metrics(
+        &self,
+        request: Request<proto::GetMetricsRequest>,
+    ) -> Result<Response<proto::GetMetricsResponse>, Status> {
+        let req = request.into_inner();
+        let channel = (req.channel != 0).then_some(ChannelId(req.channel));
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::GetMetrics { channel, reply: tx })?;
+        let snaps = rx.await.map_err(|_| Status::unavailable("core dropped reply"))?;
+        Ok(Response::new(proto::GetMetricsResponse {
+            metrics: snaps.iter().map(convert::metrics_to_proto).collect(),
+        }))
+    }
+
+    async fn acquire_tx_lease(
+        &self,
+        request: Request<proto::TxLeaseRequest>,
+    ) -> Result<Response<proto::TxLeaseResponse>, Status> {
+        let channel = ChannelId(request.into_inner().channel);
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::AcquireTxLease { channel, reply: tx })?;
+        let grant = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::TxLeaseResponse {
+            granted: grant.granted,
+            held_by: grant.held_by.map(|c| c.0).unwrap_or(0),
+        }))
+    }
+
+    async fn release_tx_lease(
+        &self,
+        request: Request<proto::TxLeaseRequest>,
+    ) -> Result<Response<proto::TxLeaseResponse>, Status> {
+        let channel = ChannelId(request.into_inner().channel);
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ReleaseTxLease { channel, reply: tx })?;
+        rx.await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::TxLeaseResponse { granted: true, held_by: 0 }))
+    }
+
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(

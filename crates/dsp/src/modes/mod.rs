@@ -9,5 +9,11 @@
 pub mod afsk1200;
 pub mod cw;
 pub mod ft8;
+pub mod fsk_util;
+pub mod ft4;
+pub mod jt65;
+pub mod jt9;
+pub mod olivia;
 pub mod psk31;
 pub mod rtty;
+pub mod wspr;

@@ -838,3 +838,171 @@ mod tests {
         assert_eq!(pack28("CQ").map(|(n, _)| n), Some(2));
     }
 }
+
+/// Legacy WSJT-X packers: 72-bit (JT65/JT9) and 50-bit (WSPR/FST4W). Distinct
+/// from the modern 77-bit codec above. Bit order MSB-first (WSJT-X convention).
+///
+/// The 72-bit JT65/JT9 message is `nc1(28) | nc2(28) | ng(16)` — two standard
+/// base callsigns plus a 16-bit grid/report field, reusing this module's
+/// [`super::pack_basecall`]/[`super::packgrid`]. The 50-bit WSPR message is the
+/// genuine `nc(28) | (ng4*128 + power+64)(22)` layout from WSJT-X `wsprd`. Only
+/// the common standard-callsign forms are handled (special tokens like `CQ`,
+/// hashed nonstandard calls, and the JT65 report tokens beyond a plain grid are
+/// out of scope here — they round-trip through the modern 77-bit codec instead).
+pub mod legacy {
+    use super::{
+        charn, pack_basecall, packgrid, unpackgrid, ALPHANUM, ALPHANUM_SPACE, LETTERS_SPACE,
+        NUMERIC,
+    };
+
+    fn bits_msb(mut v: u128, nbits: usize) -> Vec<u8> {
+        let mut out = vec![0u8; nbits];
+        for slot in out.iter_mut().rev() {
+            *slot = (v & 1) as u8;
+            v >>= 1;
+        }
+        out
+    }
+
+    fn unbits_msb(bits: &[u8]) -> u128 {
+        bits.iter().fold(0u128, |v, &b| (v << 1) | (b as u128 & 1))
+    }
+
+    /// Reverse of [`super::pack_basecall`]: a raw 28-bit base-call integer back to
+    /// the trimmed callsign string.
+    fn unpack_basecall(mut n: u32) -> Option<String> {
+        let mut c = [0u8; 6];
+        c[5] = charn((n % 27) as usize, LETTERS_SPACE);
+        n /= 27;
+        c[4] = charn((n % 27) as usize, LETTERS_SPACE);
+        n /= 27;
+        c[3] = charn((n % 27) as usize, LETTERS_SPACE);
+        n /= 27;
+        c[2] = charn((n % 10) as usize, NUMERIC);
+        n /= 10;
+        c[1] = charn((n % 36) as usize, ALPHANUM);
+        n /= 36;
+        c[0] = charn((n % 37) as usize, ALPHANUM_SPACE);
+        let call = std::str::from_utf8(&c).ok()?.trim().to_string();
+        if call.len() < 3 {
+            None
+        } else {
+            Some(call)
+        }
+    }
+
+    /// Pack a standard `CALL1 CALL2 GRID` JT65/JT9 message to 72 bits.
+    pub fn pack72(message: &str) -> Option<[u8; 72]> {
+        let parts: Vec<&str> = message.split_whitespace().collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let n1 = pack_basecall(parts[0], parts[0].len())? as u128;
+        let n2 = pack_basecall(parts[1], parts[1].len())? as u128;
+        let ng = packgrid(parts[2]) as u128;
+        if ng > 0xFFFF {
+            return None;
+        }
+        let v = (n1 << 44) | (n2 << 16) | ng;
+        bits_msb(v, 72).try_into().ok()
+    }
+
+    pub fn unpack72(bits: &[u8; 72]) -> Option<String> {
+        let v = unbits_msb(bits);
+        let ng = (v & 0xFFFF) as u16;
+        let n2 = ((v >> 16) & 0x0FFF_FFFF) as u32;
+        let n1 = ((v >> 44) & 0x0FFF_FFFF) as u32;
+        let c1 = unpack_basecall(n1)?;
+        let c2 = unpack_basecall(n2)?;
+        let grid = unpackgrid(ng, 0);
+        Some(format!("{c1} {c2} {grid}"))
+    }
+
+    /// Pack a WSPR `CALL GRID dBm` message to 50 bits (28-bit call + 22-bit
+    /// grid/power), per WSJT-X `wsprd`. `grid4` is a 4-char Maidenhead locator,
+    /// `dbm` a power 0..=60.
+    pub fn pack50(call: &str, grid4: &str, dbm: u8) -> Option<[u8; 50]> {
+        let n28 = pack_basecall(call, call.len())? as u128;
+        let b = grid4.as_bytes();
+        if b.len() != 4
+            || !(b'A'..=b'R').contains(&b[0])
+            || !(b'A'..=b'R').contains(&b[1])
+            || !b[2].is_ascii_digit()
+            || !b[3].is_ascii_digit()
+            || dbm > 60
+        {
+            return None;
+        }
+        let a0 = (b[0] - b'A') as i64;
+        let a1 = (b[1] - b'A') as i64;
+        let c2 = (b[2] - b'0') as i64;
+        let c3 = (b[3] - b'0') as i64;
+        let ng = (179 - 10 * a0 - c2) * 180 + 10 * a1 + c3;
+        let m = (ng * 128 + dbm as i64 + 64) as u128;
+        let v = (n28 << 22) | m;
+        bits_msb(v, 50).try_into().ok()
+    }
+
+    pub fn unpack50(bits: &[u8; 50]) -> Option<(String, String, u8)> {
+        let v = unbits_msb(bits);
+        let m = (v & 0x3F_FFFF) as i64;
+        let n28 = (v >> 22) as u32;
+        let call = unpack_basecall(n28)?;
+        let dbm = (m % 128) - 64;
+        let ng = m / 128;
+        let hi = ng / 180;
+        let lo = ng % 180;
+        let a1 = lo / 10;
+        let c3 = lo % 10;
+        let rem = 179 - hi;
+        let a0 = rem / 10;
+        let c2 = rem % 10;
+        if !(0..=17).contains(&a0) || !(0..=17).contains(&a1) || !(0..=60).contains(&dbm) {
+            return None;
+        }
+        let grid = [
+            b'A' + a0 as u8,
+            b'A' + a1 as u8,
+            b'0' + c2 as u8,
+            b'0' + c3 as u8,
+        ];
+        Some((call, String::from_utf8(grid.to_vec()).ok()?, dbm as u8))
+    }
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::legacy::*;
+
+    #[test]
+    fn jt65_message_round_trips() {
+        let bits = pack72("K1ABC W9XYZ EN37").unwrap();
+        assert_eq!(unpack72(&bits).unwrap(), "K1ABC W9XYZ EN37");
+    }
+
+    #[test]
+    fn jt65_message_two_prefix_call_round_trips() {
+        let bits = pack72("VK3ABC ZL2XYZ RF80").unwrap();
+        assert_eq!(unpack72(&bits).unwrap(), "VK3ABC ZL2XYZ RF80");
+    }
+
+    #[test]
+    fn wspr_message_round_trips() {
+        let bits = pack50("K1ABC", "FN42", 37).unwrap();
+        assert_eq!(unpack50(&bits).unwrap(), ("K1ABC".into(), "FN42".into(), 37));
+    }
+
+    #[test]
+    fn wspr_power_and_grid_edges() {
+        for (call, grid, dbm) in [("W9XYZ", "AA00", 0u8), ("G3ABC", "RR99", 60)] {
+            let bits = pack50(call, grid, dbm).unwrap();
+            assert_eq!(unpack50(&bits).unwrap(), (call.into(), grid.into(), dbm));
+        }
+    }
+
+    #[test]
+    fn wspr_rejects_bad_input() {
+        assert!(pack50("K1ABC", "FN4", 37).is_none()); // short grid
+        assert!(pack50("K1ABC", "FN42", 61).is_none()); // power too high
+    }
+}

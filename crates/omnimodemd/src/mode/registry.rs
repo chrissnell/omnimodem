@@ -7,9 +7,14 @@ use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
     cw::{CwDemod, CwMod},
+    ft4::{Ft4Demod, Ft4Mod},
     ft8::{Ft8Demod, Ft8Mod},
+    jt65::{Jt65Demod, Jt65Mod},
+    jt9::{Jt9Demod, Jt9Mod},
+    olivia::{OliviaDemod, OliviaMod},
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
+    wspr::{WsprDemod, WsprMod},
 };
 
 /// What kind of demod a mode needs the RX worker to drive.
@@ -20,6 +25,15 @@ pub enum DemodKind {
     Streaming(Box<dyn Demodulator>),
     /// A windowed block demod plus its window length in seconds.
     Windowed(Box<dyn BlockDemodulator>, f32),
+}
+
+/// Wrap a block demod as a `Windowed` kind, reading its window length from caps.
+fn windowed(bd: Box<dyn BlockDemodulator>) -> DemodKind {
+    let window_s = match bd.caps().shape {
+        DemodShape::Windowed { window_s, .. } => window_s,
+        _ => 15.0,
+    };
+    DemodKind::Windowed(bd, window_s)
 }
 
 /// Classify a mode config into the demod the RX worker should run.
@@ -34,13 +48,13 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Psk31 { center_hz } => {
             DemodKind::Streaming(Box::new(Psk31Demod::new(*center_hz)))
         }
-        ModeConfig::Ft8 => {
-            let bd = Ft8Demod::new();
-            let window_s = match bd.caps().shape {
-                DemodShape::Windowed { window_s, .. } => window_s,
-                _ => 15.0,
-            };
-            DemodKind::Windowed(Box::new(bd), window_s)
+        ModeConfig::Ft8 => windowed(Box::new(Ft8Demod::new())),
+        ModeConfig::Ft4 => windowed(Box::new(Ft4Demod::new())),
+        ModeConfig::Jt65 => windowed(Box::new(Jt65Demod::new())),
+        ModeConfig::Jt9 => windowed(Box::new(Jt9Demod::new())),
+        ModeConfig::Wspr => windowed(Box::new(WsprDemod::new())),
+        ModeConfig::Olivia { tones, bandwidth_hz } => {
+            DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
     }
 }
@@ -54,6 +68,13 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Rtty { baud, shift_hz } => Some(Box::new(RttyMod::new(*baud, *shift_hz))),
         ModeConfig::Psk31 { center_hz } => Some(Box::new(Psk31Mod::new(*center_hz))),
         ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
+        ModeConfig::Ft4 => Some(Box::new(Ft4Mod::new())),
+        ModeConfig::Jt65 => Some(Box::new(Jt65Mod::new())),
+        ModeConfig::Jt9 => Some(Box::new(Jt9Mod::new())),
+        ModeConfig::Wspr => Some(Box::new(WsprMod::new())),
+        ModeConfig::Olivia { tones, bandwidth_hz } => {
+            Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
+        }
     }
 }
 
@@ -85,6 +106,32 @@ mod tests {
             demod_kind(&ModeConfig::Ft8),
             DemodKind::Windowed(_, w) if (w - 15.0).abs() < 0.01
         ));
+    }
+
+    #[test]
+    fn wsjtx_breadth_modes_are_windowed_with_modulators() {
+        for (cfg, win) in [
+            (ModeConfig::Ft4, 7.5f32),
+            (ModeConfig::Jt65, 60.0),
+            (ModeConfig::Jt9, 60.0),
+            (ModeConfig::Wspr, 120.0),
+        ] {
+            assert!(
+                matches!(demod_kind(&cfg), DemodKind::Windowed(_, w) if (w - win).abs() < 0.5),
+                "{cfg:?} not windowed @ {win}"
+            );
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {cfg:?}");
+        }
+        assert_eq!(tx_slot_s(&ModeConfig::Wspr), Some(120.0));
+        assert_eq!(tx_slot_s(&ModeConfig::Ft4), Some(7.5));
+    }
+
+    #[test]
+    fn olivia_is_streaming_with_a_modulator() {
+        let cfg = ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 };
+        assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)));
+        assert!(build_modulator(&cfg).is_some());
+        assert_eq!(tx_slot_s(&cfg), None);
     }
 
     #[test]

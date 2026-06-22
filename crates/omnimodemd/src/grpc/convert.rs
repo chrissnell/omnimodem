@@ -141,6 +141,40 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
         TelemetryEvent::ClockOffset { offset_s, est_error_s, synchronized } => {
             Kind::ClockOffset(proto::ClockOffset { offset_s, est_error_s, synchronized })
         }
+        TelemetryEvent::ChannelMetrics {
+            channel,
+            good_frames,
+            bad_frames,
+            snr_db,
+            dbfs,
+            afc_offset_hz,
+            dcd,
+            last_decoder,
+        } => Kind::ChannelMetrics(proto::ChannelMetrics {
+            channel: channel.0,
+            good_frames,
+            bad_frames,
+            snr_db,
+            dbfs,
+            afc_offset_hz,
+            dcd,
+            last_decoder: last_decoder.unwrap_or_default(),
+        }),
     };
     proto::Event { kind: Some(kind) }
+}
+
+/// A metrics snapshot as the wire `ChannelMetrics`.
+pub fn metrics_to_proto(snap: &crate::metrics::ChannelMetricsSnapshot) -> proto::ChannelMetrics {
+    let m = &snap.metrics;
+    proto::ChannelMetrics {
+        channel: snap.channel.0,
+        good_frames: m.good_frames,
+        bad_frames: m.bad_frames,
+        snr_db: m.snr_db,
+        dbfs: m.dbfs,
+        afc_offset_hz: m.afc_offset_hz,
+        dcd: m.dcd,
+        last_decoder: m.last_decoder.clone().unwrap_or_default(),
+    }
 }

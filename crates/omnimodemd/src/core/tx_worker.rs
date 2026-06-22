@@ -11,6 +11,7 @@ use crate::core::clock::SlotClock;
 use crate::core::event::TelemetryEvent;
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 use crate::ptt::interlock::RxTxInterlock;
+use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::PttDriver;
 use omnimodem_dsp::mode::Modulator;
@@ -45,6 +46,9 @@ pub struct TxWorkerCfg {
     pub sink: PlaybackHandle,
     pub driver: Box<dyn PttDriver>,
     pub interlock: RxTxInterlock,
+    /// Per-rig exclusive TX lease. While another channel holds the rig's lease,
+    /// this worker's jobs complete without keying.
+    pub lease: TxLeaseRegistry,
     pub telemetry: broadcast::Sender<TelemetryEvent>,
     /// `Some(slot_s)` for windowed modes (align to the slot boundary).
     pub slot_s: Option<f32>,
@@ -136,12 +140,42 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
         let pcm: Vec<i16> =
             samples.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
 
+        // Exclusive TX lease: if another channel holds this rig, drop the job
+        // without keying. Checked up front to avoid a pointless slot-wait, then
+        // RE-checked after the wait (a windowed slot can be ~minutes, during
+        // which another channel could acquire the lease — closes the TOCTOU).
+        let lease_blocked = |worker: &TxWorkerCfg| !worker.lease.may_transmit(&worker.rig, worker.channel);
+        if lease_blocked(&cfg) {
+            let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
+                channel: cfg.channel,
+                transmit_id: job.transmit_id,
+            });
+            let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
+                channel: cfg.channel,
+                transmit_id: job.transmit_id,
+            });
+            continue;
+        }
+
         // Windowed modes wait for the next slot boundary before keying.
         if let Some(slot) = cfg.slot_s {
             let delay = SlotClock::new(slot).delay_until_next();
             if !delay.is_zero() {
                 std::thread::sleep(delay);
             }
+        }
+
+        // Re-check the lease after the slot wait, immediately before keying.
+        if lease_blocked(&cfg) {
+            let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
+                channel: cfg.channel,
+                transmit_id: job.transmit_id,
+            });
+            let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
+                channel: cfg.channel,
+                transmit_id: job.transmit_id,
+            });
+            continue;
         }
 
         let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
@@ -205,6 +239,7 @@ mod tests {
             sink,
             driver: Box::new(MockPtt::new()),
             interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
             telemetry: tele,
             slot_s: None,
         });
@@ -231,6 +266,60 @@ mod tests {
             assert!(completed, "no TransmitComplete");
         });
         assert!(!backend.played.lock().unwrap().is_empty(), "no audio played");
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_skips_tx_when_another_channel_holds_the_lease() {
+        // A DIFFERENT channel holds the rig's exclusive lease, so this worker's
+        // job must complete WITHOUT ever keying PTT.
+        let backend = FileBackend::from_samples(vec![], 8_000);
+        let sink = backend.open_playback(8_000).unwrap();
+        let rig = DeviceId::placeholder();
+        let lease = TxLeaseRegistry::new();
+        lease.acquire(&rig, ChannelId(99)).unwrap(); // held by someone else
+
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: rig.clone(),
+            rate: 8_000,
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk31 {
+                center_hz: 1000.0,
+            })
+            .unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease,
+            telemetry: tele,
+            slot_s: None,
+        });
+        worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            let (mut completed, mut keyed) = (false, false);
+            for _ in 0..50 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    match ev {
+                        TelemetryEvent::TransmitComplete { transmit_id, .. } => {
+                            assert_eq!(transmit_id, TransmitId(1));
+                            completed = true;
+                        }
+                        TelemetryEvent::PttKeyed { keyed: true, .. } => keyed = true,
+                        _ => {}
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(completed, "lease-blocked job never completed");
+            assert!(!keyed, "lease-blocked job keyed PTT anyway");
+        });
+        assert!(backend.played.lock().unwrap().is_empty(), "lease-blocked job played audio");
         worker.shutdown();
     }
 

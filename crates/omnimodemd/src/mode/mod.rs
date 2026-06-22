@@ -16,6 +16,13 @@ pub enum ModeConfig {
     Cw { wpm: u16, tone_hz: f32 },
     Rtty { baud: f32, shift_hz: f32 },
     Psk31 { center_hz: f32 },
+    // Phase 5 WSJT-X breadth modes.
+    Ft4,
+    Jt65,
+    Jt9,
+    Wspr,
+    // Phase 5 fldigi breadth modes.
+    Olivia { tones: u16, bandwidth_hz: u16 },
 }
 
 impl ModeConfig {
@@ -31,6 +38,11 @@ impl ModeConfig {
             "cw" => Some(ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }),
             "rtty" => Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }),
             "psk31" => Some(ModeConfig::Psk31 { center_hz: 1000.0 }),
+            "ft4" => Some(ModeConfig::Ft4),
+            "jt65" => Some(ModeConfig::Jt65),
+            "jt9" => Some(ModeConfig::Jt9),
+            "wspr" => Some(ModeConfig::Wspr),
+            "olivia" => Some(ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 }),
             _ => None,
         }
     }
@@ -42,6 +54,11 @@ impl ModeConfig {
             ModeConfig::Cw { .. } => "cw",
             ModeConfig::Rtty { .. } => "rtty",
             ModeConfig::Psk31 { .. } => "psk31",
+            ModeConfig::Ft4 => "ft4",
+            ModeConfig::Jt65 => "jt65",
+            ModeConfig::Jt9 => "jt9",
+            ModeConfig::Wspr => "wspr",
+            ModeConfig::Olivia { .. } => "olivia",
         }
     }
 }
@@ -97,6 +114,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolves_wsjtx_breadth_modes() {
+        assert_eq!(ModeConfig::parse("ft4"), Some(ModeConfig::Ft4));
+        assert_eq!(ModeConfig::parse("jt65"), Some(ModeConfig::Jt65));
+        assert_eq!(ModeConfig::parse("jt9"), Some(ModeConfig::Jt9));
+        assert_eq!(ModeConfig::parse("wspr"), Some(ModeConfig::Wspr));
+    }
+
+    #[test]
+    fn parse_resolves_olivia_with_defaults() {
+        assert_eq!(
+            ModeConfig::parse("olivia"),
+            Some(ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 })
+        );
+    }
+
+    #[test]
     fn label_round_trips_none() {
         assert_eq!(ModeConfig::None.label(), "none");
         // "none" parses back to the variant whose label it is — the one
@@ -113,6 +146,11 @@ mod tests {
             ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }.label(),
             ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }.label(),
             ModeConfig::Psk31 { center_hz: 1000.0 }.label(),
+            ModeConfig::Ft4.label(),
+            ModeConfig::Jt65.label(),
+            ModeConfig::Jt9.label(),
+            ModeConfig::Wspr.label(),
+            ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 }.label(),
         ];
         for l in labels {
             assert!(!l.is_empty(), "mode label must be non-empty");
