@@ -23,6 +23,7 @@ use crate::core::rx_worker::SharedMetrics;
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 use crate::metrics::{ChannelMetrics, ChannelMetricsSnapshot};
 use crate::mode::registry::{self, DemodKind};
+use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::{PttDriver, PttError};
 use crate::supervisor::Supervisor;
@@ -126,6 +127,7 @@ fn run(
     let mut next_tx_id: u64 = 1;
     let mut live = LiveBindings::default();
     let interlock = supervisor.interlock();
+    let lease = TxLeaseRegistry::new();
     let mut watcher = HotplugWatcher::new();
     let clock = ClockSource::new();
     // Initialize in the past so the first idle tick publishes immediately.
@@ -140,13 +142,16 @@ fn run(
                 &*enumerator,
                 &audio_factory,
                 &interlock,
+                &lease,
                 &mut live,
                 &mut next_tx_id,
                 &frames,
                 &telemetry,
             ),
             Err(RecvTimeoutError::Timeout) => {
-                poll_hotplug(&mut watcher, &*enumerator, &mut supervisor, &mut live, &telemetry);
+                poll_hotplug(
+                    &mut watcher, &*enumerator, &mut supervisor, &mut live, &lease, &telemetry,
+                );
                 if last_clock.elapsed() >= CLOCK_METRIC_PERIOD {
                     let r = clock.read();
                     let _ = telemetry.send(TelemetryEvent::ClockOffset {
@@ -169,6 +174,7 @@ fn handle_command(
     enumerator: &dyn DeviceEnumerator,
     audio_factory: &AudioBackendFactory,
     interlock: &crate::ptt::interlock::RxTxInterlock,
+    lease: &TxLeaseRegistry,
     live: &mut LiveBindings,
     next_tx_id: &mut u64,
     frames: &broadcast::Sender<FrameEvent>,
@@ -195,7 +201,7 @@ fn handle_command(
                 supervisor, enumerator, audio_factory, live, id, device_id, sample_rate, fanout,
             );
             if res.is_ok() {
-                try_spawn_workers(id, supervisor, live, interlock, frames, telemetry);
+                try_spawn_workers(id, supervisor, live, interlock, lease, frames, telemetry);
             }
             let _ = reply.send(res);
         }
@@ -203,7 +209,7 @@ fn handle_command(
         Command::ConfigurePtt { id, ptt, reply } => {
             let res = configure_ptt(supervisor, live, id, ptt);
             if res.is_ok() {
-                try_spawn_workers(id, supervisor, live, interlock, frames, telemetry);
+                try_spawn_workers(id, supervisor, live, interlock, lease, frames, telemetry);
             }
             let _ = reply.send(res);
         }
@@ -250,6 +256,30 @@ fn handle_command(
                 .map(|(c, m)| m.lock().unwrap().snapshot(*c))
                 .collect();
             let _ = reply.send(snaps);
+        }
+
+        Command::AcquireTxLease { channel, reply } => {
+            let res = match live.audio.get(&channel).map(|(d, _)| d.clone()) {
+                Some(rig) => match lease.acquire(&rig, channel) {
+                    Ok(()) => Ok(command::LeaseGrant { granted: true, held_by: Some(channel) }),
+                    Err(crate::ptt::lease::LeaseError::HeldBy(h)) => {
+                        Ok(command::LeaseGrant { granted: false, held_by: Some(h) })
+                    }
+                },
+                None => Err(CoreError::UnknownChannel(channel)),
+            };
+            let _ = reply.send(res);
+        }
+
+        Command::ReleaseTxLease { channel, reply } => {
+            let res = match live.audio.get(&channel).map(|(d, _)| d.clone()) {
+                Some(rig) => {
+                    lease.release(&rig, channel);
+                    Ok(())
+                }
+                None => Err(CoreError::UnknownChannel(channel)),
+            };
+            let _ = reply.send(res);
         }
 
         Command::Shutdown => {} // handled in run()
@@ -317,11 +347,13 @@ fn configure_ptt(
 /// a worker is spawned at most once per channel. For `ModeConfig::None` no
 /// worker is spawned — that channel stays on the legacy capture-idle / raw-PCM
 /// transmit path.
+#[allow(clippy::too_many_arguments)]
 fn try_spawn_workers(
     channel: ChannelId,
     supervisor: &Supervisor,
     live: &mut LiveBindings,
     interlock: &crate::ptt::interlock::RxTxInterlock,
+    lease: &TxLeaseRegistry,
     frames: &broadcast::Sender<FrameEvent>,
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
@@ -378,6 +410,7 @@ fn try_spawn_workers(
                 sink,
                 driver,
                 interlock: interlock.clone(),
+                lease: lease.clone(),
                 telemetry: telemetry.clone(),
                 slot_s,
             });
@@ -524,11 +557,13 @@ fn evict_on_gone(
 
 /// Poll for hotplug changes and react: emit telemetry, and on departure evict
 /// the PTT identity and drop any channel handles bound to that device.
+#[allow(clippy::too_many_arguments)]
 fn poll_hotplug(
     watcher: &mut HotplugWatcher,
     enumerator: &dyn DeviceEnumerator,
     supervisor: &mut Supervisor,
     live: &mut LiveBindings,
+    lease: &TxLeaseRegistry,
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
     for ev in watcher.poll(enumerator) {
@@ -556,6 +591,7 @@ fn poll_hotplug(
                     live.rx_workers.remove(&c); // stop RX on the departed rig
                     live.tx_workers.remove(&c);
                     live.metrics.remove(&c);
+                    lease.release_all(c); // free any lease held on the gone rig
                 }
                 let ptt_chans: Vec<ChannelId> = live
                     .ptt_dev

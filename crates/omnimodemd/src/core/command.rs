@@ -54,5 +54,23 @@ pub enum Command {
         channel: Option<ChannelId>,
         reply: oneshot::Sender<Vec<crate::metrics::ChannelMetricsSnapshot>>,
     },
+    /// Acquire the exclusive TX lease on `channel`'s bound rig.
+    AcquireTxLease {
+        channel: ChannelId,
+        reply: oneshot::Sender<Result<LeaseGrant, CoreError>>,
+    },
+    /// Release the exclusive TX lease `channel` holds on its bound rig.
+    ReleaseTxLease {
+        channel: ChannelId,
+        reply: oneshot::Sender<Result<(), CoreError>>,
+    },
     Shutdown,
+}
+
+/// Outcome of an `AcquireTxLease`: whether it was granted, and the current
+/// holder when it was not.
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseGrant {
+    pub granted: bool,
+    pub held_by: Option<ChannelId>,
 }

@@ -43,6 +43,10 @@ service ModemControl {
 
   // Snapshot per-channel metrics (decode counts, SNR, levels, DCD, AFC).
   rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+
+  // Acquire/release a channel's exclusive TX lease on its bound rig.
+  rpc AcquireTxLease(TxLeaseRequest) returns (TxLeaseResponse);
+  rpc ReleaseTxLease(TxLeaseRequest) returns (TxLeaseResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,4 +250,11 @@ message ChannelMetrics {
   float afc_offset_hz = 6;
   bool dcd = 7;
   string last_decoder = 8;
+}
+
+message TxLeaseRequest { uint32 channel = 1; }
+
+message TxLeaseResponse {
+  bool granted = 1;       // false on Acquire if another channel holds it
+  uint32 held_by = 2;     // the current holder when granted == false (0 if none)
 }
