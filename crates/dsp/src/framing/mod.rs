@@ -5,6 +5,12 @@
 //! message is **MSB-first big-endian** into the LDPC. A round-trip test that
 //! does not assert bit order is treated as incomplete (see "Conventions
 //! locked here" in the Phase-3 plan).
+//!
+//! Deferred (Phase-5 follow-on, not yet present): the **vocoder interface**
+//! (`framing::vocoder`) and the **ARQ engine** required by the FreeDV / M17 /
+//! ARDOP family and the (external) KISS↔gRPC translator. Those are out of scope
+//! for the current Phase-5 plan; their groups are named here to keep the catalog
+//! map honest.
 pub mod varicode;
 pub mod baudot;
 pub mod morse;
