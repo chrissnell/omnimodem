@@ -49,5 +49,10 @@ pub enum Command {
         device_id: DeviceId,
         reply: oneshot::Sender<Result<(String, String), CoreError>>,
     },
+    /// Snapshot per-channel metrics. `channel: None` returns every channel.
+    GetMetrics {
+        channel: Option<ChannelId>,
+        reply: oneshot::Sender<Vec<crate::metrics::ChannelMetricsSnapshot>>,
+    },
     Shutdown,
 }

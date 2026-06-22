@@ -40,6 +40,9 @@ service ModemControl {
 
   // Return ready-to-install udev rule text for a device (never writes it).
   rpc SuggestUdevRule(SuggestUdevRuleRequest) returns (SuggestUdevRuleResponse);
+
+  // Snapshot per-channel metrics (decode counts, SNR, levels, DCD, AFC).
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +105,7 @@ message Event {
     DeviceDeparted device_departed = 9; // LOSSY
     PttState ptt_state = 10;            // LOSSY
     ClockOffset clock_offset = 11;      // LOSSY
+    ChannelMetrics channel_metrics = 12; // LOSSY
   }
 }
 
@@ -219,4 +223,27 @@ message DeviceDeparted {
 message PttState {
   uint32 channel = 1;
   bool keyed = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: per-channel metrics & observability
+// ---------------------------------------------------------------------------
+
+message GetMetricsRequest {
+  uint32 channel = 1;   // 0 == all channels
+}
+
+message GetMetricsResponse {
+  repeated ChannelMetrics metrics = 1;
+}
+
+message ChannelMetrics {
+  uint32 channel = 1;
+  uint64 good_frames = 2;
+  uint64 bad_frames = 3;
+  float snr_db = 4;
+  float dbfs = 5;
+  float afc_offset_hz = 6;
+  bool dcd = 7;
+  string last_decoder = 8;
 }

@@ -87,8 +87,7 @@ mod tests {
 
     #[test]
     fn snapshot_carries_channel_and_copy() {
-        let mut m = ChannelMetrics::default();
-        m.good_frames = 4;
+        let m = ChannelMetrics { good_frames: 4, ..Default::default() };
         let snap = m.snapshot(ChannelId(7));
         assert_eq!(snap.channel, ChannelId(7));
         assert_eq!(snap.metrics.good_frames, 4);

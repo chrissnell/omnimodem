@@ -170,6 +170,20 @@ impl ModemControl for ControlService {
         Ok(Response::new(proto::SuggestUdevRuleResponse { rule, instructions }))
     }
 
+    async fn get_metrics(
+        &self,
+        request: Request<proto::GetMetricsRequest>,
+    ) -> Result<Response<proto::GetMetricsResponse>, Status> {
+        let req = request.into_inner();
+        let channel = (req.channel != 0).then_some(ChannelId(req.channel));
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::GetMetrics { channel, reply: tx })?;
+        let snaps = rx.await.map_err(|_| Status::unavailable("core dropped reply"))?;
+        Ok(Response::new(proto::GetMetricsResponse {
+            metrics: snaps.iter().map(convert::metrics_to_proto).collect(),
+        }))
+    }
+
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(
