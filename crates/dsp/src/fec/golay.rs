@@ -40,7 +40,7 @@ fn coset_leaders() -> &'static [u32; 2048] {
     static TABLE: OnceLock<[u32; 2048]> = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut t = [u32::MAX; 2048];
-        let mut set = |e: u32, t: &mut [u32; 2048]| {
+        let set = |e: u32, t: &mut [u32; 2048]| {
             let s = syndrome(e) as usize;
             if t[s] == u32::MAX {
                 t[s] = e;
