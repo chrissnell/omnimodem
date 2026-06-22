@@ -21,6 +21,8 @@ pub enum ModeConfig {
     Jt65,
     Jt9,
     Wspr,
+    // Phase 5 fldigi breadth modes.
+    Olivia { tones: u16, bandwidth_hz: u16 },
 }
 
 impl ModeConfig {
@@ -40,6 +42,7 @@ impl ModeConfig {
             "jt65" => Some(ModeConfig::Jt65),
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
+            "olivia" => Some(ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 }),
             _ => None,
         }
     }
@@ -55,6 +58,7 @@ impl ModeConfig {
             ModeConfig::Jt65 => "jt65",
             ModeConfig::Jt9 => "jt9",
             ModeConfig::Wspr => "wspr",
+            ModeConfig::Olivia { .. } => "olivia",
         }
     }
 }
@@ -118,6 +122,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolves_olivia_with_defaults() {
+        assert_eq!(
+            ModeConfig::parse("olivia"),
+            Some(ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 })
+        );
+    }
+
+    #[test]
     fn label_round_trips_none() {
         assert_eq!(ModeConfig::None.label(), "none");
         // "none" parses back to the variant whose label it is — the one
@@ -138,6 +150,7 @@ mod tests {
             ModeConfig::Jt65.label(),
             ModeConfig::Jt9.label(),
             ModeConfig::Wspr.label(),
+            ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 }.label(),
         ];
         for l in labels {
             assert!(!l.is_empty(), "mode label must be non-empty");

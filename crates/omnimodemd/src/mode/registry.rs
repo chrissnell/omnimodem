@@ -11,6 +11,7 @@ use omnimodem_dsp::modes::{
     ft8::{Ft8Demod, Ft8Mod},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
+    olivia::{OliviaDemod, OliviaMod},
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
     wspr::{WsprDemod, WsprMod},
@@ -52,6 +53,9 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Jt65 => windowed(Box::new(Jt65Demod::new())),
         ModeConfig::Jt9 => windowed(Box::new(Jt9Demod::new())),
         ModeConfig::Wspr => windowed(Box::new(WsprDemod::new())),
+        ModeConfig::Olivia { tones, bandwidth_hz } => {
+            DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
+        }
     }
 }
 
@@ -68,6 +72,9 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Jt65 => Some(Box::new(Jt65Mod::new())),
         ModeConfig::Jt9 => Some(Box::new(Jt9Mod::new())),
         ModeConfig::Wspr => Some(Box::new(WsprMod::new())),
+        ModeConfig::Olivia { tones, bandwidth_hz } => {
+            Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
+        }
     }
 }
 
@@ -117,6 +124,14 @@ mod tests {
         }
         assert_eq!(tx_slot_s(&ModeConfig::Wspr), Some(120.0));
         assert_eq!(tx_slot_s(&ModeConfig::Ft4), Some(7.5));
+    }
+
+    #[test]
+    fn olivia_is_streaming_with_a_modulator() {
+        let cfg = ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 };
+        assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)));
+        assert!(build_modulator(&cfg).is_some());
+        assert_eq!(tx_slot_s(&cfg), None);
     }
 
     #[test]
