@@ -63,10 +63,7 @@ mod tests {
 
     #[test]
     fn render_emits_labeled_series() {
-        let mut m = ChannelMetrics::default();
-        m.good_frames = 5;
-        m.bad_frames = 1;
-        m.snr_db = -7.5;
+        let m = ChannelMetrics { good_frames: 5, bad_frames: 1, snr_db: -7.5, ..Default::default() };
         let out = render(&[m.snapshot(ChannelId(2))]);
         assert!(out.contains("omnimodem_good_frames{channel=\"2\"} 5"));
         assert!(out.contains("omnimodem_bad_frames{channel=\"2\"} 1"));

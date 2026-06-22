@@ -1,7 +1,9 @@
 //! omnimodemd entrypoint: wire the sync core to the authorized gRPC edge.
 
 use omnimodemd::authz::{self, Transport};
+use omnimodemd::core::command::Command;
 use omnimodemd::grpc::ControlService;
+use omnimodemd::metrics::ChannelMetricsSnapshot;
 use omnimodemd::persist::Store;
 use std::path::PathBuf;
 
@@ -29,6 +31,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = Store::open(&db_path)?;
     let (core_handle, _join) = omnimodemd::production_core(store)?;
+
+    // Optional Prometheus exporter (off unless OMNIMODEM_PROMETHEUS_ADDR is set).
+    if let Some(addr) = std::env::var("OMNIMODEM_PROMETHEUS_ADDR")
+        .ok()
+        .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+    {
+        let cmds = core_handle.commands.clone();
+        let fetch = move || -> Vec<ChannelMetricsSnapshot> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if cmds.try_send(Command::GetMetrics { channel: None, reply: tx }).is_err() {
+                return Vec::new();
+            }
+            // The serve loop runs on a multi-thread runtime worker; tell tokio we
+            // are about to block on the core's reply.
+            tokio::task::block_in_place(|| rx.blocking_recv()).unwrap_or_default()
+        };
+        tokio::spawn(async move {
+            if let Err(e) = omnimodemd::metrics::prometheus::serve(addr, fetch).await {
+                tracing::warn!("prometheus exporter exited: {e}");
+            }
+        });
+        tracing::info!(%addr, "prometheus exporter enabled");
+    }
+
     let svc = ControlService::new(core_handle);
 
     tracing::info!(socket = %sock_path.display(), "omnimodemd {} serving", omnimodemd::VERSION);
