@@ -24,6 +24,8 @@ pub mod mode;
 
 pub mod core;
 
+pub mod metrics;
+
 pub mod grpc;
 
 pub mod authz;
