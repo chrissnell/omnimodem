@@ -36,7 +36,7 @@ impl FanoCode {
     pub fn encode(&self, data: &[u8]) -> Vec<u8> {
         let mut reg: u32 = 0;
         let mut out = Vec::with_capacity((data.len() + TAIL) * 2);
-        for &bit in data.iter().chain(std::iter::repeat(&0).take(TAIL)) {
+        for bit in data.iter().copied().chain(std::iter::repeat_n(0u8, TAIL)) {
             reg = (reg << 1) | (bit as u32 & 1);
             for p in self.polys {
                 out.push((reg & p).count_ones() as u8 & 1);

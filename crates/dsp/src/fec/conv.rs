@@ -34,7 +34,7 @@ impl ConvCode {
         let n = self.polys.len();
         let mut reg: u32 = 0;
         let mut out = Vec::with_capacity((data.len() + self.k - 1) * n);
-        let flushed = data.iter().copied().chain(std::iter::repeat(0).take(self.k - 1));
+        let flushed = data.iter().copied().chain(std::iter::repeat_n(0, self.k - 1));
         for bit in flushed {
             reg = (reg << 1) | (bit as u32 & 1);
             for &p in &self.polys {
@@ -63,8 +63,8 @@ impl ConvCode {
 
         for t in 0..steps {
             let mut next = vec![f32::NEG_INFINITY; states];
-            for s in 0..states {
-                if metric[s] == f32::NEG_INFINITY {
+            for (s, &ms) in metric.iter().enumerate() {
+                if ms == f32::NEG_INFINITY {
                     continue;
                 }
                 for bit in 0..2u32 {
@@ -77,7 +77,7 @@ impl ConvCode {
                         // Correlation metric: +L if the code bit is 0, -L if 1.
                         branch += if code_bit == 0 { l } else { -l };
                     }
-                    let cand = metric[s] + branch;
+                    let cand = ms + branch;
                     if cand > next[ns] {
                         next[ns] = cand;
                         bit_at[t * states + ns] = bit as u8;

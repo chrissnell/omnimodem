@@ -128,14 +128,15 @@ impl RsGf64 {
     /// `None` if uncorrectable.
     pub fn decode(&self, received: &[u8; 63]) -> Option<[u8; 12]> {
         let mut cw = received.to_vec();
-        self.decode_in_place(&mut cw).ok()?;
+        self.decode_in_place(&mut cw)?;
         let mut data = [0u8; 12];
         data.copy_from_slice(&cw[..12]);
         Some(data)
     }
 
-    /// Decode in place; returns the number of corrected symbols or `Err(())`.
-    pub fn decode_in_place(&self, codeword: &mut [u8]) -> Result<usize, ()> {
+    /// Decode in place; returns the number of corrected symbols, or `None` if the
+    /// word is uncorrectable.
+    pub fn decode_in_place(&self, codeword: &mut [u8]) -> Option<usize> {
         let n = codeword.len();
         let nroots = self.nroots;
         let f = &self.field;
@@ -159,7 +160,7 @@ impl RsGf64 {
             }
         }
         if !any {
-            return Ok(0);
+            return Some(0);
         }
 
         // 2. Berlekamp–Massey → error locator Λ(x).
@@ -204,7 +205,7 @@ impl RsGf64 {
 
         let nerr = (0..=nroots).rev().find(|&i| lambda[i] != 0).unwrap_or(0);
         if nerr == 0 || nerr > nroots / 2 {
-            return Err(());
+            return None;
         }
 
         // 3. Chien search.
@@ -222,7 +223,7 @@ impl RsGf64 {
             }
         }
         if err_pos.len() != nerr {
-            return Err(());
+            return None;
         }
 
         // 4. Forney.
@@ -254,7 +255,7 @@ impl RsGf64 {
                 i += 2;
             }
             if lambda_prime == 0 {
-                return Err(());
+                return None;
             }
             let mut mag = f.mul(omega_val, f.inv(lambda_prime));
             if mag != 0 {
@@ -276,10 +277,10 @@ impl RsGf64 {
                 };
             }
             if acc != 0 {
-                return Err(());
+                return None;
             }
         }
-        Ok(err_pos.len())
+        Some(err_pos.len())
     }
 }
 
@@ -326,9 +327,9 @@ mod tests {
         let data = [9u8, 8, 7, 6, 5, 4, 3, 2, 1, 0, 63, 62];
         let cw: [u8; 63] = rs.encode(&data).try_into().unwrap();
         let mut bad = cw;
-        for pos in 0..30 {
-            // 30 > t=25 errors
-            bad[pos] ^= 0x15;
+        // 30 > t=25 errors
+        for slot in bad.iter_mut().take(30) {
+            *slot ^= 0x15;
         }
         // Either flags uncorrectable, or (rarely) lands on a different valid
         // codeword — but it must not return the original data silently.

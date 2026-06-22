@@ -183,7 +183,7 @@ mod tests {
         let data: Vec<i32> = (1..=40).collect();
         // feed data followed by `latency` flush zeros
         let mut out = Vec::new();
-        for &x in data.iter().chain(std::iter::repeat(&0).take(latency)) {
+        for x in data.iter().copied().chain(std::iter::repeat_n(0, latency)) {
             out.push(dl.push(il.push(x)));
         }
         // output is the input delayed by `latency`
