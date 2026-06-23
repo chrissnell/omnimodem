@@ -52,6 +52,7 @@ impl RxWorker {
         frames: broadcast::Sender<FrameEvent>,
         telemetry: broadcast::Sender<TelemetryEvent>,
         metrics: SharedMetrics,
+        gain: crate::core::AudioGain,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -71,7 +72,14 @@ impl RxWorker {
                             if interlock.is_muted(&rig) {
                                 continue; // our TX is keyed on this rig
                             }
-                            let samples = resample(&mut resampler, to_f32(&chunk));
+                            let mut samples = resample(&mut resampler, to_f32(&chunk));
+                            // Apply runtime RX gain (one relaxed load per chunk).
+                            let g = gain.rx();
+                            if g != 1.0 {
+                                for s in samples.iter_mut() {
+                                    *s *= g;
+                                }
+                            }
                             let mut produced = false;
                             for f in demod.feed(&samples) {
                                 record(&metrics, &f);
@@ -118,6 +126,7 @@ impl RxWorker {
         telemetry: broadcast::Sender<TelemetryEvent>,
         metrics: SharedMetrics,
         window_s: f32,
+        gain: crate::core::AudioGain,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -140,7 +149,14 @@ impl RxWorker {
                             if interlock.is_muted(&rig) {
                                 muted_window = true; // a TX overlapped this window
                             }
-                            buf.extend_from_slice(&resample(&mut resampler, to_f32(&chunk)));
+                            let mut chunk_samples = resample(&mut resampler, to_f32(&chunk));
+                            let g = gain.rx();
+                            if g != 1.0 {
+                                for s in chunk_samples.iter_mut() {
+                                    *s *= g;
+                                }
+                            }
+                            buf.extend_from_slice(&chunk_samples);
                             while buf.len() >= win_samples {
                                 let window: Vec<Sample> = buf.drain(..win_samples).collect();
                                 if !muted_window {
@@ -300,6 +316,7 @@ mod tests {
             broadcast::channel(8).0,
             broadcast::channel(8).0,
             test_metrics(),
+            crate::core::AudioGain::default(),
         );
         // Worker is blocked in recv_timeout with no data. stop() joins it.
         let start = std::time::Instant::now();
@@ -331,6 +348,7 @@ mod tests {
             tx_b,
             broadcast::channel(8).0,
             test_metrics(),
+            crate::core::AudioGain::default(),
         );
         worker.join();
 
@@ -370,6 +388,7 @@ mod tests {
             tx_b,
             broadcast::channel(8).0,
             test_metrics(),
+            crate::core::AudioGain::default(),
         );
         worker.join();
         assert!(rx_b.try_recv().is_err(), "muted worker emitted a frame");
@@ -395,6 +414,7 @@ mod tests {
             broadcast::channel(8).0,
             test_metrics(),
             FT8_WINDOW_S,
+            crate::core::AudioGain::default(),
         );
         worker.join();
 
@@ -432,6 +452,7 @@ mod tests {
             broadcast::channel(64).0,
             tele_tx,
             metrics.clone(),
+            crate::core::AudioGain::default(),
         );
         worker.join();
 
