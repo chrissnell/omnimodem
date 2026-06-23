@@ -300,6 +300,87 @@ mod tests {
         Arc::new(Mutex::new(ChannelMetrics::default()))
     }
 
+    /// A streaming demod that records the peak |sample| it is fed, so a test can
+    /// observe the samples *after* RX gain is applied but before any decode.
+    struct PeakRecordingDemod {
+        rate: u32,
+        peak: Arc<Mutex<f32>>,
+    }
+
+    impl omnimodem_dsp::mode::Demodulator for PeakRecordingDemod {
+        fn caps(&self) -> omnimodem_dsp::mode::ModeCaps {
+            omnimodem_dsp::mode::ModeCaps {
+                native_rate: self.rate,
+                bandwidth_hz: 1000.0,
+                tx: false,
+                duplex: omnimodem_dsp::mode::Duplex::Half,
+                shape: omnimodem_dsp::mode::DemodShape::Streaming,
+            }
+        }
+        fn feed(&mut self, samples: &[omnimodem_dsp::types::Sample]) -> Vec<Frame> {
+            let mut p = self.peak.lock().unwrap();
+            for &s in samples {
+                *p = p.max(s.abs());
+            }
+            Vec::new()
+        }
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn rx_gain_scales_samples_before_the_demod() {
+        // Constant 0.5-full-scale capture (i16 16384 ≈ 0.5 after to_f32). With the
+        // demod's native rate == capture rate there is no resampling, so the demod
+        // sees exactly the gained samples. rx_gain = 3.0 must triple the peak.
+        let backend = FileBackend::from_samples(vec![16_384i16; 4_800], 48_000);
+        let capture = backend.open_capture(48_000).unwrap();
+
+        let peak = Arc::new(Mutex::new(0.0f32));
+        let gain = crate::core::AudioGain::default();
+        gain.set(3.0, 1.0);
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(0),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(PeakRecordingDemod { rate: 48_000, peak: peak.clone() }),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+            broadcast::channel(8).0,
+            test_metrics(),
+            gain,
+        );
+        worker.join();
+
+        let observed = *peak.lock().unwrap();
+        // Input peak ≈ 0.5; gained ≈ 1.5. Allow generous tolerance for i16 rounding.
+        assert!(
+            (observed - 1.5).abs() < 0.05,
+            "rx_gain not applied: observed peak {observed}, expected ≈1.5 (0.5 × 3.0)"
+        );
+    }
+
+    #[test]
+    fn rx_unity_gain_leaves_samples_unscaled() {
+        // The default-unity path must not alter samples: peak stays ≈ 0.5.
+        let backend = FileBackend::from_samples(vec![16_384i16; 4_800], 48_000);
+        let capture = backend.open_capture(48_000).unwrap();
+        let peak = Arc::new(Mutex::new(0.0f32));
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(0),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(PeakRecordingDemod { rate: 48_000, peak: peak.clone() }),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+            broadcast::channel(8).0,
+            test_metrics(),
+            crate::core::AudioGain::default(),
+        );
+        worker.join();
+        let observed = *peak.lock().unwrap();
+        assert!((observed - 0.5).abs() < 0.05, "unity gain altered samples: peak {observed}");
+    }
+
     #[test]
     fn stop_halts_a_worker_on_an_infinite_capture() {
         // Simulate the real cpal capture, which never EOFs: keep the producer
