@@ -1,11 +1,17 @@
 # Omnimodem TUI Client — Design
 
 > Status: **Design / RFC.** Targets the existing `omnimodem.v1` gRPC API.
-> Scope: configuration + digital-mode **TX**. RX (decode display) is deferred.
+> Scope: configuration + digital-mode **TX**. RX (decode display) is deferred, but
+> the layout reserves its place so it drops in without rework.
 
 A terminal client for `omnimodemd`, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 It lets an operator enumerate audio/PTT hardware, bind a channel, pick a digital
 mode, and send a message — hearing the modulated signal on the output device.
+
+The bar is **usable, not exhaustive**: enough of what real operators expect from
+WSJT-X / fldigi / JS8Call that someone would actually reach for it, without
+chasing every feature those mature apps carry. §5 is a research spike that sets
+that bar; §6 is the layout it produces.
 
 ## 1. Goals & non-goals
 
@@ -13,17 +19,22 @@ mode, and send a message — hearing the modulated signal on the output device.
 1. Connect to a local `omnimodemd` over its gRPC control plane.
 2. Enumerate audio + PTT devices; select RX/TX audio and a PTT device + method.
 3. Bind a channel (`ConfigureChannel` + `ConfigureAudio` + `ConfigurePtt`).
-4. Show live audio levels (dBFS meter) and PTT state from the event stream.
+4. Show live audio levels (dBFS) and PTT state from the event stream.
 5. Select a digital mode and compose + transmit a message.
 6. Surface TX progress (started/complete), TX lease, and clock-sync for FT8.
+7. **Feel like a real digital-mode app** — macros, a persistent status bar, an
+   activity pane, and a hard TX abort (see §5).
 
-**Non-goals (deferred):**
-- RX decode display (`RxFrame` rendering) — comes after TX is solid.
-- KISS/packet operation — that path is the in-daemon KISS listener, not typed messages.
+**Non-goals (deferred / out of scope):**
+- RX decode display (`RxFrame` rendering) — comes after TX is solid; its panes are
+  scaffolded now and sit empty until the decode path lands.
+- Rig CAT/VFO control — omnimodem is audio + PTT; the proto has no rig frequency, so
+  "tuning" means the audio offset within the passband, not a VFO.
+- DX cluster / PSKReporter / online spotting, contest logging, ADIF, maps.
 
 > **Update (after #20):** runtime gain (`SetAudioGain`) and split RX/TX device
 > binding (`ConfigureAudio.tx_device_id`) both landed, so the levels panel and
-> separate RX/TX device selection are now in scope for MVP — see [§5.3](#53-configuration-per-channel).
+> separate RX/TX device selection are in scope — see [§6.3](#63-configuration-per-channel).
 
 ## 2. Where it lives
 
@@ -31,7 +42,7 @@ mode, and send a message — hearing the modulated signal on the output device.
 module at **`clients/omnimodem-tui/`** in this repo, generating bindings from
 `proto/omnimodem.proto` via `protoc-gen-go` + `protoc-gen-go-grpc`. One repo keeps
 the proto and its first reference frontend versioned together. (Alternative: a
-separate repo — see [§7](#7-open-questions).)
+separate repo — see [§8](#8-open-questions).)
 
 ## 3. Transport & connection
 
@@ -59,99 +70,163 @@ SubscribeEvents (goroutine) ──> buffered chan Event ──> waitForEvent (te
 - All mutating RPCs run as `tea.Cmd`s returning result/err msgs — the Update loop
   stays non-blocking. State of record = the snapshot + event deltas, not polling.
 
-Components: `bubbles/list` (devices, modes), `textinput`/`textarea` (composer &
-PTT fields), `table` (channel dashboard), `progress` (dBFS meter, FT8 slot timer),
-`help`, `lipgloss` for layout.
+Components: `bubbles/list` (devices, modes, activity roster),
+`textinput`/`textarea` (composer & PTT fields), `table` (dashboard, band activity),
+`progress` (dBFS meter, FT8 slot timer), `key`/`help` (keymap + macro bar),
+`lipgloss` for layout.
 
-## 5. Screens
+## 5. UI/UX research spike — lessons from the established apps
 
-### 5.1 Connection
+What do operators actually expect from a digital-mode app, and how is it organized?
+A survey of the dominant packages (and the proof that terminal clients are real):
+
+| App | Modes | Core layout | Standout UX |
+|---|---|---|---|
+| **WSJT-X** | FT8/FT4/JT65/Q65/WSPR | mode buttons; **Band Activity** + **Rx Frequency** decode panes; **Tx1–Tx6** message panel; separate **waterfall**; Pwr slider | **auto-sequencing** QSO state machine; double-click a decode to start a QSO; big **Halt Tx**; **Tx watchdog** timeout; sending `73` opens the **log** window |
+| **fldigi** | PSK31/RTTY/CW/Olivia/Hell/… | click-to-tune **waterfall**; **RX text** pane over **TX text** pane; **macro bar** (F1–F12 × 4 banks = 48 macros); inline log fields | macro quick-keys (CQ / my-call / brag / 73); already-sent TX text colorized; pick a signal off the waterfall |
+| **JS8Call** | JS8 (keyboard chat over FT8) | **Band Activity** + **Call Activity** (heard-station roster) + directed-message pane + **compose box** + waterfall | select a callsign → **directed message** (callsign auto-prefixed); click a station to reply; **heartbeat** automation |
+| **twpsk / psk31lx** | PSK31 | ncurses RX/TX split + tuning indicator | proof that terminal-native digital clients exist and get used |
+
+**Distilled "table-stakes for usable"** — the patterns common to all of them:
+
+1. **Spectrum/waterfall awareness** — see *where* signals are and tune to them. The
+   single most iconic element of every GUI app.
+2. **Split RX-over-TX text** — the conversation transcript for keyboard modes.
+3. **Macros / quick-send** — one keystroke for canned messages (CQ, my call, RST,
+   73). fldigi's F-keys; the biggest ergonomic multiplier and cheap to build.
+4. **Activity / station roster** — recently-heard stations, click to reply
+   (JS8Call Call Activity, WSJT-X Band Activity).
+5. **Auto-sequence + one-key abort** — for the rigid FT8 exchange (Tx1–Tx6), plus a
+   prominent **Halt Tx** and a **watchdog** that stops runaway transmits.
+6. **At-a-glance status** — mode, frequency/offset, PTT, clock-sync, signal level,
+   always visible in one bar.
+7. **Lightweight logging** — record call / RST / grid / time; `73` triggers it.
+8. **Signal report (RST/SNR)** front-and-center — the unit of a QSO.
+
+**Adopt (in scope — these exercise omnimodem usefully and read as a real app):**
+- **Macro bar** of quick-send messages wired to `Transmit` (CQ, my-call, RST, 73,
+  brag); user-editable text, function-key bound.
+- **Persistent status bar**: channel, mode + offset, PTT state, clock-sync, live
+  RX/TX dBFS — driven by the event stream.
+- **Activity/roster pane + chat transcript** laid out now; transcript shows TX today
+  and gains inbound RX lines for free when decode lands; roster populates from
+  `RxFrame` later.
+- **FT8 auto-sequence ladder** (Tx1–Tx6) with **Halt Tx** and a **Tx watchdog**.
+- **Mini QSO log** — local append-only (call/RST/grid/UTC); `73`/RR73 prompts a log.
+- **Big TX-active banner + single abort key** everywhere TX can run.
+
+**Deliberately skip (scope discipline — "exercise omnimodem", not clone WSJT-X):**
+- Rig CAT control (no rig frequency in the proto), DX cluster / PSKReporter,
+  contest/ADIF logging, mapping/GridTracker, multi-decoder super-waterfalls.
+
+**Gaps this surfaced** (carried into [§8](#8-open-questions)):
+- **No spectrum/FFT in the API.** `AudioLevel` is a single dBFS scalar — enough for a
+  level meter, *not* a waterfall. A real spectrum strip needs a new FFT/spectrum
+  event from the daemon, or we ship a level-meter-only view. This is the one place
+  the "usable" bar bumps the protocol.
+- **Tuning model.** With no VFO in the proto, "tuning" is the audio offset where the
+  mode sits in the passband (e.g. PSK31 center, FT8 sub-band) — worth confirming the
+  mental model matches operator expectation.
+- **RX-dependent features inert until decode lands** — roster, inbound chat, RST-from-SNR.
+
+## 6. Screens
+
+### 6.1 Connection
 Pick/confirm socket path or routable addr → connect → show daemon version & state.
 
-### 5.2 Dashboard (home)
+### 6.2 Dashboard (home)
 Table of channels: id, name, mode, bound device, PTT state, live dBFS bar, TX-lease
-holder. Live-updated from the event stream. Keys to jump into Config or Compose.
+holder. Live from the event stream. Keys to jump into Config or Operate.
 
-### 5.3 Configuration (per channel)
+### 6.3 Configuration (per channel)
 - **Device enumeration:** `ListDevices` → split into capture-capable (RX) and
   playback-capable (TX) views from `DeviceInfo{has_capture,has_playback}`. A typical
-  USB rig interface is one device exposing both (pick it once for RX+TX); since #20,
-  a split rig can bind a separate playback card via `tx_device_id`. So the screen
-  offers an **RX capture device**, an **optional separate TX playback device**
-  (defaults to the RX device), and a **PTT device**. Device hotplug
-  (`DeviceArrived`/`Departed`) updates the lists live.
+  USB rig interface is one device exposing both (pick it once); since #20 a split rig
+  can bind a separate playback card via `tx_device_id`. The screen offers an **RX
+  capture device**, an **optional separate TX playback device** (defaults to RX), and
+  a **PTT device**. Hotplug (`DeviceArrived`/`Departed`) updates the lists live.
 - **Audio bind:** `ConfigureAudio(channel, device_id, sample_rate=48000, fanout,
   tx_device_id?, tx_sample_rate?)`; show the returned `actual_sample_rate`.
 - **PTT bind:** `ConfigurePtt(channel, device_id, method, node, pin_or_line, invert)`
-  with a method picker (NONE/VOX/SERIAL_RTS/SERIAL_DTR/CM108/GPIO) and the
-  pin/line/invert fields gated by method. `KeyPtt` gives a manual key/unkey test.
-- **Permissions helper:** on a bind that needs udev access (CM108/serial/GPIO),
-  offer `SuggestUdevRule(device_id)` and display the rule text + install instructions
-  (the daemon never writes it).
-- **Levels:** live dBFS meter driven by `AudioLevel` events, with **RX/TX gain
-  sliders** wired to `SetAudioGain(channel, rx_gain, tx_gain)` (linear, 1.0 =
-  unity) — landed in #20, so the operator sets levels by eye against the live meter.
+  with a method picker (NONE/VOX/SERIAL_RTS/SERIAL_DTR/CM108/GPIO); pin/line/invert
+  gated by method. `KeyPtt` gives a manual key/unkey test.
+- **Permissions helper:** when a bind needs udev access (CM108/serial/GPIO), offer
+  `SuggestUdevRule(device_id)` and show the rule + install instructions (daemon never
+  writes it).
+- **Levels:** live dBFS meter from `AudioLevel`, with **RX/TX gain sliders** wired to
+  `SetAudioGain(channel, rx_gain, tx_gain)` (linear, 1.0 = unity; landed in #20).
 
-### 5.4 Compose & TX (per channel)
+### 6.4 Operate (per channel) — the main screen
 
-**Not every mode is a chat.** These modes fall into three interaction shapes, and
-the compose surface should match the mode rather than force one universal text box
-(see [§5.5](#55-interaction-model-chat-vs-structured-vs-packet)):
+Mode-selected compose surface (see [§7](#7-interaction-model-chat-vs-structured-vs-packet))
+over shared TX plumbing, wrapped in the always-on chrome the research calls for: a
+**status bar**, an **activity pane**, and a **macro bar**.
 
-- **Ragchew / keyboard modes — PSK31, RTTY, CW.** Genuinely conversational,
-  back-and-forth free text. Surface = a **chat transcript**: a scrollback viewport
-  of interleaved RX/TX lines with timestamps + a compose line at the bottom. (RX
-  lines are deferred, so the MVP transcript is TX-only, but the layout is built to
-  drop decoded RX in unchanged once that path lands — the chat UI is the payoff.)
-- **Structured QSO — FT8.** *Not* a chat. A rigid, clock-driven exchange ladder
-  (CQ → grid → signal report → R-report → RRR → 73) in 15 s slots, ~13-char
-  payloads. Surface = a **QSO sequencer**: my call/grid, target call, the standard
-  message ladder as selectable steps, the slot clock, and a constrained free-text
-  escape hatch. A chat box would be the wrong metaphor here.
-- **AFSK1200 — packet *or* chat.** AFSK is just Bell-202 modulation, not a
-  protocol. In omnimodem today the modulator HDLC-frames whatever bytes you hand
-  it (`Afsk1200Mod::modulate` → preamble flags + `hdlc_frame(payload)` + FCS) and
-  this is *not* AX.25-specific — AX.25 is merely the usual payload. So AFSK1200 can
-  back the **chat transcript** too: each typed line rides as an HDLC-framed payload
-  via the raw `Transmit` path, no daemon change. The **AX.25/KISS** path
-  (`ConfigureKissListener`) is the separate, interop-oriented use for
-  Direwolf/APRS. Caveat: *truly* raw async-serial AFSK (no HDLC at all, classic
-  Bell-202 TTY) would need a transparent-framing path added to the modem — see
-  [§7](#7-open-questions).
+**Ragchew layout (PSK31 / RTTY / CW / AFSK1200-converse):**
 
-- **Mode select:** picks the surface above. Mode params (CW wpm/tone, RTTY
-  baud/shift, PSK31 center) need a wire convention — escalated to a separate
-  protocol-expansion plan ([§7](#7-open-questions)); MVP uses sensible defaults.
-- **TX flow:**
-  1. `AcquireTxLease(channel)` — refuse/queue if another channel holds the rig.
-  2. `Transmit(channel, payload)` → `transmit_id`.
-  3. Watch `TransmitStarted` → `TransmitComplete` for that id; show a progress/state
-     line and the live TX dBFS meter. Operator hears modulation on the output device.
-  4. `ReleaseTxLease(channel)` when done.
-  - PTT keying during TX follows the daemon contract — confirm in [§7](#7-open-questions).
-- **FT8 specifics:** show the 15 s slot timer and a clock-sync indicator from
-  `ClockOffset{synchronized, offset_s}` (windowed modes need an accurate clock);
-  warn before TX if unsynchronized.
+```
+┌ omnimodem · ch1 ▸ PSK31 @ 1000Hz ······· clk ✓ · PTT ▢ · RX −18 TX −− dBFS ┐
+│ Activity (heard)      │ Transcript                                          │
+│ ▸ W1AW   −12  2m       │ 12:03 ‹ CQ CQ de W1AW W1AW K                        │
+│   K0PIR  −08  5m       │ 12:04 › W1AW de NW5W NW5W                           │
+│   …  (RX-era)          │ 12:04 ‹ NW5W de W1AW ur 599 …  (RX-era)            │
+│                        │ ▁▁▂▃▅▇ level / spectrum strip                       │
+├────────────────────────┴───────────────────────────────────────────────────┤
+│ › compose…________________________________________________________  [↵ send]│
+├ macros ──────────────────────────────────────────────────────────────────── │
+│ F1 CQ  F2 Call  F3 RST  F4 73  F5 Brag  …            [T] key  [Esc] HALT TX  │
+└──────────────────────────────────────────────────────────────────────────── ┘
+```
 
-### 5.5 Interaction model: chat vs structured vs packet
+**Structured layout (FT8):**
 
-Answering "are these chat-centric?" directly: **the keyboard modes are; FT8 isn't;
-AFSK1200 can be either.** Driving the whole UI as one chat window would fit
-PSK31/RTTY/CW (and AFSK1200 in converse use) but mis-model FT8 and AX.25/KISS
-packet. So the Compose surface is **mode-selected** (and, for AFSK1200,
-use-selected), sharing the same TX plumbing underneath:
+```
+┌ omnimodem · ch1 ▸ FT8 · slot ███▁▁ 07/15s · clk ✓ +0.02s · TX −6 dBFS ──────┐
+│ Band activity          │ QSO sequencer                                        │
+│ 00:15 −10 CQ W1AW FN31  │  DX [W1AW]  grid [FN31]   my [NW5W EM10]  RST −10/+02│
+│ 00:30 −08 K0PIR EM12    │  ┌ auto-sequence ──────────────────────────────────┐│
+│ …                       │  │ ▸ Tx1  W1AW NW5W EM10                            ││
+│                         │  │   Tx2  W1AW NW5W −10                             ││
+│                         │  │   Tx3  W1AW NW5W R−08                            ││
+│                         │  │   Tx4  W1AW NW5W RR73                            ││
+│                         │  │   Tx5  W1AW NW5W 73                              ││
+│                         │  └──────────────────────────────────────────────────┘│
+│                         │  auto ☑   [↵] Enable Tx   [H] HALT TX   73→log       │
+└─────────────────────────┴──────────────────────────────────────────────────── ┘
+```
+
+(Wireframes are illustrative; double-lines = focus. `‹`=RX, `›`=TX.)
+
+- **Mode select:** picks the surface. Mode params (CW wpm/tone, RTTY baud/shift,
+  PSK31 center) need a wire convention — separate protocol-expansion plan
+  ([§8](#8-open-questions)); MVP uses sensible defaults.
+- **TX flow:** `AcquireTxLease` → `Transmit(channel, payload)` → watch
+  `TransmitStarted`/`TransmitComplete` (TX banner + live dBFS; operator hears the
+  modulation) → `ReleaseTxLease`. **Halt** aborts; a **watchdog** stops TX if it
+  runs past a configured ceiling. PTT keying during TX follows the daemon contract
+  ([§8](#8-open-questions)).
+- **FT8 specifics:** the slot clock and `ClockOffset{synchronized,offset_s}` ride in
+  the status bar; warn before TX if unsynchronized. Auto-sequence advances Tx1→…→73;
+  reaching 73/RR73 prompts a log entry.
+
+## 7. Interaction model: chat vs structured vs packet
+
+**The keyboard modes are chat; FT8 isn't; AFSK1200 can be either.** Driving the whole
+UI as one chat window would fit PSK31/RTTY/CW (and AFSK1200 in converse use) but
+mis-model FT8 and AX.25/KISS packet. Hence the mode-selected surfaces above:
 
 | Shape | Modes | Surface | Why |
 |---|---|---|---|
-| **Chat / ragchew** | PSK31, RTTY, CW, **AFSK1200\*** | Scrollback transcript + compose line | Keyboard-to-keyboard free text (*AFSK lines ride HDLC frames today; raw async TTY needs a modem change) |
-| **Structured QSO** | FT8 | Exchange-ladder sequencer + slot clock | Rigid timed protocol, ~13-char payloads, not free chat |
+| **Chat / ragchew** | PSK31, RTTY, CW, **AFSK1200\*** | transcript + compose + macros | keyboard-to-keyboard free text (*AFSK rides HDLC frames today; raw async TTY needs a modem change) |
+| **Structured QSO** | FT8 | auto-sequence ladder + slot clock | rigid timed protocol, ~13-char payloads, not free chat |
 | **Packet / KISS** | AFSK1200 (AX.25) | `ConfigureKissListener`, not this screen | Direwolf/APRS interop, framed AX.25 |
 
-The chat transcript is the right long-term home for the deferred RX path: today it
-shows your TX lines; when decode lands, RX frames render as inbound lines in the
-same view, and PSK31/RTTY/CW become true two-way chat with no layout change.
+AFSK1200 is just Bell-202 modulation; omnimodem's modulator HDLC-frames any bytes
+(`Afsk1200Mod` → preamble + `hdlc_frame` + FCS), which is *not* AX.25-specific, so
+the chat surface backs it today via raw `Transmit`. Truly raw async AFSK (no HDLC)
+would need a transparent-framing path in the modem ([§8](#8-open-questions)).
 
-## 6. Mapping to the six platform capabilities
+## 8. Mapping to the six platform capabilities
 
 | # | Requirement | RPC / event |
 |---|---|---|
@@ -162,38 +237,45 @@ same view, and PSK31/RTTY/CW become true two-way chat with no layout change.
 | 5 | Send + modulate (TX) | `AcquireTxLease`, `Transmit`, `KeyPtt`, `TransmitStarted/Complete` |
 | 6 | RX decode back to client | `RxFrame` events — **deferred** |
 
-## 7. Open questions
+## 9. Open questions
 
-Resolved by #20: ~~gain control~~ (`SetAudioGain` landed) and ~~split RX/TX
-devices~~ (`ConfigureAudio.tx_device_id` landed). Remaining forks:
+Resolved by #20: ~~gain control~~ and ~~split RX/TX devices~~. Remaining forks:
 
-1. **Mode parameters over the wire — needs its own protocol-expansion plan.**
-   `ConfigureChannel.mode` is a bare `string` ("none" in Phase 1), but Rust
-   `ModeConfig` carries params (CW wpm/tone, RTTY baud/shift, PSK31 center_hz).
-   Options: (a) structured mode config in the proto, (b) a mode-string grammar
-   (e.g. `cw:wpm=20,tone=700`), or (c) defaults-only for MVP. Per the issue
-   thread this is a protocol change tracked separately; the TUI builds against
-   defaults until that plan lands.
-2. **TX keying contract.** Does `Transmit` auto-assert PTT for the burst, or must
-   the client `KeyPtt(true)` around it? `KeyPtt` is documented as an operator test
-   "no audio" — confirm the keying ownership during a real transmit.
-3. **Transparent (raw async) AFSK1200.** AFSK1200 chat works today *through HDLC
-   framing* (`Afsk1200Mod` only accepts `FramePayload::Packet` and always wraps in
-   HDLC). If we want classic raw Bell-202 async-serial chat (no HDLC at all), the
-   modem needs a transparent-framing path (e.g. `Text` payload support for AFSK or
-   a raw mode). MVP: do HDLC-framed AFSK chat suffice, or is raw async a
-   requirement? — a modem-side change, not just TUI.
-4. **Client home.** `clients/omnimodem-tui/` in this repo (proposed) vs a separate
-   repo.
-5. **Remote operation in MVP.** Local UDS only, or include the mTLS/`--addr` remote
-   path from the start?
+1. **Spectrum/waterfall feed (new, from §5).** The "usable" bar wants signal-position
+   awareness, but `AudioLevel` is a single dBFS scalar. Add an FFT/spectrum event to
+   the proto (small, additive) for a real waterfall, or ship a level-meter-only strip
+   for MVP? The wireframes assume the latter as a placeholder.
+2. **Mode parameters over the wire — its own protocol-expansion plan.**
+   `ConfigureChannel.mode` is a bare string; Rust `ModeConfig` carries params (CW
+   wpm/tone, RTTY baud/shift, PSK31 center_hz). Structured proto config, a mode-string
+   grammar, or defaults-only for MVP? Tracked separately; TUI builds against defaults.
+3. **TX keying contract.** Does `Transmit` auto-assert PTT for the burst, or must the
+   client `KeyPtt(true)` around it? `KeyPtt` is documented "no audio" — confirm
+   keying ownership during a real transmit.
+4. **Transparent (raw async) AFSK1200.** Chat works today through HDLC framing; raw
+   Bell-202 async (no HDLC) needs a transparent-framing path in the modem. Is
+   HDLC-framed AFSK chat enough for MVP?
+5. **Client home.** `clients/omnimodem-tui/` in this repo (proposed) vs a separate repo.
+6. **Remote operation in MVP.** Local UDS only, or include the mTLS/`--addr` path from
+   the start?
 
-## 8. Suggested build order
+## 10. Suggested build order
 
 1. gRPC plumbing: generate Go bindings, UDS dial, `GetState` + `SubscribeEvents`
-   bridge, dashboard rendering from live state.
+   bridge; dashboard + **status bar** rendering from live state.
 2. Configuration screen: device enumeration → `ConfigureChannel`/`ConfigureAudio`/
-   `ConfigurePtt`, manual `KeyPtt` test, live dBFS meter, udev helper.
-3. Compose & TX: mode select (defaults), composer, lease → `Transmit` → progress;
-   FT8 slot timer + clock-sync gate.
-4. Fast-follow: `SetAudioGain` sliders (when merged), then RX decode display.
+   `ConfigurePtt`, manual `KeyPtt` test, dBFS meter + gain sliders, udev helper.
+3. Operate screen — ragchew first: transcript + **compose** + **macro bar** → lease →
+   `Transmit` → TX banner/progress; **Halt** + watchdog; activity pane scaffolded.
+4. Operate screen — FT8: auto-sequence ladder, slot clock + clock-sync gate, mini-log.
+5. Fast-follow: spectrum strip (pending the feed decision), then RX decode display
+   lighting up the transcript + roster.
+
+---
+
+### Sources (UI/UX research spike)
+
+- [WSJT-X User Guide](https://wsjt.sourceforge.io/wsjtx-doc/wsjtx-main-2.6.1.html) — main window, Band Activity / Rx Frequency, Tx1–Tx6, auto-sequence, Halt Tx, watchdog, 73→log.
+- [Beginners' Guide to Fldigi (W1HKJ)](http://www.w1hkj.com/beginners.html) and [fldigi beginners wiki](https://sourceforge.net/p/fldigi/wiki/beginners/) — waterfall, RX/TX text panes, F1–F12 macro banks.
+- [JS8Call — overview for new users (M0IAX)](https://m0iax.com/2018/11/13/js8call-an-overview-for-new-users/) and [JS8Call User Guide](http://js8call.com/downloads/JS8Call_User_Guide.pdf) — Band/Call Activity, directed messages, heartbeat.
+- [twpsk (Debian)](https://packages.debian.org/sid/twpsk) and psk31lx — terminal/ncurses digital-mode precedent.
