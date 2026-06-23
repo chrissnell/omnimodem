@@ -75,7 +75,7 @@ message ConfigureSpectrumRequest {
   uint32 fft_size   = 4;   // FFT length; 0 = server default (2048), rounded to pow2
   uint32 rate_hz    = 5;   // target lines/sec; 0 = server default (15)
   float  freq_lo_hz = 6;   // passband window low edge; 0 = 0 Hz
-  float  freq_hi_hz = 7;   // passband window high edge; 0 = Nyquist (rate/2)
+  float  freq_hi_hz = 7;   // passband window high edge; 0 = Nyquist (native_rate/2)
 }
 
 message ConfigureSpectrumResponse {
@@ -88,8 +88,9 @@ message ConfigureSpectrumResponse {
 ```
 
 `freq_lo_hz`/`freq_hi_hz` give a **zoom**: a 0–3 kHz window puts all the display
-columns on the SSB passband where the modes actually live, instead of wasting them
-on empty 3–24 kHz. Optional; default is the full passband.
+columns on the SSB passband where the modes actually live, instead of spreading them
+across the full 0–`native_rate/2` span (24 kHz on a 48 kHz AFSK channel, but only
+6 kHz on a 12 kHz FT8 channel). Optional; default is the full passband to Nyquist.
 
 ## 3. Magnitude pipeline (server side)
 
@@ -100,39 +101,78 @@ Per emitted line, starting from one `Stft` spectrum `Vec<Complex<f32>>` (length
 2. Magnitude → amplitude-normalized: `mag[k] = |X[k]| / (window_sum/2)`.
 3. dBFS: `db[k] = 20*log10(max(mag[k], 1e-9))` (full-scale sine ⇒ ~0 dBFS, matching
    the existing dbfs convention).
-4. Restrict to `[freq_lo_hz, freq_hi_hz]` using `bin_hz`.
+4. Restrict to `[freq_lo_hz, freq_hi_hz]` using `bin_hz(bin, native_rate)` (the tap
+   rate is the demod native rate — see §4).
 5. **Pool** that range down to `bin_count` buckets by **max** (peak-hold per bucket
    keeps narrow signals visible; mean would wash CW/PSK carriers out).
 6. Quantize each bucket dB to uint8 over [`db_floor`,`db_ceiling`] (default
    −120..0 dBFS): `u = clamp(round(255*(db-floor)/(ceiling-floor)), 0, 255)`.
 
+**Clamp `bin_count` to the available FFT bins in the range.** Max-pooling assumes
+≥1 input bin per output bucket; a zoomed window with a large `bin_count` and a small
+`fft_size` can leave it with *fewer* FFT bins than buckets (e.g. a 0–3 kHz window at
+12 kHz native with `nfft=2048` has only ~512 bins). When
+`range_bins < bin_count`, clamp `bin_count = range_bins` (don't upsample/duplicate)
+and report the clamped value in `ConfigureSpectrumResponse.bin_count` — the response
+already echoes the actual.
+
 `freq_step_hz = (freq_hi_hz - freq_lo_hz) / bin_count`; `freq_start_hz =
-freq_lo_hz + freq_step_hz/2` (bucket centers). The display labels its axis straight
-from those two numbers — no need to know `nfft`.
+freq_lo_hz + freq_step_hz/2` (bucket centers, computed *after* the clamp above). The
+display labels its axis straight from those two numbers — no need to know `nfft`.
 
 ## 4. Producer wiring (`core/rx_worker.rs`)
 
-When spectrum is enabled for a channel, the worker holds an `Option<SpectrumTap>`:
+**Enable/disable must reach a *running* worker — follow the `AudioGain` precedent,
+not a plain local.** The RX worker thread (`spawn_streaming` / `spawn_windowed` in
+`rx_worker.rs`) only ever reads its `capture.rx` channel; there is no command path
+into the thread. `SetAudioGain` already solves exactly this: `AudioGain` is a
+clonable `Arc<Atomic…>` handle the core writes and the worker reads with one relaxed
+load per chunk, so a config change takes effect with **no respawn** (see
+`core/gain.rs`). Spectrum needs the same shape — a shared `SpectrumControl` handle
+cloned into the worker, *not* an `Option<SpectrumTap>` that only the thread can see
+(a plain local could never be toggled by `ConfigureSpectrum` after spawn):
 
+```rust
+// shared, like AudioGain: core writes, worker reads each chunk
+struct SpectrumControl { cfg: Arc<Mutex<Option<SpectrumCfg>>> }  // None = OFF
+// worker-owned, rebuilt when cfg's generation changes:
+struct SpectrumTap { stft: Stft, cfg: SpectrumCfg, sample_rate: u32 }
 ```
-struct SpectrumTap { stft: Stft, cfg: SpectrumCfg, telemetry: Sender<TelemetryEvent> }
-```
+
+Each chunk the worker checks the handle: if a config is present and the tap is
+missing or stale, it (re)builds `SpectrumTap`; if the config cleared, it drops the
+tap. The worker already owns its `telemetry: broadcast::Sender<TelemetryEvent>`
+clone, so no extra plumbing is needed to emit.
+
+**The tap's sample rate is the demod's *native* rate, not the capture/working rate.**
+The post-`rx_gain` samples handed to the demod have already been resampled to
+`demod.caps().native_rate` (the `native` local in both spawners) — e.g. 12 kHz for
+FT8, 48 kHz for AFSK1200 — *not* the 48 kHz capture rate. Every rate-dependent
+quantity (`hop`, `bin_hz`, default `freq_hi_hz = native/2`, `freq_step_hz`) must key
+off `native`. This is known at tap-build time, so build the `Stft` then.
 
 In the existing per-chunk loop, after resample + `rx_gain` (same samples handed to
-the demod), call `tap.feed(&samples)`; for each STFT frame it returns, run §3 and
-`telemetry.send(TelemetryEvent::SpectrumFrame { … })`. Nothing else in the worker
-changes.
+the demod), call `tap.stft.feed(&samples)`; for each STFT frame it returns, run §3
+and `telemetry.send(TelemetryEvent::SpectrumFrame { … })`.
 
-- **Rate / hop.** `hop = clamp(working_rate / rate_hz, 1, nfft)` (the `Stft`
+- **Two worker paths.** `spawn_streaming` (AFSK/CW/PSK) feeds per audio chunk;
+  `spawn_windowed` (FT8/WSPR) buffers multi-second windows before decoding. The hook
+  goes in **both** — feed the post-gain `chunk_samples` to the tap *before* the
+  windowing `buf.extend_from_slice`, so the waterfall updates continuously even on
+  windowed modes that only decode every 15 s. (If you'd rather ship streaming-only
+  first and treat windowed modes as a follow-on, say so explicitly — but the FT8
+  screen is precisely where a waterfall is most wanted, so don't skip it silently.)
+- **Rate / hop.** `hop = clamp(native_rate / rate_hz, 1, nfft)` (the `Stft`
   constructor asserts `hop <= nfft`). If the requested `rate_hz` would need
-  `hop > nfft`, the real ceiling is `working_rate / nfft` (~23 line/s at 48 kHz /
-  2048) — already plenty; report the achievable `rate_hz` in the response.
+  `hop > nfft`, the real ceiling is `native_rate / nfft` (~5.9 line/s at FT8's
+  12 kHz / 2048, ~23 at 48 kHz) — report the achievable `rate_hz` in the response.
 - **Cost.** One 2048-pt real FFT at ~15/s is negligible; and it runs **only when
   enabled**. 256 uint8 bins × 15/s = ~3.8 KB/s per channel on the wire — trivial
   over UDS or mTLS.
-- **Lifecycle.** `enable=false`, channel teardown, or audio reconfigure drops the
-  tap. Rebind/resample changes `working_rate`; recompute `hop`/`freq_step` on
-  (re)enable.
+- **Lifecycle.** `enable=false`, channel teardown, or audio reconfigure clears the
+  shared cfg → the worker drops its tap. `ConfigureAudio` can change `native` (a
+  different mode/rate); the worker rebuilds the tap (new `hop`/`freq_step`) on the
+  next chunk when it sees the cfg generation bumped.
 
 ## 5. Plumbing checklist (files)
 
@@ -146,9 +186,15 @@ changes.
   timestamp_ns, freq_start_hz, freq_step_hz, db_floor, db_ceiling, bins: Vec<u8> }`.
 - `crates/omnimodemd/src/core/command.rs` — `Command::ConfigureSpectrum { … }`
   (mirror `SetAudioGain`).
-- `crates/omnimodemd/src/core/mod.rs` — own the per-channel `SpectrumCfg`; create/
-  drop the tap on the command; clone the telemetry sender into the worker.
-- `crates/omnimodemd/src/core/rx_worker.rs` — the `SpectrumTap` hook above.
+- `crates/omnimodemd/src/core/gain.rs` (or a sibling) — a `SpectrumControl` shared
+  handle modeled on `AudioGain` (clonable `Arc`; core writes cfg, worker reads).
+- `crates/omnimodemd/src/core/mod.rs` — own a per-channel `SpectrumControl` in
+  `LiveBindings` (alongside `gains`); clone it into the worker in `try_spawn_workers`
+  (both `spawn_streaming` and `spawn_windowed`); set/clear its cfg on the command.
+  The telemetry sender is *already* passed to the workers — no new plumbing there.
+- `crates/omnimodemd/src/core/rx_worker.rs` — the `SpectrumTap` hook in **both**
+  `spawn_streaming` and `spawn_windowed` (see §4); add a `SpectrumControl` arg to each
+  spawner (mirrors how `gain: AudioGain` is threaded today).
 - `crates/omnimodemd/src/grpc/convert.rs` — `TelemetryEvent::SpectrumFrame` →
   `Event::Kind::SpectrumFrame`.
 - `crates/omnimodemd/src/grpc/service.rs` — `configure_spectrum` handler →
