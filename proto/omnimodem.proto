@@ -52,6 +52,10 @@ service ModemControl {
   // so legacy TNC apps (Direwolf, APRX, pat, Xastir) speak KISS to omnimodem.
   // The channel must be a packet mode (AFSK 1200 AX.25).
   rpc ConfigureKissListener(ConfigureKissListenerRequest) returns (ConfigureKissListenerResponse);
+
+  // Adjust a channel's RX input gain and TX output gain at runtime. Linear
+  // multipliers (1.0 == unity); takes effect on the running workers.
+  rpc SetAudioGain(SetAudioGainRequest) returns (SetAudioGainResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,13 +178,18 @@ message ListDevicesResponse {
 
 message ConfigureAudioRequest {
   uint32 channel = 1;
-  string device_id = 2;       // stable DeviceId; config keys on this
-  uint32 sample_rate = 3;     // requested working rate (clamped to 48 kHz)
+  string device_id = 2;       // capture (RX) device; config keys on this
+  uint32 sample_rate = 3;     // requested RX working rate (clamped to 48 kHz)
   uint32 fanout = 4;          // capture consumers; 0/1 == no fan-out
+  // Optional split playback (TX) device. Empty == use `device_id` (the common
+  // single-rig case). Set to bind capture and playback to different cards.
+  string tx_device_id = 5;
+  uint32 tx_sample_rate = 6;  // requested TX working rate; 0 == same as sample_rate
 }
 
 message ConfigureAudioResponse {
-  uint32 actual_sample_rate = 1;  // rate the stream actually opened at
+  uint32 actual_sample_rate = 1;     // rate the capture stream actually opened at
+  uint32 actual_tx_sample_rate = 2;  // rate the playback stream actually opened at
 }
 
 enum PttMethod {
@@ -278,3 +287,11 @@ message ConfigureKissListenerResponse {
   string bound_addr = 1;  // actual bound "host:port" when enabled (empty when stopped)
   bool active = 2;        // whether a listener is now running for the channel
 }
+
+message SetAudioGainRequest {
+  uint32 channel = 1;
+  float rx_gain = 2;   // capture gain, linear (1.0 == unity)
+  float tx_gain = 3;   // playback gain, linear (1.0 == unity)
+}
+
+message SetAudioGainResponse {}

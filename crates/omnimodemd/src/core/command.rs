@@ -30,7 +30,9 @@ pub enum Command {
         device_id: DeviceId,
         sample_rate: u32,
         fanout: u32,
-        reply: oneshot::Sender<Result<u32, CoreError>>, // actual rate
+        tx_device_id: DeviceId,
+        tx_sample_rate: u32,
+        reply: oneshot::Sender<Result<ConfigureAudioOk, CoreError>>,
     },
     ConfigurePtt {
         id: ChannelId,
@@ -64,7 +66,21 @@ pub enum Command {
         channel: ChannelId,
         reply: oneshot::Sender<Result<(), CoreError>>,
     },
+    /// Set a channel's runtime RX/TX audio gain (linear multipliers).
+    SetAudioGain {
+        channel: ChannelId,
+        rx_gain: f32,
+        tx_gain: f32,
+        reply: oneshot::Sender<Result<(), CoreError>>,
+    },
     Shutdown,
+}
+
+/// Opened rates from `ConfigureAudio`: the capture rate and the playback rate.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigureAudioOk {
+    pub rx_rate: u32,
+    pub tx_rate: u32,
 }
 
 /// Outcome of an `AcquireTxLease`: whether it was granted, and the current

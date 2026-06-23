@@ -52,6 +52,8 @@ pub struct TxWorkerCfg {
     pub telemetry: broadcast::Sender<TelemetryEvent>,
     /// `Some(slot_s)` for windowed modes (align to the slot boundary).
     pub slot_s: Option<f32>,
+    /// Runtime TX output gain (linear multiplier, 1.0 == unity).
+    pub gain: crate::core::AudioGain,
 }
 
 /// Handle to a running TX worker.
@@ -137,8 +139,11 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
                 continue;
             }
         };
+        // Apply runtime TX gain before the i16 conversion; the clamp stays after
+        // the multiply so boosting can hit the rails but never overflow i16.
+        let g = cfg.gain.tx();
         let pcm: Vec<i16> =
-            samples.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+            samples.iter().map(|&s| ((s * g).clamp(-1.0, 1.0) * 32767.0) as i16).collect();
 
         // Exclusive TX lease: if another channel holds this rig, drop the job
         // without keying. Checked up front to avoid a pointless slot-wait, then
@@ -242,6 +247,7 @@ mod tests {
             lease: TxLeaseRegistry::new(),
             telemetry: tele,
             slot_s: None,
+            gain: crate::core::AudioGain::default(),
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -270,6 +276,76 @@ mod tests {
     }
 
     #[test]
+    fn tx_gain_scales_played_amplitude() {
+        use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+
+        let ax = Ax25Frame {
+            dest: Address::new("APRS", 0),
+            source: Address::new("K1ABC", 1),
+            digipeaters: vec![],
+            info: b"g".to_vec(),
+        };
+        let bytes = ax.encode();
+        // Reference unity-gain peak straight from the modulator (same samples the
+        // worker will produce, before the 0.5x scaling).
+        let raw = crate::mode::registry::build_modulator(&ModeConfig::Afsk1200 { tx: true })
+            .unwrap()
+            .modulate(&DspFrame::packet(bytes.clone()))
+            .unwrap();
+        let unity_peak = raw.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+        assert!(unity_peak > 0.0);
+
+        let backend = FileBackend::from_samples(vec![], 48_000);
+        let sink = backend.open_playback(48_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let gain = crate::core::AudioGain::default();
+        gain.set(1.0, 0.5); // halve TX output
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 48_000,
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Afsk1200 { tx: true })
+                .unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: gain.clone(),
+        });
+        worker.enqueue(TxJob { frame: DspFrame::packet(bytes), transmit_id: TransmitId(1) }).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            let mut completed = false;
+            for _ in 0..400 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    if let TelemetryEvent::TransmitComplete { .. } = ev {
+                        completed = true;
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(completed, "no TransmitComplete");
+        });
+
+        let played = backend.played.lock().unwrap();
+        let played_peak = played.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0) as f32;
+        let expected = 0.5 * unity_peak * 32767.0;
+        // Within 10% + small abs slack for i16 rounding.
+        assert!(
+            (played_peak - expected).abs() <= expected * 0.10 + 64.0,
+            "played_peak {played_peak} not ~= {expected} (half of unity {})",
+            unity_peak * 32767.0
+        );
+        worker.shutdown();
+    }
+
+    #[test]
     fn worker_skips_tx_when_another_channel_holds_the_lease() {
         // A DIFFERENT channel holds the rig's exclusive lease, so this worker's
         // job must complete WITHOUT ever keying PTT.
@@ -294,6 +370,7 @@ mod tests {
             lease,
             telemetry: tele,
             slot_s: None,
+            gain: crate::core::AudioGain::default(),
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
