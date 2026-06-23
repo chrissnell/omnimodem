@@ -79,6 +79,8 @@ async fn phase2_exit_criterion_roundtrip() {
             device_id: device_id.clone(),
             sample_rate: 48_000,
             fanout: 1,
+            tx_device_id: String::new(), // single-rig: TX follows the capture device
+            tx_sample_rate: 0,
         })
         .await
         .unwrap()

@@ -17,6 +17,11 @@ pub struct ChannelConfig {
     pub sample_rate: u32,
     /// Capture fan-out consumers (0/1 == none).
     pub fanout: u32,
+    /// Playback (TX) device. Defaults to `device_id` when a client does not
+    /// split RX/TX. Persisted so a split binding survives restart.
+    pub tx_device_id: DeviceId,
+    /// Requested TX working rate; 0 == follow `sample_rate`.
+    pub tx_sample_rate: u32,
     /// PTT binding; `None` until ConfigurePtt.
     pub ptt: Option<PttConfig>,
 }

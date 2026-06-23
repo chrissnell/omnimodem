@@ -11,8 +11,11 @@ pub mod clock;
 pub mod command;
 pub mod error;
 pub mod event;
+mod gain;
 pub mod rx_worker;
 pub mod tx_worker;
+
+pub(crate) use gain::AudioGain;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use crate::core::clock::ClockSource;
@@ -27,7 +30,7 @@ use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::{PttDriver, PttError};
 use crate::supervisor::Supervisor;
-use command::Command;
+use command::{Command, ConfigureAudioOk};
 use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
@@ -93,6 +96,17 @@ pub fn spawn(
     (handle, join)
 }
 
+/// A channel's resolved audio binding: capture (RX) and playback (TX) devices,
+/// which may be the same `DeviceId` (single rig) or differ (split rigs). The
+/// interlock and TX lease gate on `tx_dev`; the RX worker reads on `rx_dev`.
+/// (The RX rate lives on the capture handle, so it is not duplicated here.)
+#[derive(Clone)]
+struct AudioBinding {
+    rx_dev: DeviceId,
+    tx_dev: DeviceId,
+    tx_rate: u32,
+}
+
 /// Per-channel live audio/PTT bindings owned by the core loop. For a moded
 /// channel the capture is consumed by an `RxWorker` and the sink+driver by a
 /// `TxWorker`; for `ModeConfig::None` they stay here on the legacy path.
@@ -100,8 +114,8 @@ pub fn spawn(
 struct LiveBindings {
     sinks: HashMap<ChannelId, PlaybackHandle>,
     captures: HashMap<ChannelId, CaptureHandle>,
-    /// Audio device + working rate per channel (the rig the interlock gates).
-    audio: HashMap<ChannelId, (DeviceId, u32)>,
+    /// Audio binding per channel (RX + TX device & rate).
+    audio: HashMap<ChannelId, AudioBinding>,
     drivers: HashMap<ChannelId, Box<dyn PttDriver>>,
     /// PTT device id per channel (for eviction on hotplug).
     ptt_dev: HashMap<ChannelId, DeviceId>,
@@ -112,6 +126,8 @@ struct LiveBindings {
     /// Per-channel live metrics accumulator, shared with the RX worker; the core
     /// reads its latest snapshot to answer `GetMetrics`.
     metrics: HashMap<ChannelId, SharedMetrics>,
+    /// Per-channel runtime audio gain, shared with the RX/TX workers.
+    gains: HashMap<ChannelId, AudioGain>,
 }
 
 /// The core loop. Blocks on `recv_timeout`; on a command, handles it; on the
@@ -196,9 +212,12 @@ fn handle_command(
             let _ = reply.send(res);
         }
 
-        Command::ConfigureAudio { id, device_id, sample_rate, fanout, reply } => {
+        Command::ConfigureAudio {
+            id, device_id, sample_rate, fanout, tx_device_id, tx_sample_rate, reply,
+        } => {
             let res = configure_audio(
                 supervisor, enumerator, audio_factory, live, id, device_id, sample_rate, fanout,
+                tx_device_id, tx_sample_rate,
             );
             if res.is_ok() {
                 try_spawn_workers(id, supervisor, live, interlock, lease, frames, telemetry);
@@ -259,7 +278,7 @@ fn handle_command(
         }
 
         Command::AcquireTxLease { channel, reply } => {
-            let res = match live.audio.get(&channel).map(|(d, _)| d.clone()) {
+            let res = match live.audio.get(&channel).map(|b| b.tx_dev.clone()) {
                 Some(rig) => match lease.acquire(&rig, channel) {
                     Ok(()) => Ok(command::LeaseGrant { granted: true, held_by: Some(channel) }),
                     Err(crate::ptt::lease::LeaseError::HeldBy(h)) => {
@@ -272,12 +291,25 @@ fn handle_command(
         }
 
         Command::ReleaseTxLease { channel, reply } => {
-            let res = match live.audio.get(&channel).map(|(d, _)| d.clone()) {
+            let res = match live.audio.get(&channel).map(|b| b.tx_dev.clone()) {
                 Some(rig) => {
                     lease.release(&rig, channel);
                     Ok(())
                 }
                 None => Err(CoreError::UnknownChannel(channel)),
+            };
+            let _ = reply.send(res);
+        }
+
+        Command::SetAudioGain { channel, rx_gain, tx_gain, reply } => {
+            // Create-or-update the gain cell so the call works whether or not
+            // audio/workers exist yet. A running worker holds a clone of the same
+            // Arc cells, so this update is seen on its next chunk — no respawn.
+            let res = if supervisor.has_channel(channel) {
+                live.gains.entry(channel).or_default().set(rx_gain, tx_gain);
+                Ok(())
+            } else {
+                Err(CoreError::UnknownChannel(channel))
             };
             let _ = reply.send(res);
         }
@@ -296,34 +328,47 @@ fn configure_audio(
     device_id: DeviceId,
     sample_rate: u32,
     fanout: u32,
-) -> Result<u32, CoreError> {
+    tx_device_id: DeviceId,
+    tx_sample_rate: u32,
+) -> Result<ConfigureAudioOk, CoreError> {
     if !supervisor.has_channel(id) {
         return Err(CoreError::UnknownChannel(id));
     }
-    supervisor.configure_audio(id, device_id.clone(), sample_rate, fanout)?;
+    let tx_rate_req = if tx_sample_rate == 0 { sample_rate } else { tx_sample_rate };
+    supervisor.configure_audio(
+        id, device_id.clone(), sample_rate, fanout, tx_device_id.clone(), tx_sample_rate,
+    )?;
 
-    // Resolve the durable id to a live device (refresh first so a never-listed
-    // device still binds).
+    // Resolve durable ids to live devices (refresh first so a never-listed
+    // device still binds). Capture (RX) and playback (TX) may differ.
     supervisor.device_cache_mut().refresh(enumerator);
-    let desc = supervisor
-        .device_cache_mut()
-        .resolve(&device_id)
-        .cloned()
-        .ok_or_else(|| {
-            CoreError::Audio(crate::audio::AudioError::DeviceNotFound(
-                device_id.to_canonical_string(),
-            ))
-        })?;
+    let resolve = |sup: &mut Supervisor, dev: &DeviceId| -> Result<_, CoreError> {
+        sup.device_cache_mut()
+            .resolve(dev)
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::Audio(crate::audio::AudioError::DeviceNotFound(
+                    dev.to_canonical_string(),
+                ))
+            })
+    };
 
-    let backend = (audio_factory)(&desc);
-    let capture = backend.open_capture(sample_rate)?;
-    let playback = backend.open_playback(sample_rate)?;
-    let actual = playback.sample_rate;
+    let rx_desc = resolve(supervisor, &device_id)?;
+    let capture = (audio_factory)(&rx_desc).open_capture(sample_rate)?;
+    let rx_rate = capture.sample_rate;
+
+    let tx_desc = resolve(supervisor, &tx_device_id)?;
+    let playback = (audio_factory)(&tx_desc).open_playback(tx_rate_req)?;
+    let tx_rate = playback.sample_rate;
 
     live.captures.insert(id, capture);
     live.sinks.insert(id, playback);
-    live.audio.insert(id, (device_id, actual));
-    Ok(actual)
+    live.audio.insert(
+        id,
+        AudioBinding { rx_dev: device_id, tx_dev: tx_device_id, tx_rate },
+    );
+    live.gains.entry(id).or_default(); // default unity until SetAudioGain
+    Ok(ConfigureAudioOk { rx_rate, tx_rate })
 }
 
 fn configure_ptt(
@@ -358,7 +403,10 @@ fn try_spawn_workers(
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
     let mode = supervisor.channel_mode(channel);
-    let rig = live.audio.get(&channel).map(|(d, _)| d.clone());
+    // The RX worker reads on the capture (RX) device.
+    let rig = live.audio.get(&channel).map(|b| b.rx_dev.clone());
+    // Shared runtime gain for this channel (cloned into the workers).
+    let gain = live.gains.entry(channel).or_default().clone();
 
     // RX worker: needs a capture and a real demod. Consume the held capture.
     if !live.rx_workers.contains_key(&channel) {
@@ -372,14 +420,14 @@ fn try_spawn_workers(
                 DemodKind::Streaming(demod) => {
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics,
+                        telemetry.clone(), metrics, gain.clone(),
                     );
                     live.rx_workers.insert(channel, w);
                 }
                 DemodKind::Windowed(bd, window_s) => {
                     let w = RxWorker::spawn_windowed(
                         channel, rig, capture, bd, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics, window_s,
+                        telemetry.clone(), metrics, window_s, gain.clone(),
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -396,9 +444,11 @@ fn try_spawn_workers(
         && live.sinks.contains_key(&channel)
         && live.drivers.contains_key(&channel)
     {
-        if let (Some((rig, rate)), Some(modulator)) =
-            (live.audio.get(&channel).cloned(), registry::build_modulator(&mode))
-        {
+        // The TX worker plays/keys on the playback (TX) device.
+        if let (Some((rig, rate)), Some(modulator)) = (
+            live.audio.get(&channel).map(|b| (b.tx_dev.clone(), b.tx_rate)),
+            registry::build_modulator(&mode),
+        ) {
             let sink = live.sinks.remove(&channel).unwrap();
             let driver = live.drivers.remove(&channel).unwrap();
             let slot_s = registry::tx_slot_s(&mode);
@@ -413,6 +463,7 @@ fn try_spawn_workers(
                 lease: lease.clone(),
                 telemetry: telemetry.clone(),
                 slot_s,
+                gain: gain.clone(),
             });
             live.tx_workers.insert(channel, w);
         }
@@ -427,10 +478,11 @@ fn key_ptt(
     channel: ChannelId,
     keyed: bool,
 ) -> Result<(), CoreError> {
+    // Manual keying is a TX act → gate the interlock on the playback (TX) rig.
     let rig = live
         .audio
         .get(&channel)
-        .map(|(d, _)| d.clone())
+        .map(|b| b.tx_dev.clone())
         .or_else(|| live.ptt_dev.get(&channel).cloned());
     // On a moded channel the PTT driver is owned by the TX worker, which keys
     // the rig as part of transmitting. Manual keying isn't available there.
@@ -507,7 +559,9 @@ fn transmit(
     let have_ptt = live.drivers.contains_key(&channel);
 
     let outcome = if have_audio && have_ptt {
-        let (rig, rate) = live.audio.get(&channel).cloned().unwrap();
+        // Legacy raw-PCM cycle plays/keys on the playback (TX) rig.
+        let b = live.audio.get(&channel).cloned().unwrap();
+        let (rig, rate) = (b.tx_dev, b.tx_rate);
         let samples: Vec<i16> = payload
             .chunks_exact(2)
             .map(|p| i16::from_le_bytes([p[0], p[1]]))
@@ -577,11 +631,12 @@ fn poll_hotplug(
             HotplugEvent::Departed(id) => {
                 let _ = telemetry.send(TelemetryEvent::DeviceDeparted { device_id: id.clone() });
                 supervisor.ptt_registry_mut().evict(&id);
-                // Drop audio handles for channels bound to this device.
+                // Drop audio handles for channels bound to this device on
+                // either the capture (RX) or playback (TX) side.
                 let audio_chans: Vec<ChannelId> = live
                     .audio
                     .iter()
-                    .filter(|(_, (d, _))| d == &id)
+                    .filter(|(_, b)| b.rx_dev == id || b.tx_dev == id)
                     .map(|(c, _)| *c)
                     .collect();
                 for c in audio_chans {
@@ -742,10 +797,12 @@ mod tests {
                     device_id: dev_id.clone(),
                     sample_rate: 48_000,
                     fanout: 1,
+                    tx_device_id: dev_id.clone(),
+                    tx_sample_rate: 0,
                     reply: tx,
                 })
                 .unwrap();
-            assert_eq!(rx.await.unwrap().unwrap(), 48_000);
+            assert_eq!(rx.await.unwrap().unwrap().rx_rate, 48_000);
 
             let (tx, rx) = oneshot::channel();
             core.commands
@@ -799,13 +856,37 @@ mod tests {
         core.commands
             .send(Command::ConfigureAudio {
                 id,
-                device_id: dev,
+                device_id: dev.clone(),
                 sample_rate: 48_000,
                 fanout: 1,
+                tx_device_id: dev,
+                tx_sample_rate: 0,
                 reply: tx,
             })
             .unwrap();
         rx.await.unwrap().unwrap();
+    }
+
+    /// Configure split RX/TX devices on a channel, returning the opened rates.
+    async fn configure_audio_split(
+        core: &CoreHandle,
+        id: ChannelId,
+        rx_dev: DeviceId,
+        tx_dev: DeviceId,
+    ) -> crate::core::command::ConfigureAudioOk {
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::ConfigureAudio {
+                id,
+                device_id: rx_dev,
+                sample_rate: 48_000,
+                fanout: 1,
+                tx_device_id: tx_dev,
+                tx_sample_rate: 0,
+                reply: tx,
+            })
+            .unwrap();
+        rx.await.unwrap().unwrap()
     }
 
     fn loop_device() -> DeviceDescriptor {
@@ -815,6 +896,82 @@ mod tests {
             has_capture: true,
             has_playback: true,
         }
+    }
+
+    fn named_device(name: &str) -> DeviceDescriptor {
+        DeviceDescriptor {
+            id: DeviceId::AlsaCard { card_name: name.into() },
+            label: name.into(),
+            has_capture: true,
+            has_playback: true,
+        }
+    }
+
+    #[test]
+    fn set_audio_gain_updates_known_channel_and_rejects_unknown() {
+        let dev = loop_device();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "none").await;
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::SetAudioGain {
+                    channel: ChannelId(0),
+                    rx_gain: 3.0,
+                    tx_gain: 0.25,
+                    reply: tx,
+                })
+                .unwrap();
+            assert!(rx.await.unwrap().is_ok());
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::SetAudioGain {
+                    channel: ChannelId(9),
+                    rx_gain: 1.0,
+                    tx_gain: 1.0,
+                    reply: tx,
+                })
+                .unwrap();
+            assert!(matches!(rx.await.unwrap(), Err(CoreError::UnknownChannel(_))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn configure_audio_binds_distinct_rx_and_tx_devices() {
+        let rx = named_device("RX");
+        let tx = named_device("TX");
+        let rx_id = rx.id.clone();
+        let tx_id = tx.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![rx, tx])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "none").await;
+            // Capture on RX, playback on a DIFFERENT device (TX). Both must open.
+            let ok = configure_audio_split(&core, ChannelId(0), rx_id.clone(), tx_id.clone()).await;
+            assert_eq!(ok.rx_rate, 48_000);
+            assert_eq!(ok.tx_rate, 48_000);
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
     }
 
     #[test]

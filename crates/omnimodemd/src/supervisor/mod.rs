@@ -75,6 +75,8 @@ impl Supervisor {
             device_id: DeviceId::placeholder(),
             sample_rate: MAX_SAMPLE_RATE,
             fanout: 1,
+            tx_device_id: DeviceId::placeholder(),
+            tx_sample_rate: 0,
             ptt: None,
         };
         self.store.upsert_channel(&cfg)?;
@@ -93,6 +95,8 @@ impl Supervisor {
         device_id: DeviceId,
         sample_rate: u32,
         fanout: u32,
+        tx_device_id: DeviceId,
+        tx_sample_rate: u32,
     ) -> Result<(), crate::persist::StoreError> {
         let Some(state) = self.channels.get_mut(&id) else {
             return Ok(());
@@ -100,6 +104,8 @@ impl Supervisor {
         state.config.device_id = device_id;
         state.config.sample_rate = if sample_rate == 0 { MAX_SAMPLE_RATE } else { sample_rate };
         state.config.fanout = fanout;
+        state.config.tx_device_id = tx_device_id;
+        state.config.tx_sample_rate = tx_sample_rate;
         let cfg = state.config.clone();
         self.store.upsert_channel(&cfg)
     }
@@ -202,6 +208,8 @@ mod tests {
             DeviceId::AlsaCard { card_name: "Device".into() },
             44_100,
             1,
+            DeviceId::AlsaCard { card_name: "Device".into() },
+            0,
         )
         .unwrap();
         sup.configure_ptt(
@@ -230,6 +238,8 @@ mod tests {
                 device_id: crate::ids::DeviceId::placeholder(),
                 sample_rate: 48_000,
                 fanout: 1,
+                tx_device_id: crate::ids::DeviceId::placeholder(),
+                tx_sample_rate: 0,
                 ptt: None,
             })
             .unwrap();

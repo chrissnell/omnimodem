@@ -51,7 +51,9 @@ impl Store {
                  ptt_device_id TEXT NOT NULL DEFAULT '',
                  ptt_node      TEXT NOT NULL DEFAULT '',
                  ptt_pin       INTEGER NOT NULL DEFAULT 0,
-                 ptt_invert    INTEGER NOT NULL DEFAULT 0
+                 ptt_invert    INTEGER NOT NULL DEFAULT 0,
+                 tx_device_id  TEXT NOT NULL DEFAULT '',
+                 tx_sample_rate INTEGER NOT NULL DEFAULT 0
              );",
         )?;
         // Idempotent migration for a DB created by the Phase-1 build, whose
@@ -67,6 +69,8 @@ impl Store {
             "ALTER TABLE channels ADD COLUMN ptt_node TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE channels ADD COLUMN ptt_pin INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN ptt_invert INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE channels ADD COLUMN tx_device_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE channels ADD COLUMN tx_sample_rate INTEGER NOT NULL DEFAULT 0",
         ] {
             match conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -84,8 +88,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO channels
                  (id, name, mode, device_id, sample_rate, fanout,
-                  ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                  ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert,
+                  tx_device_id, tx_sample_rate)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  mode = excluded.mode,
@@ -96,7 +101,9 @@ impl Store {
                  ptt_device_id = excluded.ptt_device_id,
                  ptt_node = excluded.ptt_node,
                  ptt_pin = excluded.ptt_pin,
-                 ptt_invert = excluded.ptt_invert;",
+                 ptt_invert = excluded.ptt_invert,
+                 tx_device_id = excluded.tx_device_id,
+                 tx_sample_rate = excluded.tx_sample_rate;",
             rusqlite::params![
                 cfg.id.0,
                 cfg.name,
@@ -109,6 +116,8 @@ impl Store {
                 node,
                 pin,
                 invert,
+                cfg.tx_device_id.to_canonical_string(),
+                cfg.tx_sample_rate,
             ],
         )?;
         Ok(())
@@ -118,7 +127,8 @@ impl Store {
     pub fn load_channels(&self) -> Result<Vec<ChannelConfig>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, mode, device_id, sample_rate, fanout,
-                    ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert
+                    ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert,
+                    tx_device_id, tx_sample_rate
              FROM channels ORDER BY id;",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -127,14 +137,24 @@ impl Store {
             let node: String = row.get(8)?;
             let pin: i64 = row.get(9)?;
             let invert: i64 = row.get(10)?;
+            let capture_dev = DeviceId::parse(&row.get::<_, String>(3)?)
+                .unwrap_or_else(DeviceId::placeholder);
+            // Empty tx_device_id == legacy / single-rig row: TX follows capture.
+            let tx_dev_str: String = row.get(11)?;
+            let tx_device_id = if tx_dev_str.is_empty() {
+                capture_dev.clone()
+            } else {
+                DeviceId::parse(&tx_dev_str).unwrap_or_else(DeviceId::placeholder)
+            };
             Ok(ChannelConfig {
                 id: ChannelId(row.get::<_, u32>(0)?),
                 name: row.get(1)?,
                 mode: row.get(2)?,
-                device_id: DeviceId::parse(&row.get::<_, String>(3)?)
-                    .unwrap_or_else(DeviceId::placeholder),
+                device_id: capture_dev,
                 sample_rate: row.get(4)?,
                 fanout: row.get(5)?,
+                tx_device_id,
+                tx_sample_rate: row.get(12)?,
                 ptt: decode_ptt(&method, &ptt_dev, &node, pin, invert),
             })
         })?;
@@ -197,6 +217,8 @@ mod tests {
             device_id: DeviceId::placeholder(),
             sample_rate: 48_000,
             fanout: 1,
+            tx_device_id: DeviceId::placeholder(),
+            tx_sample_rate: 0,
             ptt: None,
         }
     }
@@ -269,5 +291,41 @@ mod tests {
         let loaded = store.load_channels().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], c);
+    }
+
+    #[test]
+    fn roundtrips_split_tx_device() {
+        let store = Store::open_in_memory().unwrap();
+        let mut c = cfg(5, "split");
+        c.device_id = DeviceId::AlsaCard { card_name: "Capture".into() };
+        c.tx_device_id = DeviceId::AlsaCard { card_name: "Playback".into() };
+        c.tx_sample_rate = 44_100;
+        store.upsert_channel(&c).unwrap();
+
+        let loaded = store.load_channels().unwrap();
+        assert_eq!(loaded[0].tx_device_id, DeviceId::AlsaCard { card_name: "Playback".into() });
+        assert_eq!(loaded[0].tx_sample_rate, 44_100);
+    }
+
+    #[test]
+    fn legacy_row_backfills_tx_device_from_capture() {
+        // A pre-Phase-6 row with no tx_* columns: tx_device_id must follow the
+        // capture device, tx_sample_rate must default to 0.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channels (
+                 id        INTEGER PRIMARY KEY,
+                 name      TEXT NOT NULL,
+                 mode      TEXT NOT NULL,
+                 device_id TEXT NOT NULL
+             );
+             INSERT INTO channels (id, name, mode, device_id)
+                 VALUES (8, 'legacy', 'none', 'virtual:virtual:0');",
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        let loaded = store.load_channels().unwrap();
+        assert_eq!(loaded[0].tx_device_id, loaded[0].device_id);
+        assert_eq!(loaded[0].tx_sample_rate, 0);
     }
 }

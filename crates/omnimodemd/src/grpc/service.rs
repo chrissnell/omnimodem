@@ -107,19 +107,32 @@ impl ModemControl for ControlService {
         }
         let device_id = DeviceId::parse(&req.device_id)
             .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?;
+        // Empty tx_device_id == single-rig: TX plays on the capture device.
+        let tx_device_id = if req.tx_device_id.is_empty() {
+            device_id.clone()
+        } else {
+            DeviceId::parse(&req.tx_device_id).ok_or_else(|| {
+                Status::invalid_argument(format!("unparseable tx_device_id {}", req.tx_device_id))
+            })?
+        };
         let (tx, rx) = oneshot::channel();
         self.send_command(Command::ConfigureAudio {
             id: ChannelId(req.channel),
             device_id,
             sample_rate: req.sample_rate,
             fanout: req.fanout,
+            tx_device_id,
+            tx_sample_rate: req.tx_sample_rate,
             reply: tx,
         })?;
-        let actual = rx
+        let ok = rx
             .await
             .map_err(|_| Status::unavailable("core dropped reply"))?
             .map_err(core_error_to_status)?;
-        Ok(Response::new(proto::ConfigureAudioResponse { actual_sample_rate: actual }))
+        Ok(Response::new(proto::ConfigureAudioResponse {
+            actual_sample_rate: ok.rx_rate,
+            actual_tx_sample_rate: ok.tx_rate,
+        }))
     }
 
     async fn configure_ptt(
@@ -263,6 +276,24 @@ impl ModemControl for ControlService {
             bound_addr: bound.to_string(),
             active: true,
         }))
+    }
+
+    async fn set_audio_gain(
+        &self,
+        request: Request<proto::SetAudioGainRequest>,
+    ) -> Result<Response<proto::SetAudioGainResponse>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::SetAudioGain {
+            channel: ChannelId(req.channel),
+            rx_gain: req.rx_gain,
+            tx_gain: req.tx_gain,
+            reply: tx,
+        })?;
+        rx.await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::SetAudioGainResponse {}))
     }
 
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
