@@ -47,6 +47,11 @@ service ModemControl {
   // Acquire/release a channel's exclusive TX lease on its bound rig.
   rpc AcquireTxLease(TxLeaseRequest) returns (TxLeaseResponse);
   rpc ReleaseTxLease(TxLeaseRequest) returns (TxLeaseResponse);
+
+  // Start or stop an in-daemon KISS-over-TCP listener for a packet channel,
+  // so legacy TNC apps (Direwolf, APRX, pat, Xastir) speak KISS to omnimodem.
+  // The channel must be a packet mode (AFSK 1200 AX.25).
+  rpc ConfigureKissListener(ConfigureKissListenerRequest) returns (ConfigureKissListenerResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,4 +262,19 @@ message TxLeaseRequest { uint32 channel = 1; }
 message TxLeaseResponse {
   bool granted = 1;       // false on Acquire if another channel holds it
   uint32 held_by = 2;     // the current holder when granted == false (0 if none)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: KISS<->gRPC translator
+// ---------------------------------------------------------------------------
+
+message ConfigureKissListenerRequest {
+  uint32 channel = 1;
+  string bind_addr = 2;   // "host:port", e.g. "127.0.0.1:8001"; ":0" picks a port
+  bool enable = 3;        // true = start/replace; false = stop (bind_addr ignored)
+}
+
+message ConfigureKissListenerResponse {
+  string bound_addr = 1;  // actual bound "host:port" when enabled (empty when stopped)
+  bool active = 2;        // whether a listener is now running for the channel
 }

@@ -30,6 +30,8 @@ pub mod grpc;
 
 pub mod authz;
 
+pub mod kiss;
+
 #[cfg(not(test))]
 use std::path::Path;
 

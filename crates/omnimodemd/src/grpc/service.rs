@@ -11,15 +11,17 @@ use crate::proto::modem_control_server::ModemControl;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status};
 
-/// Shared gRPC service state: just a handle to the sync core.
+/// Shared gRPC service state: a handle to the sync core plus the KISS listener
+/// registry (async-edge only; not part of the DSP core).
 #[derive(Clone)]
 pub struct ControlService {
     pub(crate) core: CoreHandle,
+    pub(crate) kiss: crate::kiss::listener::KissRegistry,
 }
 
 impl ControlService {
     pub fn new(core: CoreHandle) -> Self {
-        ControlService { core }
+        ControlService { core, kiss: crate::kiss::listener::KissRegistry::default() }
     }
 
     /// Push a command into the core, mapping a full/closed queue to a status.
@@ -214,6 +216,55 @@ impl ModemControl for ControlService {
         Ok(Response::new(proto::TxLeaseResponse { granted: true, held_by: 0 }))
     }
 
+    async fn configure_kiss_listener(
+        &self,
+        request: Request<proto::ConfigureKissListenerRequest>,
+    ) -> Result<Response<proto::ConfigureKissListenerResponse>, Status> {
+        let req = request.into_inner();
+        let channel = ChannelId(req.channel);
+
+        if !req.enable {
+            self.kiss.stop(channel).await;
+            return Ok(Response::new(proto::ConfigureKissListenerResponse {
+                bound_addr: String::new(),
+                active: false,
+            }));
+        }
+
+        // Validate: the channel must exist and be a packet mode. Query state.
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::GetState { reply: tx })?;
+        let snap = rx.await.map_err(|_| Status::unavailable("core dropped reply"))?;
+        let ch = snap
+            .channels
+            .iter()
+            .find(|c| c.id == channel)
+            .ok_or_else(|| Status::not_found(format!("unknown channel {}", req.channel)))?;
+        if !is_packet_mode(&ch.mode) {
+            return Err(Status::failed_precondition(format!(
+                "channel {} mode '{}' is not a packet mode; KISS needs AFSK 1200 (AX.25)",
+                req.channel, ch.mode
+            )));
+        }
+
+        if req.bind_addr.is_empty() {
+            return Err(Status::invalid_argument("bind_addr must be set when enable=true"));
+        }
+        let bound = self
+            .kiss
+            .start(self.core.clone(), channel, &req.bind_addr)
+            .await
+            .map_err(|e| match e {
+                crate::kiss::listener::KissError::Bind(io) => {
+                    Status::failed_precondition(format!("bind {}: {}", req.bind_addr, io))
+                }
+            })?;
+        Ok(Response::new(proto::ConfigureKissListenerResponse {
+            bound_addr: bound.to_string(),
+            active: true,
+        }))
+    }
+
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(
@@ -221,5 +272,22 @@ impl ModemControl for ControlService {
         request: Request<proto::SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
         crate::grpc::subscribe::subscribe(self, request).await
+    }
+}
+
+/// KISS only makes sense for AX.25 packet modes. Today that is AFSK 1200.
+fn is_packet_mode(mode: &str) -> bool {
+    matches!(mode, "afsk1200")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_packet_mode;
+
+    #[test]
+    fn only_afsk_is_a_packet_mode() {
+        assert!(is_packet_mode("afsk1200"));
+        assert!(!is_packet_mode("ft8"));
+        assert!(!is_packet_mode("none"));
     }
 }
