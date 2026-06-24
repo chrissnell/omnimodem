@@ -74,15 +74,49 @@ func newDevList(title string) list.Model {
 
 func newConfigView(m *Model) *configView {
 	name := textinput.New()
-	name.SetValue("vfo-a")
 	name.Focus()
-	return &configView{
+	v := &configView{
 		m:    m,
 		name: name,
 		rx:   newDevList("RX device (capture)"),
 		tx:   newDevList("TX device (playback)"),
 		ptt:  newDevList("PTT device"),
 	}
+	// Preload the channel's persisted config (surfaced in the snapshot) so
+	// reopening Configure shows what's already saved instead of blank defaults.
+	if cl := m.live[m.sel]; cl != nil && cl.name != "" {
+		v.name.SetValue(cl.name)
+		v.modeIdx = modeIdxByLabel(cl.mode)
+		v.rxID = cl.deviceID
+		v.txID = cl.txDeviceID
+		v.pttID = cl.pttDeviceID
+		v.methodIdx = methodIdxOf(cl.pttMethod)
+	} else {
+		v.name.SetValue("vfo-a")
+	}
+	return v
+}
+
+// modeIdxByLabel returns the index of a mode label in `modes`, or 0 when the
+// label is unknown/empty (a fresh channel falls back to the first mode).
+func modeIdxByLabel(label string) int {
+	for i := range modes {
+		if modes[i].label == label {
+			return i
+		}
+	}
+	return 0
+}
+
+// methodIdxOf returns the index of a PTT method in `pttMethods`, or 0 when not
+// found (UNSPECIFIED on an unconfigured channel maps to the default method).
+func methodIdxOf(m pb.PttMethod) int {
+	for i, pm := range pttMethods {
+		if pm == m {
+			return i
+		}
+	}
+	return 0
 }
 
 func (v *configView) modeLabel() string { return modes[v.modeIdx].label }

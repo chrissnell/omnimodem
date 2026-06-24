@@ -83,15 +83,55 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
         .channels
         .iter()
         .zip(snap.running.iter())
-        .map(|(c, running)| proto::ChannelInfo {
-            channel: c.id.0,
-            name: c.name.clone(),
-            mode: c.mode.clone(),
-            device_id: c.device_id.to_canonical_string(),
-            running: *running,
+        .map(|(c, running)| {
+            // Report TX empty when it mirrors the RX device (the "same as RX"
+            // default), so a client renders "(same as RX)" rather than a literal
+            // duplicate id.
+            let tx_device_id = if c.tx_device_id == c.device_id {
+                String::new()
+            } else {
+                c.tx_device_id.to_canonical_string()
+            };
+            // PTT: surface the method, and the device only for device-based
+            // methods (None/Vox carry a deviceless placeholder id worth hiding).
+            let (ptt_device_id, ptt_method) = match &c.ptt {
+                Some(p) => (ptt_device_for_proto(p), ptt_method_to_proto(&p.method) as i32),
+                None => (String::new(), proto::PttMethod::Unspecified as i32),
+            };
+            proto::ChannelInfo {
+                channel: c.id.0,
+                name: c.name.clone(),
+                mode: c.mode.clone(),
+                device_id: c.device_id.to_canonical_string(),
+                running: *running,
+                tx_device_id,
+                ptt_device_id,
+                ptt_method,
+            }
         })
         .collect();
     proto::ModemState { channels }
+}
+
+/// The PTT device id to report: empty for the deviceless methods (their id is an
+/// internal placeholder), otherwise the canonical device id.
+fn ptt_device_for_proto(p: &PttConfig) -> String {
+    match p.method {
+        PttMethod::None | PttMethod::Vox => String::new(),
+        _ => p.device_id.to_canonical_string(),
+    }
+}
+
+/// Map a domain `PttMethod` to its proto enum.
+fn ptt_method_to_proto(m: &PttMethod) -> proto::PttMethod {
+    match m {
+        PttMethod::None => proto::PttMethod::None,
+        PttMethod::Vox => proto::PttMethod::Vox,
+        PttMethod::SerialRts { .. } => proto::PttMethod::SerialRts,
+        PttMethod::SerialDtr { .. } => proto::PttMethod::SerialDtr,
+        PttMethod::Cm108 { .. } => proto::PttMethod::Cm108,
+        PttMethod::Gpio { .. } => proto::PttMethod::Gpio,
+    }
 }
 
 /// Wrap a frame event as a proto `Event`.
@@ -237,5 +277,61 @@ mod tests {
     fn valid_device_id_is_parsed() {
         let cfg = proto_ptt_to_config(&ptt_req(proto::PttMethod::SerialRts, "serial:usb-FTDI-if00")).unwrap();
         assert_eq!(cfg.device_id, DeviceId::Serial { by_id: "usb-FTDI-if00".into() });
+    }
+
+    fn chan_cfg(
+        rx: DeviceId,
+        tx: DeviceId,
+        ptt: Option<PttConfig>,
+    ) -> crate::supervisor::channel::ChannelConfig {
+        crate::supervisor::channel::ChannelConfig {
+            id: crate::ids::ChannelId(0),
+            name: "vfo-a".into(),
+            mode: "psk31".into(),
+            device_id: rx,
+            sample_rate: 48_000,
+            fanout: 1,
+            tx_device_id: tx,
+            tx_sample_rate: 0,
+            ptt,
+        }
+    }
+
+    #[test]
+    fn snapshot_surfaces_split_tx_and_device_ptt() {
+        let rx = DeviceId::AlsaCard { card_name: "Mic".into() };
+        let tx = DeviceId::AlsaCard { card_name: "Speakers".into() };
+        let ptt = PttConfig {
+            device_id: DeviceId::Serial { by_id: "usb-FTDI-if00".into() },
+            method: PttMethod::SerialRts { node: "/dev/ttyUSB0".into() },
+            invert: false,
+        };
+        let snap = ModemSnapshot {
+            channels: vec![chan_cfg(rx.clone(), tx.clone(), Some(ptt))],
+            running: vec![false],
+        };
+        let ci = &snapshot_to_proto(&snap).channels[0];
+        assert_eq!(ci.device_id, rx.to_canonical_string());
+        assert_eq!(ci.tx_device_id, tx.to_canonical_string());
+        assert_eq!(ci.ptt_device_id, "serial:usb-FTDI-if00");
+        assert_eq!(ci.ptt_method, proto::PttMethod::SerialRts as i32);
+    }
+
+    #[test]
+    fn snapshot_hides_same_as_rx_tx_and_deviceless_ptt() {
+        let rx = DeviceId::AlsaCard { card_name: "Mic".into() };
+        let ptt = PttConfig {
+            device_id: DeviceId::Placeholder { tag: "ptt-deviceless".into() },
+            method: PttMethod::Vox,
+            invert: false,
+        };
+        let snap = ModemSnapshot {
+            channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
+            running: vec![true],
+        };
+        let ci = &snapshot_to_proto(&snap).channels[0];
+        assert_eq!(ci.tx_device_id, "", "TX mirroring RX must report empty");
+        assert_eq!(ci.ptt_device_id, "", "deviceless PTT must report empty");
+        assert_eq!(ci.ptt_method, proto::PttMethod::Vox as i32);
     }
 }

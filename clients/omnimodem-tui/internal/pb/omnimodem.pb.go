@@ -799,8 +799,11 @@ type ChannelInfo struct {
 	Channel       uint32                 `protobuf:"varint,1,opt,name=channel,proto3" json:"channel,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Mode          string                 `protobuf:"bytes,3,opt,name=mode,proto3" json:"mode,omitempty"`
-	DeviceId      string                 `protobuf:"bytes,4,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // stable device identity (placeholder in Phase 1)
+	DeviceId      string                 `protobuf:"bytes,4,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // stable RX (capture) device identity
 	Running       bool                   `protobuf:"varint,5,opt,name=running,proto3" json:"running,omitempty"`
+	TxDeviceId    string                 `protobuf:"bytes,6,opt,name=tx_device_id,json=txDeviceId,proto3" json:"tx_device_id,omitempty"`                         // TX (playback) device; empty == same as RX
+	PttDeviceId   string                 `protobuf:"bytes,7,opt,name=ptt_device_id,json=pttDeviceId,proto3" json:"ptt_device_id,omitempty"`                      // PTT device; empty when deviceless (None/Vox) or unset
+	PttMethod     PttMethod              `protobuf:"varint,8,opt,name=ptt_method,json=pttMethod,proto3,enum=omnimodem.v1.PttMethod" json:"ptt_method,omitempty"` // configured PTT method (UNSPECIFIED if unset)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -868,6 +871,27 @@ func (x *ChannelInfo) GetRunning() bool {
 		return x.Running
 	}
 	return false
+}
+
+func (x *ChannelInfo) GetTxDeviceId() string {
+	if x != nil {
+		return x.TxDeviceId
+	}
+	return ""
+}
+
+func (x *ChannelInfo) GetPttDeviceId() string {
+	if x != nil {
+		return x.PttDeviceId
+	}
+	return ""
+}
+
+func (x *ChannelInfo) GetPttMethod() PttMethod {
+	if x != nil {
+		return x.PttMethod
+	}
+	return PttMethod_PTT_METHOD_UNSPECIFIED
 }
 
 type Event struct {
@@ -3042,13 +3066,18 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\x10SubscribeRequest\"C\n" +
 	"\n" +
 	"ModemState\x125\n" +
-	"\bchannels\x18\x01 \x03(\v2\x19.omnimodem.v1.ChannelInfoR\bchannels\"\x86\x01\n" +
+	"\bchannels\x18\x01 \x03(\v2\x19.omnimodem.v1.ChannelInfoR\bchannels\"\x84\x02\n" +
 	"\vChannelInfo\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
 	"\x04mode\x18\x03 \x01(\tR\x04mode\x12\x1b\n" +
 	"\tdevice_id\x18\x04 \x01(\tR\bdeviceId\x12\x18\n" +
-	"\arunning\x18\x05 \x01(\bR\arunning\"\xea\x06\n" +
+	"\arunning\x18\x05 \x01(\bR\arunning\x12 \n" +
+	"\ftx_device_id\x18\x06 \x01(\tR\n" +
+	"txDeviceId\x12\"\n" +
+	"\rptt_device_id\x18\a \x01(\tR\vpttDeviceId\x126\n" +
+	"\n" +
+	"ptt_method\x18\b \x01(\x0e2\x17.omnimodem.v1.PttMethodR\tpttMethod\"\xea\x06\n" +
 	"\x05Event\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.omnimodem.v1.ModemStateH\x00R\bsnapshot\x12P\n" +
 	"\x12channel_configured\x18\x02 \x01(\v2\x1f.omnimodem.v1.ChannelConfiguredH\x00R\x11channelConfigured\x12J\n" +
@@ -3298,57 +3327,58 @@ var file_omnimodem_proto_depIdxs = []int32{
 	6,  // 4: omnimodem.v1.ModeParams.olivia:type_name -> omnimodem.v1.OliviaParams
 	7,  // 5: omnimodem.v1.ModeParams.afsk1200:type_name -> omnimodem.v1.Afsk1200Params
 	14, // 6: omnimodem.v1.ModemState.channels:type_name -> omnimodem.v1.ChannelInfo
-	13, // 7: omnimodem.v1.Event.snapshot:type_name -> omnimodem.v1.ModemState
-	17, // 8: omnimodem.v1.Event.channel_configured:type_name -> omnimodem.v1.ChannelConfigured
-	19, // 9: omnimodem.v1.Event.transmit_started:type_name -> omnimodem.v1.TransmitStarted
-	20, // 10: omnimodem.v1.Event.transmit_complete:type_name -> omnimodem.v1.TransmitComplete
-	21, // 11: omnimodem.v1.Event.rx_frame:type_name -> omnimodem.v1.RxFrame
-	22, // 12: omnimodem.v1.Event.audio_level:type_name -> omnimodem.v1.AudioLevel
-	23, // 13: omnimodem.v1.Event.status:type_name -> omnimodem.v1.Status
-	35, // 14: omnimodem.v1.Event.device_arrived:type_name -> omnimodem.v1.DeviceArrived
-	36, // 15: omnimodem.v1.Event.device_departed:type_name -> omnimodem.v1.DeviceDeparted
-	37, // 16: omnimodem.v1.Event.ptt_state:type_name -> omnimodem.v1.PttState
-	18, // 17: omnimodem.v1.Event.clock_offset:type_name -> omnimodem.v1.ClockOffset
-	40, // 18: omnimodem.v1.Event.channel_metrics:type_name -> omnimodem.v1.ChannelMetrics
-	16, // 19: omnimodem.v1.Event.spectrum_frame:type_name -> omnimodem.v1.SpectrumFrame
-	25, // 20: omnimodem.v1.ListDevicesResponse.devices:type_name -> omnimodem.v1.DeviceInfo
-	0,  // 21: omnimodem.v1.ConfigurePttRequest.method:type_name -> omnimodem.v1.PttMethod
-	40, // 22: omnimodem.v1.GetMetricsResponse.metrics:type_name -> omnimodem.v1.ChannelMetrics
-	1,  // 23: omnimodem.v1.ModemControl.ConfigureChannel:input_type -> omnimodem.v1.ConfigureChannelRequest
-	9,  // 24: omnimodem.v1.ModemControl.GetState:input_type -> omnimodem.v1.GetStateRequest
-	10, // 25: omnimodem.v1.ModemControl.Transmit:input_type -> omnimodem.v1.TransmitRequest
-	12, // 26: omnimodem.v1.ModemControl.SubscribeEvents:input_type -> omnimodem.v1.SubscribeRequest
-	24, // 27: omnimodem.v1.ModemControl.ListDevices:input_type -> omnimodem.v1.ListDevicesRequest
-	27, // 28: omnimodem.v1.ModemControl.ConfigureAudio:input_type -> omnimodem.v1.ConfigureAudioRequest
-	29, // 29: omnimodem.v1.ModemControl.ConfigurePtt:input_type -> omnimodem.v1.ConfigurePttRequest
-	31, // 30: omnimodem.v1.ModemControl.KeyPtt:input_type -> omnimodem.v1.KeyPttRequest
-	33, // 31: omnimodem.v1.ModemControl.SuggestUdevRule:input_type -> omnimodem.v1.SuggestUdevRuleRequest
-	38, // 32: omnimodem.v1.ModemControl.GetMetrics:input_type -> omnimodem.v1.GetMetricsRequest
-	41, // 33: omnimodem.v1.ModemControl.AcquireTxLease:input_type -> omnimodem.v1.TxLeaseRequest
-	41, // 34: omnimodem.v1.ModemControl.ReleaseTxLease:input_type -> omnimodem.v1.TxLeaseRequest
-	43, // 35: omnimodem.v1.ModemControl.ConfigureKissListener:input_type -> omnimodem.v1.ConfigureKissListenerRequest
-	45, // 36: omnimodem.v1.ModemControl.SetAudioGain:input_type -> omnimodem.v1.SetAudioGainRequest
-	47, // 37: omnimodem.v1.ModemControl.ConfigureSpectrum:input_type -> omnimodem.v1.ConfigureSpectrumRequest
-	8,  // 38: omnimodem.v1.ModemControl.ConfigureChannel:output_type -> omnimodem.v1.ConfigureChannelResponse
-	13, // 39: omnimodem.v1.ModemControl.GetState:output_type -> omnimodem.v1.ModemState
-	11, // 40: omnimodem.v1.ModemControl.Transmit:output_type -> omnimodem.v1.TransmitResponse
-	15, // 41: omnimodem.v1.ModemControl.SubscribeEvents:output_type -> omnimodem.v1.Event
-	26, // 42: omnimodem.v1.ModemControl.ListDevices:output_type -> omnimodem.v1.ListDevicesResponse
-	28, // 43: omnimodem.v1.ModemControl.ConfigureAudio:output_type -> omnimodem.v1.ConfigureAudioResponse
-	30, // 44: omnimodem.v1.ModemControl.ConfigurePtt:output_type -> omnimodem.v1.ConfigurePttResponse
-	32, // 45: omnimodem.v1.ModemControl.KeyPtt:output_type -> omnimodem.v1.KeyPttResponse
-	34, // 46: omnimodem.v1.ModemControl.SuggestUdevRule:output_type -> omnimodem.v1.SuggestUdevRuleResponse
-	39, // 47: omnimodem.v1.ModemControl.GetMetrics:output_type -> omnimodem.v1.GetMetricsResponse
-	42, // 48: omnimodem.v1.ModemControl.AcquireTxLease:output_type -> omnimodem.v1.TxLeaseResponse
-	42, // 49: omnimodem.v1.ModemControl.ReleaseTxLease:output_type -> omnimodem.v1.TxLeaseResponse
-	44, // 50: omnimodem.v1.ModemControl.ConfigureKissListener:output_type -> omnimodem.v1.ConfigureKissListenerResponse
-	46, // 51: omnimodem.v1.ModemControl.SetAudioGain:output_type -> omnimodem.v1.SetAudioGainResponse
-	48, // 52: omnimodem.v1.ModemControl.ConfigureSpectrum:output_type -> omnimodem.v1.ConfigureSpectrumResponse
-	38, // [38:53] is the sub-list for method output_type
-	23, // [23:38] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	0,  // 7: omnimodem.v1.ChannelInfo.ptt_method:type_name -> omnimodem.v1.PttMethod
+	13, // 8: omnimodem.v1.Event.snapshot:type_name -> omnimodem.v1.ModemState
+	17, // 9: omnimodem.v1.Event.channel_configured:type_name -> omnimodem.v1.ChannelConfigured
+	19, // 10: omnimodem.v1.Event.transmit_started:type_name -> omnimodem.v1.TransmitStarted
+	20, // 11: omnimodem.v1.Event.transmit_complete:type_name -> omnimodem.v1.TransmitComplete
+	21, // 12: omnimodem.v1.Event.rx_frame:type_name -> omnimodem.v1.RxFrame
+	22, // 13: omnimodem.v1.Event.audio_level:type_name -> omnimodem.v1.AudioLevel
+	23, // 14: omnimodem.v1.Event.status:type_name -> omnimodem.v1.Status
+	35, // 15: omnimodem.v1.Event.device_arrived:type_name -> omnimodem.v1.DeviceArrived
+	36, // 16: omnimodem.v1.Event.device_departed:type_name -> omnimodem.v1.DeviceDeparted
+	37, // 17: omnimodem.v1.Event.ptt_state:type_name -> omnimodem.v1.PttState
+	18, // 18: omnimodem.v1.Event.clock_offset:type_name -> omnimodem.v1.ClockOffset
+	40, // 19: omnimodem.v1.Event.channel_metrics:type_name -> omnimodem.v1.ChannelMetrics
+	16, // 20: omnimodem.v1.Event.spectrum_frame:type_name -> omnimodem.v1.SpectrumFrame
+	25, // 21: omnimodem.v1.ListDevicesResponse.devices:type_name -> omnimodem.v1.DeviceInfo
+	0,  // 22: omnimodem.v1.ConfigurePttRequest.method:type_name -> omnimodem.v1.PttMethod
+	40, // 23: omnimodem.v1.GetMetricsResponse.metrics:type_name -> omnimodem.v1.ChannelMetrics
+	1,  // 24: omnimodem.v1.ModemControl.ConfigureChannel:input_type -> omnimodem.v1.ConfigureChannelRequest
+	9,  // 25: omnimodem.v1.ModemControl.GetState:input_type -> omnimodem.v1.GetStateRequest
+	10, // 26: omnimodem.v1.ModemControl.Transmit:input_type -> omnimodem.v1.TransmitRequest
+	12, // 27: omnimodem.v1.ModemControl.SubscribeEvents:input_type -> omnimodem.v1.SubscribeRequest
+	24, // 28: omnimodem.v1.ModemControl.ListDevices:input_type -> omnimodem.v1.ListDevicesRequest
+	27, // 29: omnimodem.v1.ModemControl.ConfigureAudio:input_type -> omnimodem.v1.ConfigureAudioRequest
+	29, // 30: omnimodem.v1.ModemControl.ConfigurePtt:input_type -> omnimodem.v1.ConfigurePttRequest
+	31, // 31: omnimodem.v1.ModemControl.KeyPtt:input_type -> omnimodem.v1.KeyPttRequest
+	33, // 32: omnimodem.v1.ModemControl.SuggestUdevRule:input_type -> omnimodem.v1.SuggestUdevRuleRequest
+	38, // 33: omnimodem.v1.ModemControl.GetMetrics:input_type -> omnimodem.v1.GetMetricsRequest
+	41, // 34: omnimodem.v1.ModemControl.AcquireTxLease:input_type -> omnimodem.v1.TxLeaseRequest
+	41, // 35: omnimodem.v1.ModemControl.ReleaseTxLease:input_type -> omnimodem.v1.TxLeaseRequest
+	43, // 36: omnimodem.v1.ModemControl.ConfigureKissListener:input_type -> omnimodem.v1.ConfigureKissListenerRequest
+	45, // 37: omnimodem.v1.ModemControl.SetAudioGain:input_type -> omnimodem.v1.SetAudioGainRequest
+	47, // 38: omnimodem.v1.ModemControl.ConfigureSpectrum:input_type -> omnimodem.v1.ConfigureSpectrumRequest
+	8,  // 39: omnimodem.v1.ModemControl.ConfigureChannel:output_type -> omnimodem.v1.ConfigureChannelResponse
+	13, // 40: omnimodem.v1.ModemControl.GetState:output_type -> omnimodem.v1.ModemState
+	11, // 41: omnimodem.v1.ModemControl.Transmit:output_type -> omnimodem.v1.TransmitResponse
+	15, // 42: omnimodem.v1.ModemControl.SubscribeEvents:output_type -> omnimodem.v1.Event
+	26, // 43: omnimodem.v1.ModemControl.ListDevices:output_type -> omnimodem.v1.ListDevicesResponse
+	28, // 44: omnimodem.v1.ModemControl.ConfigureAudio:output_type -> omnimodem.v1.ConfigureAudioResponse
+	30, // 45: omnimodem.v1.ModemControl.ConfigurePtt:output_type -> omnimodem.v1.ConfigurePttResponse
+	32, // 46: omnimodem.v1.ModemControl.KeyPtt:output_type -> omnimodem.v1.KeyPttResponse
+	34, // 47: omnimodem.v1.ModemControl.SuggestUdevRule:output_type -> omnimodem.v1.SuggestUdevRuleResponse
+	39, // 48: omnimodem.v1.ModemControl.GetMetrics:output_type -> omnimodem.v1.GetMetricsResponse
+	42, // 49: omnimodem.v1.ModemControl.AcquireTxLease:output_type -> omnimodem.v1.TxLeaseResponse
+	42, // 50: omnimodem.v1.ModemControl.ReleaseTxLease:output_type -> omnimodem.v1.TxLeaseResponse
+	44, // 51: omnimodem.v1.ModemControl.ConfigureKissListener:output_type -> omnimodem.v1.ConfigureKissListenerResponse
+	46, // 52: omnimodem.v1.ModemControl.SetAudioGain:output_type -> omnimodem.v1.SetAudioGainResponse
+	48, // 53: omnimodem.v1.ModemControl.ConfigureSpectrum:output_type -> omnimodem.v1.ConfigureSpectrumResponse
+	39, // [39:54] is the sub-list for method output_type
+	24, // [24:39] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_omnimodem_proto_init() }

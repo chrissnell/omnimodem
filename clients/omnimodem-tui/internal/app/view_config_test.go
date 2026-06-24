@@ -81,6 +81,32 @@ func TestConfigDevicePickerEscCancels(t *testing.T) {
 	}
 }
 
+// Reopening Configure must preload the channel's persisted config (surfaced via
+// the snapshot) instead of showing blank defaults — the "config doesn't persist"
+// report was really the form not reflecting what was saved.
+func TestConfigPreloadsPersistedConfig(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{
+		name: "20m-rtty", mode: "rtty",
+		deviceID: "alsa:Mic", txDeviceID: "alsa:Speakers",
+		pttDeviceID: "serial:rig", pttMethod: pb.PttMethod_PTT_METHOD_SERIAL_RTS,
+	}
+	v := newConfigView(m)
+	if v.name.Value() != "20m-rtty" {
+		t.Fatalf("name not preloaded: %q", v.name.Value())
+	}
+	if v.modeLabel() != "rtty" {
+		t.Fatalf("mode not preloaded: %q", v.modeLabel())
+	}
+	if v.rxID != "alsa:Mic" || v.txID != "alsa:Speakers" || v.pttID != "serial:rig" {
+		t.Fatalf("devices not preloaded: rx=%q tx=%q ptt=%q", v.rxID, v.txID, v.pttID)
+	}
+	if v.method() != pb.PttMethod_PTT_METHOD_SERIAL_RTS {
+		t.Fatalf("ptt method not preloaded: %v", v.method())
+	}
+}
+
 func TestConfigApplyGatedWithoutRxDevice(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	v := newConfigView(m)
