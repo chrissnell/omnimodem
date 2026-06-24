@@ -22,17 +22,47 @@ type operateState struct {
 	tx         txState
 	wf         waterfall
 	myCall     string
+	myGrid     string
 	theirCall  string
 	rst        string
+	seq        *ft8Seq // non-nil ⇒ FT8 structured surface
+	qlog       qsoLog
 }
 
 func (m *Model) enterOperate() {
 	m.screen = screenOperate
-	m.op = &operateState{
+	op := &operateState{
 		myCall: "NW5W",
+		myGrid: "EM10",
 		rst:    "599",
 		tx:     txState{watchdog: 30 * time.Second},
 	}
+	// FT8 (and other structured modes) get the auto-sequence surface.
+	if cl := m.live[m.sel]; cl != nil {
+		if mi := modeByLabel(cl.mode); mi != nil && mi.shape == "ft8" {
+			op.seq = newFT8Seq(op.myCall, op.myGrid)
+		}
+	}
+	m.op = op
+}
+
+// ft8Send transmits the current ladder message, logs the QSO when it reaches
+// 73/RR73, then advances the ladder.
+func (m *Model) ft8Send() tea.Cmd {
+	if m.op.tx.active() {
+		return nil
+	}
+	seq := m.op.seq
+	msg := seq.current()
+	if seq.dxCall == "" {
+		msg = seq.cq()
+	} else if seq.finished() {
+		m.op.qlog.add(seq.dxCall, seq.dxGrid, m.op.rst)
+	}
+	m.op.transcript = append(m.op.transcript, transcriptLine{t: time.Now(), dir: '›', txt: msg})
+	m.op.tx.begin([]byte(msg))
+	seq.advance()
+	return acquireLeaseCmd(m.c, m.sel)
 }
 
 func (m *Model) updateOperate(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -76,6 +106,9 @@ func (m *Model) updateOperate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenDashboard
 			return m, disableSpectrumCmd(m.c, m.sel)
 		case "enter":
+			if m.op.seq != nil {
+				return m, m.ft8Send()
+			}
 			return m, m.sendCompose()
 		case "f1", "f2", "f3", "f4", "f5":
 			m.op.compose = expandMacro(macroForKey(msg.String()), macroCtx{
@@ -110,6 +143,14 @@ func (m *Model) sendCompose() tea.Cmd {
 func (m *Model) viewOperate() string {
 	op := m.op
 	var b strings.Builder
+	if op.seq != nil {
+		b.WriteString(fmt.Sprintf("FT8 · slot %.0f/15s · DX [%s %s]\n\n", slotPosition(time.Now()), orNone(op.seq.dxCall), op.seq.dxGrid))
+		b.WriteString("QSO sequence (next): " + op.seq.current() + "\n")
+		b.WriteString(op.seq.cq() + "\n")
+		b.WriteString("\n" + op.wf.line(40) + "\n")
+		b.WriteString(fmt.Sprintf("\n[↵] send next   logged QSOs: %d   [Esc] HALT TX", len(op.qlog.entries)))
+		return b.String()
+	}
 	b.WriteString("Activity            │ Transcript\n")
 	for _, l := range op.transcript {
 		b.WriteString(fmt.Sprintf("                    │ %s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
