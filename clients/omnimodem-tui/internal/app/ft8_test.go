@@ -34,32 +34,28 @@ func TestQSOLogAppend(t *testing.T) {
 	}
 }
 
-// Regression for the code-review finding: calling CQ must not advance the
-// ladder, and a QSO must be logged exactly once (at RR73), not on every send.
-func TestFT8SendCQDoesNotAdvanceAndLogsOnce(t *testing.T) {
+// Regression (code review): calling CQ must not advance the ladder, and a QSO
+// must be logged exactly once at RR73 — now via the operate view.
+func TestOperateFT8SendCQDoesNotAdvanceAndLogsOnce(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	m.live[0] = &chanLive{mode: "ft8"}
 	m.sel = 0
-	m.enterOperate()
-	if m.op.seq == nil {
+	v := newOperateView(m)
+	if v.seq == nil {
 		t.Fatal("ft8 mode should attach a sequencer")
 	}
-
-	// No DX worked: repeated CQ must keep step at 0.
-	m.ft8Send()
-	m.op.tx.onComplete() // clear active so the next send proceeds
-	m.ft8Send()
-	if m.op.seq.step != 0 {
-		t.Fatalf("calling CQ must not advance the ladder, step=%d", m.op.seq.step)
+	v.ft8Send()
+	v.tx.onComplete()
+	v.ft8Send()
+	if v.seq.step != 0 {
+		t.Fatalf("calling CQ must not advance the ladder, step=%d", v.seq.step)
 	}
-
-	// Work a DX and walk to RR73; the QSO logs exactly once.
-	m.op.seq.target("W1AW", "FN31")
+	v.seq.target("W1AW", "FN31")
 	for i := 0; i < 5; i++ {
-		m.ft8Send()
-		m.op.tx.onComplete()
+		v.ft8Send()
+		v.tx.onComplete()
 	}
-	if len(m.op.qlog.entries) != 1 {
-		t.Fatalf("QSO should log exactly once, got %d", len(m.op.qlog.entries))
+	if len(v.qlog.entries) != 1 {
+		t.Fatalf("QSO should log exactly once, got %d", len(v.qlog.entries))
 	}
 }
