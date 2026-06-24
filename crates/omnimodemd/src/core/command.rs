@@ -73,7 +73,31 @@ pub enum Command {
         tx_gain: f32,
         reply: oneshot::Sender<Result<(), CoreError>>,
     },
+    /// Enable/disable and size a channel's spectrum (waterfall) stream. Updates
+    /// the running RX worker via the shared `SpectrumControl`; replies with the
+    /// actual clamped params.
+    ConfigureSpectrum {
+        channel: ChannelId,
+        enable: bool,
+        bin_count: u32,
+        fft_size: u32,
+        rate_hz: u32,
+        freq_lo_hz: f32,
+        freq_hi_hz: f32,
+        reply: oneshot::Sender<Result<ConfigureSpectrumOk, CoreError>>,
+    },
     Shutdown,
+}
+
+/// Actual, clamped spectrum params echoed by `ConfigureSpectrum` (all zero when
+/// disabling).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConfigureSpectrumOk {
+    pub bin_count: u32,
+    pub fft_size: u32,
+    pub rate_hz: u32,
+    pub freq_start_hz: f32,
+    pub freq_step_hz: f32,
 }
 
 /// Opened rates from `ConfigureAudio`: the capture rate and the playback rate.

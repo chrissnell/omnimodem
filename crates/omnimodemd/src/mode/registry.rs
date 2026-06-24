@@ -59,6 +59,17 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
     }
 }
 
+/// The RX demod's native sample rate for a mode, or `None` for `ModeConfig::None`
+/// (no RX worker runs, so there is nothing to tap a spectrum from). This is the
+/// rate of the samples the spectrum FFT sees — post-resample, mode-specific.
+pub fn native_rate(cfg: &ModeConfig) -> Option<u32> {
+    match demod_kind(cfg) {
+        DemodKind::None => None,
+        DemodKind::Streaming(d) => Some(d.caps().native_rate),
+        DemodKind::Windowed(d, _) => Some(d.caps().native_rate),
+    }
+}
+
 /// Build a modulator for a config, or `None` if the mode is receive-only.
 pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
     match cfg {

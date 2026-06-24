@@ -13,6 +13,7 @@ pub mod osc;
 pub mod fir;
 pub mod nco;
 pub mod resample;
+pub mod spectrum;
 pub mod stft;
 pub mod agc;
 pub mod limiter;

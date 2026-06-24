@@ -13,6 +13,7 @@ pub mod error;
 pub mod event;
 mod gain;
 pub mod rx_worker;
+pub mod spectrum;
 pub mod tx_worker;
 
 pub(crate) use gain::AudioGain;
@@ -30,7 +31,7 @@ use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::{PttDriver, PttError};
 use crate::supervisor::Supervisor;
-use command::{Command, ConfigureAudioOk};
+use command::{Command, ConfigureAudioOk, ConfigureSpectrumOk};
 use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
@@ -128,6 +129,8 @@ struct LiveBindings {
     metrics: HashMap<ChannelId, SharedMetrics>,
     /// Per-channel runtime audio gain, shared with the RX/TX workers.
     gains: HashMap<ChannelId, AudioGain>,
+    /// Per-channel spectrum (waterfall) control, shared with the RX worker.
+    spectra: HashMap<ChannelId, spectrum::SpectrumControl>,
 }
 
 /// The core loop. Blocks on `recv_timeout`; on a command, handles it; on the
@@ -314,8 +317,67 @@ fn handle_command(
             let _ = reply.send(res);
         }
 
+        Command::ConfigureSpectrum {
+            channel,
+            enable,
+            bin_count,
+            fft_size,
+            rate_hz,
+            freq_lo_hz,
+            freq_hi_hz,
+            reply,
+        } => {
+            let res = configure_spectrum(
+                supervisor, live, channel, enable, bin_count, fft_size, rate_hz, freq_lo_hz,
+                freq_hi_hz,
+            );
+            let _ = reply.send(res);
+        }
+
         Command::Shutdown => {} // handled in run()
     }
+}
+
+/// Enable/disable a channel's spectrum stream. The shared `SpectrumControl` is
+/// created-or-updated so the call works whether or not a worker exists yet; a
+/// running RX worker holds a clone of the same handle and reconciles its tap on
+/// the next chunk — no respawn. Echoes the actual clamped params, resolved
+/// against the channel's demod native rate.
+#[allow(clippy::too_many_arguments)]
+fn configure_spectrum(
+    supervisor: &Supervisor,
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    enable: bool,
+    bin_count: u32,
+    fft_size: u32,
+    rate_hz: u32,
+    freq_lo_hz: f32,
+    freq_hi_hz: f32,
+) -> Result<ConfigureSpectrumOk, CoreError> {
+    if !supervisor.has_channel(channel) {
+        return Err(CoreError::UnknownChannel(channel));
+    }
+    let control = live.spectra.entry(channel).or_default();
+    if !enable {
+        control.disable();
+        return Ok(ConfigureSpectrumOk::default());
+    }
+    // Resolve against the demod native rate (the rate the spectrum FFT sees).
+    let mode = supervisor.channel_mode(channel);
+    let native_rate = registry::native_rate(&mode)
+        .ok_or_else(|| CoreError::UnknownMode("channel has no RX mode to tap a spectrum from".into()))?;
+    let setup = omnimodem_dsp::frontend::spectrum::SpectrumSetup::resolve(
+        native_rate, bin_count, fft_size, rate_hz, freq_lo_hz, freq_hi_hz,
+    );
+    control.enable(spectrum::SpectrumCfg { bin_count, fft_size, rate_hz, freq_lo_hz, freq_hi_hz });
+    Ok(ConfigureSpectrumOk {
+        bin_count: setup.plan.bin_count as u32,
+        fft_size: setup.nfft as u32,
+        rate_hz: setup.rate_hz,
+        freq_start_hz: setup.plan.freq_start_hz,
+        freq_step_hz: setup.plan.freq_step_hz,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,6 +469,8 @@ fn try_spawn_workers(
     let rig = live.audio.get(&channel).map(|b| b.rx_dev.clone());
     // Shared runtime gain for this channel (cloned into the workers).
     let gain = live.gains.entry(channel).or_default().clone();
+    // Shared spectrum control (cloned into the RX worker; default OFF).
+    let spectrum = live.spectra.entry(channel).or_default().clone();
 
     // RX worker: needs a capture and a real demod. Consume the held capture.
     if !live.rx_workers.contains_key(&channel) {
@@ -420,14 +484,14 @@ fn try_spawn_workers(
                 DemodKind::Streaming(demod) => {
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics, gain.clone(),
+                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(),
                     );
                     live.rx_workers.insert(channel, w);
                 }
                 DemodKind::Windowed(bd, window_s) => {
                     let w = RxWorker::spawn_windowed(
                         channel, rig, capture, bd, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics, window_s, gain.clone(),
+                        telemetry.clone(), metrics, window_s, gain.clone(), spectrum.clone(),
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -646,6 +710,9 @@ fn poll_hotplug(
                     live.rx_workers.remove(&c); // stop RX on the departed rig
                     live.tx_workers.remove(&c);
                     live.metrics.remove(&c);
+                    // Drop the spectrum control so a replugged device starts with
+                    // the waterfall OFF rather than silently resuming the FFT.
+                    live.spectra.remove(&c);
                     lease.release_all(c); // free any lease held on the gone rig
                 }
                 let ptt_chans: Vec<ChannelId> = live

@@ -160,6 +160,23 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             dcd,
             last_decoder: last_decoder.unwrap_or_default(),
         }),
+        TelemetryEvent::SpectrumFrame {
+            channel,
+            timestamp_ns,
+            freq_start_hz,
+            freq_step_hz,
+            db_floor,
+            db_ceiling,
+            bins,
+        } => Kind::SpectrumFrame(proto::SpectrumFrame {
+            channel: channel.0,
+            timestamp_ns,
+            freq_start_hz,
+            freq_step_hz,
+            db_floor,
+            db_ceiling,
+            bins,
+        }),
     };
     proto::Event { kind: Some(kind) }
 }

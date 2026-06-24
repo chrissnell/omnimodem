@@ -296,6 +296,35 @@ impl ModemControl for ControlService {
         Ok(Response::new(proto::SetAudioGainResponse {}))
     }
 
+    async fn configure_spectrum(
+        &self,
+        request: Request<proto::ConfigureSpectrumRequest>,
+    ) -> Result<Response<proto::ConfigureSpectrumResponse>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ConfigureSpectrum {
+            channel: ChannelId(req.channel),
+            enable: req.enable,
+            bin_count: req.bin_count,
+            fft_size: req.fft_size,
+            rate_hz: req.rate_hz,
+            freq_lo_hz: req.freq_lo_hz,
+            freq_hi_hz: req.freq_hi_hz,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::ConfigureSpectrumResponse {
+            bin_count: ok.bin_count,
+            fft_size: ok.fft_size,
+            rate_hz: ok.rate_hz,
+            freq_start_hz: ok.freq_start_hz,
+            freq_step_hz: ok.freq_step_hz,
+        }))
+    }
+
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(
