@@ -45,11 +45,6 @@ pub fn device_descriptor_to_proto(d: &DeviceDescriptor) -> proto::DeviceInfo {
 // large-err lint does not apply to handler/translation code.
 #[allow(clippy::result_large_err)]
 pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig, Status> {
-    if req.device_id.is_empty() {
-        return Err(Status::invalid_argument("device_id must not be empty"));
-    }
-    let device_id = DeviceId::parse(&req.device_id)
-        .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?;
     let method = match proto::PttMethod::try_from(req.method) {
         Ok(proto::PttMethod::None) => PttMethod::None,
         Ok(proto::PttMethod::Vox) => PttMethod::Vox,
@@ -64,6 +59,20 @@ pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig
         Ok(proto::PttMethod::Unspecified) | Err(_) => {
             return Err(Status::invalid_argument("ptt method must be specified"));
         }
+    };
+    // device_id addresses a physical port only for the device-based methods.
+    // None and Vox are deviceless — both build a NonePtt that ignores it — so an
+    // empty id is valid there (it just keys the registry's presence cache). This
+    // lets a channel Apply with the default VOX method and no PTT device picked,
+    // instead of failing the whole bind with "device_id must not be empty".
+    let device_id = if req.device_id.is_empty() {
+        match &method {
+            PttMethod::None | PttMethod::Vox => DeviceId::Placeholder { tag: "ptt-deviceless".into() },
+            _ => return Err(Status::invalid_argument("device_id must not be empty")),
+        }
+    } else {
+        DeviceId::parse(&req.device_id)
+            .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?
     };
     Ok(PttConfig { device_id, method, invert: req.invert })
 }
@@ -193,5 +202,40 @@ pub fn metrics_to_proto(snap: &crate::metrics::ChannelMetricsSnapshot) -> proto:
         afc_offset_hz: m.afc_offset_hz,
         dcd: m.dcd,
         last_decoder: m.last_decoder.clone().unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ptt_req(method: proto::PttMethod, device_id: &str) -> proto::ConfigurePttRequest {
+        proto::ConfigurePttRequest {
+            channel: 0,
+            device_id: device_id.to_string(),
+            method: method as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn deviceless_methods_accept_empty_device_id() {
+        for m in [proto::PttMethod::None, proto::PttMethod::Vox] {
+            let cfg = proto_ptt_to_config(&ptt_req(m, ""))
+                .expect("None/Vox are deviceless and must accept an empty device_id");
+            assert!(matches!(cfg.method, PttMethod::None | PttMethod::Vox));
+        }
+    }
+
+    #[test]
+    fn device_based_methods_still_require_device_id() {
+        let err = proto_ptt_to_config(&ptt_req(proto::PttMethod::SerialRts, "")).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn valid_device_id_is_parsed() {
+        let cfg = proto_ptt_to_config(&ptt_req(proto::PttMethod::SerialRts, "serial:usb-FTDI-if00")).unwrap();
+        assert_eq!(cfg.device_id, DeviceId::Serial { by_id: "usb-FTDI-if00".into() });
     }
 }
