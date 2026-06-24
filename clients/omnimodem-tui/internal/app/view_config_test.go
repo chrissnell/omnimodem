@@ -108,6 +108,24 @@ func TestConfigSelectedRxReachesConfigureAudio(t *testing.T) {
 	}
 }
 
+// A channel that binds RX-only (tx_rate == 0) must warn the operator that
+// transmit will be silent, rather than failing quietly.
+func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	v.Update(audioCfgMsg{resp: &pb.ConfigureAudioResponse{ActualSampleRate: 48000, ActualTxSampleRate: 0}})
+	if m.toast == nil || !strings.Contains(m.toast.Line(), "RX-only") {
+		t.Fatalf("RX-only bind must surface a transmit-silent warning, toast=%v", m.toast)
+	}
+
+	// A real TX rate must not warn.
+	m.toast = nil
+	v.Update(audioCfgMsg{resp: &pb.ConfigureAudioResponse{ActualSampleRate: 48000, ActualTxSampleRate: 48000}})
+	if m.toast != nil {
+		t.Fatalf("a bound TX device must not warn, got %q", m.toast.Line())
+	}
+}
+
 func TestConfigBindChainsThroughPtt(t *testing.T) {
 	f := &client.Fake{}
 	m := New(f, "x")

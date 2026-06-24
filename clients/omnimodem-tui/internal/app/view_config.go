@@ -166,6 +166,15 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 	case channelBoundMsg:
 		return v, v.afterChannel()
 	case audioCfgMsg:
+		// tx_rate == 0 means the daemon bound the channel RX-only: the TX device
+		// had no usable playback (an input-only device, or TX left defaulting to
+		// the capture device). Transmit will be silent until a real output device
+		// is picked for TX — surface that instead of letting it fail quietly.
+		if msg.resp.GetActualTxSampleRate() == 0 {
+			v.m.toast = ui.NewToast(
+				"Bound RX-only — no usable TX device; transmit is silent. Pick an output device for TX.",
+				ui.SeverityWarn)
+		}
 		return v, v.afterAudio()
 	case pttBoundMsg:
 		v.m.pop() // bind complete
