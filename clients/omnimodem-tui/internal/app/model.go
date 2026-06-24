@@ -98,9 +98,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// spectrum), then pop. Only "esc" is global "back" — "q" is left for
 			// views (text fields need it; Channels maps it to quit).
 			if len(m.stack) > 1 {
-				v := m.top()
-				nv, cmd := v.Update(msg)
-				m.stack[len(m.stack)-1] = nv
+				_, cmd := m.routeToView(msg) // active view reacts (teardown)
 				m.pop()
 				return m, cmd
 			}
@@ -137,12 +135,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) routeToView(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if v := m.top(); v != nil {
-		nv, cmd := v.Update(msg)
-		m.stack[len(m.stack)-1] = nv
-		return m, cmd
+	idx := len(m.stack) - 1
+	if idx < 0 {
+		return m, nil
 	}
-	return m, nil
+	v := m.stack[idx]
+	nv, cmd := v.Update(msg)
+	// Write the updated view back ONLY if Update didn't change the stack itself.
+	// If Update pushed (top grew) or popped (top shrank), the new top is already
+	// correct; writing to len-1 here would clobber the pushed view or reinstall a
+	// popped one. (Short-circuit also keeps this panic-safe after a pop.)
+	if idx == len(m.stack)-1 && m.stack[idx] == v {
+		m.stack[idx] = nv
+	}
+	return m, cmd
 }
 
 func (m *Model) View() string {
