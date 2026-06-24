@@ -114,7 +114,7 @@ func (v *configView) apply() tea.Cmd {
 		ctx, cancel := rpcCtx()
 		defer cancel()
 		if err := c.ConfigureChannel(ctx, req); err != nil {
-			return rpcErrMsg{err}
+			return rpcErrMsg{fmt.Errorf("configure channel: %w", err)}
 		}
 		return channelBoundMsg{}
 	}
@@ -130,7 +130,7 @@ func (v *configView) afterChannel() tea.Cmd {
 		defer cancel()
 		resp, err := c.ConfigureAudio(ctx, req)
 		if err != nil {
-			return rpcErrMsg{err}
+			return rpcErrMsg{fmt.Errorf("configure audio: %w", err)}
 		}
 		return audioCfgMsg{resp}
 	}
@@ -143,7 +143,7 @@ func (v *configView) afterAudio() tea.Cmd {
 		ctx, cancel := rpcCtx()
 		defer cancel()
 		if err := c.ConfigurePtt(ctx, req); err != nil {
-			return rpcErrMsg{err}
+			return rpcErrMsg{fmt.Errorf("configure ptt: %w", err)}
 		}
 		return pttBoundMsg{}
 	}
@@ -162,19 +162,30 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		v.m.pop() // bind complete
 		return v, snapshotCmd(v.m.c)
 	case tea.KeyMsg:
+		// Tab/Shift-Tab always traverse fields.
 		switch msg.String() {
-		case "tab", "down":
+		case "tab":
 			if v.focus < fLast {
 				v.focus++
 			}
 			v.syncFocus()
 			return v, nil
-		case "shift+tab", "up":
+		case "shift+tab":
 			if v.focus > fName {
 				v.focus--
 			}
 			v.syncFocus()
 			return v, nil
+		}
+		// When the name field is focused, every other key is text input — so the
+		// name can contain 'a', spaces, etc. (form-action keys are off-limits here).
+		if v.focus == fName {
+			var cmd tea.Cmd
+			v.name, cmd = v.name.Update(msg)
+			return v, cmd
+		}
+		// Non-name fields: form-action keys, then route to the focused widget.
+		switch msg.String() {
 		case "left":
 			v.cycle(-1)
 			return v, nil
@@ -191,11 +202,9 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, nil
 		}
 	}
-	// route to the focused widget
+	// route to the focused list (cursor moves, '/' filter)
 	var cmd tea.Cmd
 	switch v.focus {
-	case fName:
-		v.name, cmd = v.name.Update(msg)
 	case fRx:
 		v.rx, cmd = v.rx.Update(msg)
 	case fTx:
@@ -204,6 +213,19 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		v.ptt, cmd = v.ptt.Update(msg)
 	}
 	return v, cmd
+}
+
+// activeList is the device list shown/driven for the current focus (RX by
+// default, so the user always sees a list to pick from).
+func (v *configView) activeList() (*list.Model, string) {
+	switch v.focus {
+	case fTx:
+		return &v.tx, "TX device (playback)"
+	case fPtt:
+		return &v.ptt, "PTT device"
+	default:
+		return &v.rx, "RX device (capture)"
+	}
 }
 
 // syncFocus mirrors the focus index into the name textinput's blink state.
@@ -256,28 +278,38 @@ func (v *configView) Render(w, h int) string {
 		}
 		return "  " + s
 	}
-	var b strings.Builder
-	b.WriteString(mark(fName, "Name   "+v.name.View()) + "\n")
-	b.WriteString(mark(fMode, "Mode   ‹ "+v.modeLabel()+" ›  (←/→)") + "\n")
-	b.WriteString(mark(fPtt, "PTT    "+orDash(v.pttID)) + "   " +
-		mark(fMethod, "method ‹ "+methodLabel(v.method())+" › (←/→)") + "\n")
-	b.WriteString(mark(fApply, fmt.Sprintf("Apply  %s", applyHint(v.canApply()))) + "\n\n")
-
-	listH := h - 6
-	if listH < 3 {
-		listH = 3
-	}
-	v.rx.SetSize(w/2-1, listH)
-	v.tx.SetSize(w/2-1, listH)
 	chosen := func(id string) string {
 		if id == "" {
 			return ui.Dim.Render("(none)")
 		}
 		return ui.Accent.Render("✓ " + id)
 	}
-	b.WriteString(mark(fRx, "RX "+chosen(v.rxID)) + "\n")
-	b.WriteString(v.rx.View())
+	var b strings.Builder
+	b.WriteString(mark(fName, "Name    "+v.name.View()) + "\n")
+	b.WriteString(mark(fMode, "Mode    ‹ "+v.modeLabel()+" ›  (←/→)") + "\n")
+	b.WriteString(mark(fRx, "RX dev  "+chosen(v.rxID)) + "\n")
+	b.WriteString(mark(fTx, "TX dev  "+chosenOrSame(v.txID)) + "\n")
+	b.WriteString(mark(fPtt, "PTT dev "+chosen(v.pttID)) + "   " +
+		mark(fMethod, "method ‹ "+methodLabel(v.method())+" › (←/→)") + "\n")
+	b.WriteString(mark(fApply, "Apply   "+applyHint(v.canApply())) + "\n\n")
+
+	// Show the device list for whichever device field is focused (RX by default).
+	lst, label := v.activeList()
+	listH := h - 9
+	if listH < 3 {
+		listH = 3
+	}
+	lst.SetSize(w, listH)
+	b.WriteString(ui.Dim.Render(label+" — <enter> choose · </> filter") + "\n")
+	b.WriteString(lst.View())
 	return b.String()
+}
+
+func chosenOrSame(id string) string {
+	if id == "" {
+		return ui.Dim.Render("(same as RX)")
+	}
+	return ui.Accent.Render("✓ " + id)
 }
 
 func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }
