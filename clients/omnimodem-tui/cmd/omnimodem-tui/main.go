@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/app"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
@@ -27,9 +28,13 @@ func main() {
 	}
 }
 
+// defaultSock mirrors omnimodemd's own default so the two connect with no flags:
+// OMNIMODEM_RUNTIME_DIR if set, else <tempdir>/omnimodem (Go's os.TempDir matches
+// the daemon's std::env::temp_dir), with the socket inside it.
 func defaultSock() string {
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return dir + "/omnimodem.sock"
+	dir := os.Getenv("OMNIMODEM_RUNTIME_DIR")
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "omnimodem")
 	}
-	return "/run/omnimodem.sock"
+	return filepath.Join(dir, "omnimodem.sock")
 }
