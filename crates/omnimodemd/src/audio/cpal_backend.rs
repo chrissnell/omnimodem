@@ -122,7 +122,15 @@ impl AudioBackend for CpalBackend {
     }
 
     fn open_playback(&self, requested_rate: u32) -> Result<PlaybackHandle, AudioError> {
-        let rate = choose_stream_rate(requested_rate, &output_rate_ranges(&self.device))?;
+        // Mirror open_capture: a device with no advertised output ranges (e.g. an
+        // input-only device) can't play back. Report that plainly rather than
+        // letting choose_stream_rate's empty case surface as a confusing
+        // "rate exceeds ceiling".
+        let ranges = output_rate_ranges(&self.device);
+        if ranges.is_empty() {
+            return Err(AudioError::NoUsableFormat { device: self.id.to_canonical_string() });
+        }
+        let rate = choose_stream_rate(requested_rate, &ranges)?;
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         let submitted = Arc::new(AtomicUsize::new(0));
         let drained = Arc::new(AtomicUsize::new(0));

@@ -418,13 +418,29 @@ fn configure_audio(
     let rx_desc = resolve(supervisor, &device_id)?;
     let capture = (audio_factory)(&rx_desc).open_capture(sample_rate)?;
     let rx_rate = capture.sample_rate;
-
-    let tx_desc = resolve(supervisor, &tx_device_id)?;
-    let playback = (audio_factory)(&tx_desc).open_playback(tx_rate_req)?;
-    let tx_rate = playback.sample_rate;
-
     live.captures.insert(id, capture);
-    live.sinks.insert(id, playback);
+
+    // Playback is best-effort: a TX device with no usable playback support — an
+    // input-only device, or TX defaulting to the capture device — binds the
+    // channel RX-only (receive works; transmit stays unavailable, signalled by
+    // tx_rate == 0, until a real TX device is set). The TX worker already only
+    // spawns when a sink exists, so an absent sink is safe. Other audio errors
+    // (device gone, I/O) are genuine failures and propagate.
+    let tx_desc = resolve(supervisor, &tx_device_id)?;
+    let tx_rate = match (audio_factory)(&tx_desc).open_playback(tx_rate_req) {
+        Ok(playback) => {
+            let rate = playback.sample_rate;
+            live.sinks.insert(id, playback);
+            rate
+        }
+        Err(crate::audio::AudioError::NoUsableFormat { device }) => {
+            tracing::warn!(channel = id.0, %device, "TX device has no usable playback; channel is RX-only");
+            live.sinks.remove(&id); // drop any stale sink from a prior bind
+            0
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     live.audio.insert(
         id,
         AudioBinding { rx_dev: device_id, tx_dev: tx_device_id, tx_rate },
@@ -1036,6 +1052,56 @@ mod tests {
             let ok = configure_audio_split(&core, ChannelId(0), rx_id.clone(), tx_id.clone()).await;
             assert_eq!(ok.rx_rate, 48_000);
             assert_eq!(ok.tx_rate, 48_000);
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    /// A backend that captures fine but reports no usable playback — mimics an
+    /// input-only device (a microphone) chosen as, or defaulted to, the TX device.
+    struct CaptureOnlyBackend {
+        rate: u32,
+        id: DeviceId,
+    }
+    impl crate::audio::backend::AudioBackend for CaptureOnlyBackend {
+        fn open_capture(
+            &self,
+            r: u32,
+        ) -> Result<crate::audio::backend::CaptureHandle, crate::audio::AudioError> {
+            NullBackend::new(self.rate).open_capture(r)
+        }
+        fn open_playback(
+            &self,
+            _r: u32,
+        ) -> Result<crate::audio::backend::PlaybackHandle, crate::audio::AudioError> {
+            Err(crate::audio::AudioError::NoUsableFormat { device: self.id.to_canonical_string() })
+        }
+        fn device_id(&self) -> DeviceId {
+            self.id.clone()
+        }
+    }
+
+    #[test]
+    fn configure_audio_binds_rx_only_when_tx_device_has_no_playback() {
+        let dev = named_device("MIC");
+        let dev_id = dev.id.clone();
+        let backend_id = dev.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(move |_| Box::new(CaptureOnlyBackend { rate: 48_000, id: backend_id.clone() })),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "none").await;
+            // RX = TX = the input-only device. Saving must succeed RX-only, not
+            // fail the whole bind.
+            let ok = configure_audio_split(&core, ChannelId(0), dev_id.clone(), dev_id.clone()).await;
+            assert_eq!(ok.rx_rate, 48_000);
+            assert_eq!(ok.tx_rate, 0, "no-playback TX must bind RX-only (tx_rate 0)");
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
