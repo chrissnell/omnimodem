@@ -43,4 +43,15 @@ pub enum TelemetryEvent {
         dcd: bool,
         last_decoder: Option<String>,
     },
+    /// One waterfall line (lossy: a dropped line is invisible). `bins` is uint8
+    /// dBFS over `[db_floor, db_ceiling]`, low→high frequency.
+    SpectrumFrame {
+        channel: ChannelId,
+        timestamp_ns: u64,
+        freq_start_hz: f32,
+        freq_step_hz: f32,
+        db_floor: f32,
+        db_ceiling: f32,
+        bins: Vec<u8>,
+    },
 }

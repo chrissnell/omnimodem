@@ -56,6 +56,11 @@ service ModemControl {
   // Adjust a channel's RX input gain and TX output gain at runtime. Linear
   // multipliers (1.0 == unity); takes effect on the running workers.
   rpc SetAudioGain(SetAudioGainRequest) returns (SetAudioGainResponse);
+
+  // Enable/disable and size a channel's spectrum (waterfall) stream. Default OFF
+  // so the FFT costs nothing when no one is watching. Echoes the actual clamped
+  // params; takes effect on the running RX worker. Idempotent per channel.
+  rpc ConfigureSpectrum(ConfigureSpectrumRequest) returns (ConfigureSpectrumResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +124,22 @@ message Event {
     PttState ptt_state = 10;            // LOSSY
     ClockOffset clock_offset = 11;      // LOSSY
     ChannelMetrics channel_metrics = 12; // LOSSY
+    SpectrumFrame spectrum_frame = 13;   // LOSSY class
   }
+}
+
+// One waterfall line: a magnitude spectrum over the channel's audio passband.
+// LOSSY class — a lagging subscriber drops lines (a missed line is invisible).
+// The renderer needs nothing beyond these fields: map each uint8 bin to a shade,
+// and label the X axis from freq_start_hz / freq_step_hz.
+message SpectrumFrame {
+  uint32 channel       = 1;
+  uint64 timestamp_ns  = 2;   // wall-clock of the window's leading edge (0 if unknown)
+  float  freq_start_hz = 3;   // center frequency of bin[0]
+  float  freq_step_hz  = 4;   // Hz per output bin
+  float  db_floor      = 5;   // dBFS mapped to bin value 0
+  float  db_ceiling    = 6;   // dBFS mapped to bin value 255
+  bytes  bins          = 7;   // uint8 quantized dBFS, len == bin_count, low->high freq
 }
 
 message ChannelConfigured { uint32 channel = 1; }
@@ -295,3 +315,21 @@ message SetAudioGainRequest {
 }
 
 message SetAudioGainResponse {}
+
+message ConfigureSpectrumRequest {
+  uint32 channel    = 1;
+  bool   enable     = 2;   // false = stop the producer (other fields ignored)
+  uint32 bin_count  = 3;   // output bins (display width); 0 = server default (256)
+  uint32 fft_size   = 4;   // FFT length; 0 = server default (2048), rounded to pow2
+  uint32 rate_hz    = 5;   // target lines/sec; 0 = server default (15)
+  float  freq_lo_hz = 6;   // passband window low edge; 0 = 0 Hz
+  float  freq_hi_hz = 7;   // passband window high edge; 0 = Nyquist (native_rate/2)
+}
+
+message ConfigureSpectrumResponse {
+  uint32 bin_count     = 1;  // actual, after clamping to available FFT bins
+  uint32 fft_size      = 2;  // actual (power of two)
+  uint32 rate_hz       = 3;  // actual achievable lines/sec (see hop constraint)
+  float  freq_start_hz = 4;  // matches SpectrumFrame.freq_start_hz
+  float  freq_step_hz  = 5;  // matches SpectrumFrame.freq_step_hz
+}

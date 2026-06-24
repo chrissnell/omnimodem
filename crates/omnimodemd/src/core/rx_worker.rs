@@ -10,10 +10,13 @@
 use crate::audio::backend::CaptureHandle;
 use crate::audio::AudioChunk;
 use crate::core::event::{FrameEvent, TelemetryEvent};
+use crate::core::spectrum::SpectrumControl;
 use crate::ids::{ChannelId, DeviceId};
 use crate::metrics::ChannelMetrics;
 use crate::ptt::interlock::RxTxInterlock;
 use omnimodem_dsp::frontend::resample::Resampler;
+use omnimodem_dsp::frontend::spectrum::{half_spectrum_dbfs, SpectrumPlan, SpectrumSetup};
+use omnimodem_dsp::frontend::stft::Stft;
 use omnimodem_dsp::mode::{BlockDemodulator, Demodulator};
 use omnimodem_dsp::types::{Frame, FramePayload, Sample};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +56,7 @@ impl RxWorker {
         telemetry: broadcast::Sender<TelemetryEvent>,
         metrics: SharedMetrics,
         gain: crate::core::AudioGain,
+        spectrum: SpectrumControl,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -63,6 +67,8 @@ impl RxWorker {
             .spawn(move || {
                 let mut resampler =
                     (in_rate != native).then(|| Resampler::new(in_rate, native, 16));
+                let mut tap: Option<SpectrumTap> = None;
+                let mut tap_gen = u64::MAX; // force first reconcile
                 loop {
                     if !run.load(Ordering::Relaxed) {
                         break;
@@ -79,6 +85,12 @@ impl RxWorker {
                                 for s in samples.iter_mut() {
                                     *s *= g;
                                 }
+                            }
+                            // Feed the waterfall tap (when enabled) the same
+                            // post-gain samples the demod sees.
+                            sync_spectrum_tap(&spectrum, &mut tap, &mut tap_gen, channel, native);
+                            if let Some(t) = tap.as_mut() {
+                                t.process(&samples, &telemetry);
                             }
                             let mut produced = false;
                             for f in demod.feed(&samples) {
@@ -127,6 +139,7 @@ impl RxWorker {
         metrics: SharedMetrics,
         window_s: f32,
         gain: crate::core::AudioGain,
+        spectrum: SpectrumControl,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -140,13 +153,16 @@ impl RxWorker {
                     (in_rate != native).then(|| Resampler::new(in_rate, native, 16));
                 let mut buf: Vec<Sample> = Vec::with_capacity(win_samples);
                 let mut muted_window = false;
+                let mut tap: Option<SpectrumTap> = None;
+                let mut tap_gen = u64::MAX; // force first reconcile
                 let ended = loop {
                     if !run.load(Ordering::Relaxed) {
                         break false; // stopped: skip the trailing-window decode
                     }
                     match capture.rx.recv_timeout(STOP_POLL) {
                         Ok(chunk) => {
-                            if interlock.is_muted(&rig) {
+                            let muted = interlock.is_muted(&rig);
+                            if muted {
                                 muted_window = true; // a TX overlapped this window
                             }
                             let mut chunk_samples = resample(&mut resampler, to_f32(&chunk));
@@ -155,6 +171,13 @@ impl RxWorker {
                                 for s in chunk_samples.iter_mut() {
                                     *s *= g;
                                 }
+                            }
+                            // Feed the waterfall continuously (per chunk), even
+                            // though decode only fires once per multi-second
+                            // window — but not while our own TX is keyed.
+                            sync_spectrum_tap(&spectrum, &mut tap, &mut tap_gen, channel, native);
+                            if let (Some(t), false) = (tap.as_mut(), muted) {
+                                t.process(&chunk_samples, &telemetry);
                             }
                             buf.extend_from_slice(&chunk_samples);
                             while buf.len() >= win_samples {
@@ -232,6 +255,65 @@ fn resample(r: &mut Option<Resampler>, samples: Vec<Sample>) -> Vec<Sample> {
 
 fn to_f32(chunk: &AudioChunk) -> Vec<Sample> {
     chunk.iter().map(|&s| s as f32 / 32768.0).collect()
+}
+
+/// Worker-owned waterfall producer: a Hann STFT over the post-gain samples plus
+/// the fixed rendering geometry. Built from a `SpectrumCfg` and the demod's
+/// native rate (the rate of the samples it sees), rebuilt when the config or
+/// rate changes. Emits one `SpectrumFrame` per STFT hop on the lossy telemetry
+/// broadcast.
+struct SpectrumTap {
+    channel: ChannelId,
+    stft: Stft,
+    plan: SpectrumPlan,
+}
+
+impl SpectrumTap {
+    fn build(channel: ChannelId, cfg: &crate::core::spectrum::SpectrumCfg, native_rate: u32) -> Self {
+        let setup = SpectrumSetup::resolve(
+            native_rate,
+            cfg.bin_count,
+            cfg.fft_size,
+            cfg.rate_hz,
+            cfg.freq_lo_hz,
+            cfg.freq_hi_hz,
+        );
+        SpectrumTap { channel, stft: Stft::new(setup.nfft, setup.hop), plan: setup.plan }
+    }
+
+    fn process(&mut self, samples: &[Sample], telemetry: &broadcast::Sender<TelemetryEvent>) {
+        for frame in self.stft.feed(samples) {
+            let half = half_spectrum_dbfs(&frame, self.stft.window_sum());
+            let bins = self.plan.render(&half);
+            let _ = telemetry.send(TelemetryEvent::SpectrumFrame {
+                channel: self.channel,
+                timestamp_ns: 0,
+                freq_start_hz: self.plan.freq_start_hz,
+                freq_step_hz: self.plan.freq_step_hz,
+                db_floor: self.plan.db_floor,
+                db_ceiling: self.plan.db_ceiling,
+                bins,
+            });
+        }
+    }
+}
+
+/// Reconcile the worker's tap with the shared control when its generation has
+/// changed: build/rebuild on enable, drop on disable. Cheap (one relaxed load)
+/// when nothing changed.
+fn sync_spectrum_tap(
+    control: &SpectrumControl,
+    tap: &mut Option<SpectrumTap>,
+    seen_gen: &mut u64,
+    channel: ChannelId,
+    native_rate: u32,
+) {
+    let gen = control.generation();
+    if gen == *seen_gen {
+        return;
+    }
+    *seen_gen = gen;
+    *tap = control.snapshot().map(|cfg| SpectrumTap::build(channel, &cfg, native_rate));
 }
 
 fn emit(frames: &broadcast::Sender<FrameEvent>, channel: ChannelId, payload: &FramePayload) {
@@ -348,6 +430,7 @@ mod tests {
             broadcast::channel(8).0,
             test_metrics(),
             gain,
+            crate::core::spectrum::SpectrumControl::default(),
         );
         worker.join();
 
@@ -375,6 +458,7 @@ mod tests {
             broadcast::channel(8).0,
             test_metrics(),
             crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
         );
         worker.join();
         let observed = *peak.lock().unwrap();
@@ -398,6 +482,7 @@ mod tests {
             broadcast::channel(8).0,
             test_metrics(),
             crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
         );
         // Worker is blocked in recv_timeout with no data. stop() joins it.
         let start = std::time::Instant::now();
@@ -430,6 +515,7 @@ mod tests {
             broadcast::channel(8).0,
             test_metrics(),
             crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
         );
         worker.join();
 
@@ -470,6 +556,7 @@ mod tests {
             broadcast::channel(8).0,
             test_metrics(),
             crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
         );
         worker.join();
         assert!(rx_b.try_recv().is_err(), "muted worker emitted a frame");
@@ -496,6 +583,7 @@ mod tests {
             test_metrics(),
             FT8_WINDOW_S,
             crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
         );
         worker.join();
 
@@ -534,6 +622,7 @@ mod tests {
             tele_tx,
             metrics.clone(),
             crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
         );
         worker.join();
 
@@ -547,5 +636,62 @@ mod tests {
             }
         }
         assert!(saw, "no ChannelMetrics telemetry emitted");
+    }
+
+    #[test]
+    fn rx_worker_emits_spectrum_frames_when_enabled() {
+        use crate::core::spectrum::{SpectrumCfg, SpectrumControl};
+        use std::f32::consts::TAU;
+
+        // ~1 s of a 1 kHz tone at half scale, 48 kHz; native == capture (no resample).
+        let tone: Vec<i16> = (0..48_000)
+            .map(|n| ((TAU * 1000.0 * n as f32 / 48_000.0).sin() * 16_384.0) as i16)
+            .collect();
+        let backend = FileBackend::from_samples(tone, 48_000);
+        let capture = backend.open_capture(48_000).unwrap();
+
+        // Enable before spawn: the worker reconciles its tap on the first chunk.
+        let spectrum = SpectrumControl::default();
+        spectrum.enable(SpectrumCfg {
+            bin_count: 64,
+            fft_size: 1024,
+            rate_hz: 20,
+            freq_lo_hz: 0.0,
+            freq_hi_hz: 0.0,
+        });
+
+        let (tele_tx, mut tele_rx) = broadcast::channel(256);
+        let peak = Arc::new(Mutex::new(0.0f32));
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(7),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(PeakRecordingDemod { rate: 48_000, peak }),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+            tele_tx,
+            test_metrics(),
+            crate::core::AudioGain::default(),
+            spectrum,
+        );
+        worker.join();
+
+        let mut lines = Vec::new();
+        while let Ok(ev) = tele_rx.try_recv() {
+            if let TelemetryEvent::SpectrumFrame { channel, bins, freq_step_hz, .. } = ev {
+                assert_eq!(channel, ChannelId(7));
+                assert_eq!(bins.len(), 64, "expected 64 output bins");
+                assert!(freq_step_hz > 0.0);
+                lines.push(bins);
+            }
+        }
+        assert!(!lines.is_empty(), "no SpectrumFrame emitted with spectrum enabled");
+
+        // The 1 kHz tone should dominate the bucket covering ~1 kHz (full passband:
+        // step = 24000/64 = 375 Hz, so bucket 2 ≈ 937 Hz, bucket 3 ≈ 1312 Hz).
+        let mid = &lines[lines.len() / 2];
+        let (peak_idx, _) = mid.iter().enumerate().max_by_key(|(_, &v)| v).unwrap();
+        let peak_hz = peak_idx as f32 * (24_000.0 / 64.0);
+        assert!((peak_hz - 1000.0).abs() < 500.0, "tone bucket at {peak_hz} Hz, expected ~1 kHz");
     }
 }
