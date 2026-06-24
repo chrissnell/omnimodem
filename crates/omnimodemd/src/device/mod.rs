@@ -19,14 +19,15 @@ pub struct RealEnumerator;
 impl DeviceEnumerator for RealEnumerator {
     fn enumerate(&self) -> Vec<DeviceDescriptor> {
         let mut out = Vec::new();
-        for (id, _backend) in crate::audio::cpal_backend::enumerate_default_host() {
-            // Capability probing happens at open time; the backend is rebuilt
-            // from the cache on demand.
+        for (id, backend) in crate::audio::cpal_backend::enumerate_default_host() {
+            // Report the real direction(s) cpal advertises, so the TX picker only
+            // offers true output devices (a mic is capture-only, a speaker is
+            // playback-only) and a channel isn't silently bound RX-only.
             out.push(DeviceDescriptor {
                 id: id.clone(),
                 label: id.to_canonical_string(),
-                has_capture: true,
-                has_playback: true,
+                has_capture: backend.has_capture(),
+                has_playback: backend.has_playback(),
             });
         }
         out

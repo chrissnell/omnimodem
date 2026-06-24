@@ -22,54 +22,67 @@ const REBUILD_BACKOFF: &[Duration] = &[
 /// Clear the backoff after a stream that ran stable this long.
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
 
-/// A cpal device wrapped with its resolved durable identity.
+/// A cpal device pair wrapped with its resolved durable identity. Capture and
+/// playback are distinct cpal devices on CoreAudio/ALSA, so a duplex identity
+/// carries both; a capture-only (mic) or playback-only (speaker) device carries
+/// just the side it supports.
 pub struct CpalBackend {
-    device: cpal::Device,
+    input: Option<cpal::Device>,
+    output: Option<cpal::Device>,
     id: DeviceId,
 }
 
 impl CpalBackend {
-    pub fn new(device: cpal::Device, id: DeviceId) -> Self {
-        CpalBackend { device, id }
+    /// True when this identity can capture (has an input device).
+    pub fn has_capture(&self) -> bool {
+        self.input.is_some()
     }
 
-    /// Collect the (format, min, max) tuples cpal advertises for input.
-    fn input_configs(&self) -> Vec<(SampleFmt, u32, u32)> {
-        let Ok(ranges) = self.device.supported_input_configs() else {
-            return Vec::new();
-        };
-        ranges
-            .filter_map(|r| {
-                let fmt = match r.sample_format() {
-                    cpal::SampleFormat::I16 => SampleFmt::I16,
-                    cpal::SampleFormat::F32 => SampleFmt::F32,
-                    cpal::SampleFormat::U16 => SampleFmt::U16,
-                    _ => return None,
-                };
-                Some((fmt, r.min_sample_rate(), r.max_sample_rate()))
-            })
-            .collect()
+    /// True when this identity can play back (has an output device).
+    pub fn has_playback(&self) -> bool {
+        self.output.is_some()
     }
+}
 
-    fn input_rate_ranges(&self) -> Vec<(u32, u32)> {
-        self.input_configs().iter().map(|&(_, lo, hi)| (lo, hi)).collect()
-    }
+/// Collect the (format, min, max) tuples cpal advertises for input on `device`.
+fn input_configs(device: &cpal::Device) -> Vec<(SampleFmt, u32, u32)> {
+    let Ok(ranges) = device.supported_input_configs() else {
+        return Vec::new();
+    };
+    ranges
+        .filter_map(|r| {
+            let fmt = match r.sample_format() {
+                cpal::SampleFormat::I16 => SampleFmt::I16,
+                cpal::SampleFormat::F32 => SampleFmt::F32,
+                cpal::SampleFormat::U16 => SampleFmt::U16,
+                _ => return None,
+            };
+            Some((fmt, r.min_sample_rate(), r.max_sample_rate()))
+        })
+        .collect()
+}
+
+fn input_rate_ranges(device: &cpal::Device) -> Vec<(u32, u32)> {
+    input_configs(device).iter().map(|&(_, lo, hi)| (lo, hi)).collect()
 }
 
 impl AudioBackend for CpalBackend {
     fn open_capture(&self, requested_rate: u32) -> Result<CaptureHandle, AudioError> {
-        let configs = self.input_configs();
+        let src = self.input.as_ref().ok_or_else(|| AudioError::NoUsableFormat {
+            device: self.id.to_canonical_string(),
+        })?;
+        let configs = input_configs(src);
         if configs.is_empty() {
             return Err(AudioError::NoUsableFormat { device: self.id.to_canonical_string() });
         }
-        let rate = choose_stream_rate(requested_rate, &self.input_rate_ranges())?;
+        let rate = choose_stream_rate(requested_rate, &input_rate_ranges(src))?;
         let fmt = pick_input_sample_format(&configs, rate)
             .ok_or_else(|| AudioError::NoUsableFormat { device: self.id.to_canonical_string() })?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
-        let device = self.device.clone();
+        let device = src.clone();
         let cfg = cpal::StreamConfig {
             channels: 1,
             sample_rate: rate,
@@ -122,11 +135,14 @@ impl AudioBackend for CpalBackend {
     }
 
     fn open_playback(&self, requested_rate: u32) -> Result<PlaybackHandle, AudioError> {
-        // Mirror open_capture: a device with no advertised output ranges (e.g. an
-        // input-only device) can't play back. Report that plainly rather than
-        // letting choose_stream_rate's empty case surface as a confusing
-        // "rate exceeds ceiling".
-        let ranges = output_rate_ranges(&self.device);
+        // No output side (an input-only mic, or TX defaulting to the capture
+        // device) means this identity can't play back. Report that plainly
+        // rather than letting choose_stream_rate's empty case surface as a
+        // confusing "rate exceeds ceiling".
+        let sink = self.output.as_ref().ok_or_else(|| AudioError::NoUsableFormat {
+            device: self.id.to_canonical_string(),
+        })?;
+        let ranges = output_rate_ranges(sink);
         if ranges.is_empty() {
             return Err(AudioError::NoUsableFormat { device: self.id.to_canonical_string() });
         }
@@ -145,7 +161,7 @@ impl AudioBackend for CpalBackend {
             }
         });
 
-        let device = self.device.clone();
+        let device = sink.clone();
         let cfg = cpal::StreamConfig {
             channels: 1,
             sample_rate: rate,
@@ -268,22 +284,48 @@ fn output_rate_ranges(device: &cpal::Device) -> Vec<(u32, u32)> {
         .unwrap_or_default()
 }
 
-/// Enumerate the default host's devices as `(DeviceId, CpalBackend)`. The cpal
-/// device name (an ALSA pcm id on Linux) yields an `AlsaCard` identity; the USB
-/// attach step in `super::enumerate` upgrades it to a `Usb`/`Topology` id when
-/// it can match the card to a USB device.
+/// Enumerate the default host's devices as `(DeviceId, CpalBackend)`. Both the
+/// capture (`input_devices`) and playback (`output_devices`) sides are listed
+/// and merged by durable identity, so a duplex device becomes one backend that
+/// can do both while a mic or a speaker carries only the side it supports —
+/// without this, playback was never wired and every channel bound RX-only. The
+/// cpal device name (an ALSA pcm id on Linux) yields an `AlsaCard` identity; the
+/// USB attach step in `super::enumerate` upgrades it to a `Usb`/`Topology` id.
 pub fn enumerate_default_host() -> Vec<(DeviceId, CpalBackend)> {
     let host = cpal::default_host();
-    let mut out = Vec::new();
+    // First-seen order: capture devices, then any playback-only devices.
+    let mut order: Vec<DeviceId> = Vec::new();
+    let mut pairs: std::collections::HashMap<DeviceId, (Option<cpal::Device>, Option<cpal::Device>)> =
+        std::collections::HashMap::new();
     if let Ok(devs) = host.input_devices() {
         for dev in devs {
             #[allow(deprecated)]
             let name = dev.name().unwrap_or_default();
             let id = id_for_name(&name);
-            out.push((id.clone(), CpalBackend::new(dev, id)));
+            if !pairs.contains_key(&id) {
+                order.push(id.clone());
+            }
+            pairs.entry(id).or_default().0 = Some(dev);
         }
     }
-    out
+    if let Ok(devs) = host.output_devices() {
+        for dev in devs {
+            #[allow(deprecated)]
+            let name = dev.name().unwrap_or_default();
+            let id = id_for_name(&name);
+            if !pairs.contains_key(&id) {
+                order.push(id.clone());
+            }
+            pairs.entry(id).or_default().1 = Some(dev);
+        }
+    }
+    order
+        .into_iter()
+        .map(|id| {
+            let (input, output) = pairs.remove(&id).unwrap_or_default();
+            (id.clone(), CpalBackend { input, output, id })
+        })
+        .collect()
 }
 
 /// Map a cpal device name to a durable identity. An ALSA pcm id with a
