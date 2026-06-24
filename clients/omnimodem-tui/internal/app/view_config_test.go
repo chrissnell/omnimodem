@@ -27,8 +27,9 @@ func TestConfigNameAcceptsLettersAndSpace(t *testing.T) {
 	}
 }
 
-// Regression: the device list for the focused field must actually render.
-func TestConfigRendersFocusedDeviceList(t *testing.T) {
+// The device picker is a modal: hidden until a device field is opened with
+// enter, shown while picking, and gone again once a device is chosen.
+func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	v := newConfigView(m)
 	v.setDevices([]*pb.DeviceInfo{
@@ -36,9 +37,47 @@ func TestConfigRendersFocusedDeviceList(t *testing.T) {
 		devItem("usb:tx", "Speaker", false, true),
 	})
 	v.focus = fTx
-	out := v.Render(80, 20)
-	if !strings.Contains(out, "TX device") || !strings.Contains(out, "Speaker") {
-		t.Fatalf("focused TX list must render with its devices:\n%s", out)
+
+	// Closed: the form shows but the device list does not.
+	if out := v.Render(80, 20); strings.Contains(out, "Speaker") {
+		t.Fatalf("picker must be hidden until opened:\n%s", out)
+	}
+
+	// Enter opens the picker over the focused (TX) field.
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !v.picking {
+		t.Fatal("enter on a device field must open the picker modal")
+	}
+	if out := v.Render(80, 20); !strings.Contains(out, "TX device") || !strings.Contains(out, "Speaker") {
+		t.Fatalf("open picker must render the device list:\n%s", out)
+	}
+
+	// Enter again chooses the highlighted device and closes the modal.
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.picking {
+		t.Fatal("choosing a device must close the picker modal")
+	}
+	if v.txID != "usb:tx" {
+		t.Fatalf("chosen device must be recorded, got %q", v.txID)
+	}
+	if out := v.Render(80, 20); strings.Contains(out, "Speaker") {
+		t.Fatalf("picker must be gone after choosing:\n%s", out)
+	}
+}
+
+// Esc inside the open picker cancels the pick (closes the modal) without
+// leaving the Configure screen.
+func TestConfigDevicePickerEscCancels(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:tx", "Speaker", false, true)})
+	v.focus = fTx
+	v.picking = true
+	if _, _ = v.Update(tea.KeyMsg{Type: tea.KeyEsc}); v.picking {
+		t.Fatal("esc must close the picker modal")
+	}
+	if v.txID != "" {
+		t.Fatal("esc must not record a device")
 	}
 }
 

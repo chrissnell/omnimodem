@@ -93,16 +93,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel()
 			}
 			return m, tea.Quit
-		case "esc":
-			// Let the active view tear down (e.g. operate halts TX / stops the
-			// spectrum), then pop. Only "esc" is global "back" — "q" is left for
-			// views (text fields need it; Channels maps it to quit).
-			if len(m.stack) > 1 {
-				_, cmd := m.routeToView(msg) // active view reacts (teardown)
-				m.pop()
-				return m, cmd
-			}
 		}
+		// "esc" is not special-cased here: each view owns its own back/cancel
+		// behavior and calls m.pop() itself (so a view with an open inner modal
+		// can swallow esc to close it instead of leaving the screen).
 		return m.routeToView(msg)
 	case connectedMsg:
 		m.connected = true

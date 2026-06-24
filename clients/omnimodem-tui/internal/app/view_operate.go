@@ -86,7 +86,8 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
-			// Leaving operate (the WM pops): halt any TX and stop the spectrum.
+			// Leave operate: halt any TX, stop the spectrum, then pop back.
+			v.m.pop()
 			if v.tx.active() {
 				v.tx.halt()
 				return v, tea.Batch(releaseLeaseCmd(v.m.c, v.m.sel), disableSpectrumCmd(v.m.c, v.m.sel))

@@ -54,10 +54,17 @@ type configView struct {
 	pttID     string
 	methodIdx int
 	focus     cfgFocus
+	picking   bool // a device-picker modal is open over the form
 }
 
 func newDevList(title string) list.Model {
-	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	// One line per device. Many devices report label == device_id (virtual
+	// loopbacks especially), so the default two-line delegate printed each name
+	// twice; the id is kept only as filter text, not a second visible row.
+	del := list.NewDefaultDelegate()
+	del.ShowDescription = false
+	del.SetSpacing(0)
+	l := list.New(nil, del, 0, 0)
 	l.Title = title
 	l.SetShowTitle(false)  // the modal frame supplies the title
 	l.SetShowHelp(false)
@@ -164,8 +171,35 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		v.m.pop() // bind complete
 		return v, snapshotCmd(v.m.c)
 	case tea.KeyMsg:
-		// Tab/Shift-Tab always traverse fields.
+		// A device-picker modal is open: it captures all keys. Enter records the
+		// highlighted device and closes the modal; esc cancels and closes. While
+		// the list's own filter is active, hand keys straight to it (so esc clears
+		// the filter and enter applies it, rather than closing the modal).
+		if v.picking {
+			lst, _ := v.activeList()
+			if lst.FilterState() == list.Filtering {
+				var cmd tea.Cmd
+				*lst, cmd = lst.Update(msg)
+				return v, cmd
+			}
+			switch msg.String() {
+			case "esc":
+				v.picking = false
+				return v, nil
+			case "enter", " ":
+				v.choose()
+				v.picking = false
+				return v, nil
+			}
+			var cmd tea.Cmd
+			*lst, cmd = lst.Update(msg)
+			return v, cmd
+		}
+		// Form navigation (no modal open).
 		switch msg.String() {
+		case "esc":
+			v.m.pop() // cancel configuration, back to Channels
+			return v, nil
 		case "tab":
 			if v.focus < fLast {
 				v.focus++
@@ -186,14 +220,12 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			v.name, cmd = v.name.Update(msg)
 			return v, cmd
 		}
-		// Non-name fields: form-action keys, then route to the focused widget.
+		// Non-name fields: cycle selectors, open the picker, or apply.
 		switch msg.String() {
 		case "left":
 			v.cycle(-1)
-			return v, nil
 		case "right":
 			v.cycle(+1)
-			return v, nil
 		case "enter", " ":
 			return v.commit()
 		case "a":
@@ -201,24 +233,14 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 				return v, v.apply()
 			}
 			v.m.toast = ui.NewToast("pick an RX device first", ui.SeverityWarn)
-			return v, nil
 		}
+		return v, nil
 	}
-	// route to the focused list (cursor moves, '/' filter)
-	var cmd tea.Cmd
-	switch v.focus {
-	case fRx:
-		v.rx, cmd = v.rx.Update(msg)
-	case fTx:
-		v.tx, cmd = v.tx.Update(msg)
-	case fPtt:
-		v.ptt, cmd = v.ptt.Update(msg)
-	}
-	return v, cmd
+	return v, nil
 }
 
-// activeList is the device list shown/driven for the current focus (RX by
-// default, so the user always sees a list to pick from).
+// activeList is the device list for the field being picked (the focused device
+// field). Returns a pointer so the modal can drive it in place.
 func (v *configView) activeList() (*list.Model, string) {
 	switch v.focus {
 	case fTx:
@@ -249,8 +271,23 @@ func (v *configView) cycle(d int) {
 	}
 }
 
-// commit records a list highlight into the chosen id (or applies on the Apply field).
+// commit reacts to Enter on the focused field: open the device picker on a
+// device field, apply on the Apply field. Mode/method use ←/→, not Enter.
 func (v *configView) commit() (View, tea.Cmd) {
+	switch v.focus {
+	case fRx, fTx, fPtt:
+		v.picking = true
+	case fApply:
+		if v.canApply() {
+			return v, v.apply()
+		}
+		v.m.toast = ui.NewToast("pick an RX device first", ui.SeverityWarn)
+	}
+	return v, nil
+}
+
+// choose records the highlighted device in the open picker into the chosen id.
+func (v *configView) choose() {
 	switch v.focus {
 	case fRx:
 		if it, ok := v.rx.SelectedItem().(devEntry); ok {
@@ -264,13 +301,7 @@ func (v *configView) commit() (View, tea.Cmd) {
 		if it, ok := v.ptt.SelectedItem().(devEntry); ok {
 			v.pttID = it.id
 		}
-	case fApply:
-		if v.canApply() {
-			return v, v.apply()
-		}
-		v.m.toast = ui.NewToast("pick an RX device first", ui.SeverityWarn)
 	}
-	return v, nil
 }
 
 func (v *configView) Render(w, h int) string {
@@ -293,22 +324,31 @@ func (v *configView) Render(w, h int) string {
 	b.WriteString(mark(fTx, "TX dev  "+chosenOrSame(v.txID)) + "\n")
 	b.WriteString(mark(fPtt, "PTT dev "+chosen(v.pttID)) + "   " +
 		mark(fMethod, "method ‹ "+methodLabel(v.method())+" › (←/→)") + "\n")
-	b.WriteString(mark(fApply, "Apply   "+applyHint(v.canApply())) + "\n\n")
+	b.WriteString(mark(fApply, "Apply   "+applyHint(v.canApply())) + "\n")
 
-	// The device list for the focused field (RX by default) renders inside a
-	// bordered modal box so it stands apart from the form text above.
+	// The device picker is a modal: it appears only while a device field is being
+	// chosen, and disappears once a device is selected (or the pick is cancelled).
+	if !v.picking {
+		b.WriteString("\n" + ui.Dim.Render("‹tab› field · ‹←/→› cycle · ‹enter› pick/apply · ‹a› apply · ‹esc› cancel"))
+		return b.String()
+	}
 	lst, label := v.activeList()
 	modalW := w
 	if modalW > 64 {
 		modalW = 64
 	}
-	listH := h - 9
+	// Hug the device count so the box doesn't sprawl with empty rows, but cap to
+	// the space available below the form.
+	listH := len(lst.Items())
 	if listH < 3 {
 		listH = 3
 	}
+	if max := h - 9; max >= 3 && listH > max {
+		listH = max
+	}
 	lst.SetSize(modalW-4, listH)
-	box := ui.Modal(label+"  ‹enter› choose · ‹/› filter", lst.View(), modalW)
-	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, box))
+	box := ui.Modal(label+"  ‹enter› choose · ‹esc› cancel · ‹/› filter", lst.View(), modalW)
+	b.WriteString("\n" + lipgloss.PlaceHorizontal(w, lipgloss.Center, box))
 	return b.String()
 }
 
@@ -322,9 +362,15 @@ func chosenOrSame(id string) string {
 func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }
 
 func (v *configView) Hints() []ui.Hint {
+	if v.picking {
+		return []ui.Hint{
+			{Key: "↑/↓", Action: "device"}, {Key: "enter", Action: "choose"},
+			{Key: "/", Action: "filter"}, {Key: "esc", Action: "cancel"},
+		}
+	}
 	return []ui.Hint{
-		{Key: "tab", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "select"},
-		{Key: "/", Action: "filter"}, {Key: "a", Action: "apply"}, {Key: "esc", Action: "cancel"},
+		{Key: "tab", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "pick/apply"},
+		{Key: "a", Action: "apply"}, {Key: "esc", Action: "cancel"},
 	}
 }
 
