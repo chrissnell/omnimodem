@@ -70,7 +70,7 @@ async fn phase2_exit_criterion_roundtrip() {
 
     // Configure the channel, then bind audio + PTT to the device.
     client
-        .configure_channel(ConfigureChannelRequest { channel: 0, name: "vfo-a".into(), mode: "none".into() })
+        .configure_channel(ConfigureChannelRequest { channel: 0, name: "vfo-a".into(), mode: "none".into(), mode_params: None })
         .await
         .unwrap();
     let audio = client

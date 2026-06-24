@@ -18,6 +18,7 @@ mod tests {
             channel: 0,
             name: "test".into(),
             mode: "none".into(),
+            mode_params: None,
         };
         assert_eq!(req.name, "test");
 

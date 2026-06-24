@@ -26,24 +26,53 @@ pub enum ModeConfig {
 }
 
 impl ModeConfig {
-    /// Parse the channel's `mode` string into a parametric config. Phase 4
-    /// resolves the five first-mode labels with default parameters (richer
-    /// parametric strings are a Phase-5 extension); unknown strings are
-    /// rejected so a typo can't silently configure nothing.
+    /// Parse the channel's `mode` string into a parametric config.
+    ///
+    /// Two forms, both accepted (the second is the channel-configuration protocol
+    /// expansion): a bare label (`"cw"`) resolves with default parameters, and a
+    /// parametric form (`"cw:wpm=25,tone=600"`) overrides individual params via a
+    /// `:`-separated `key=value,…` tail. Missing or unparseable keys fall back to
+    /// the mode default, so a partial spec is always valid; an unknown *mode* is
+    /// still rejected so a typo can't silently configure nothing. This is the
+    /// canonical persisted form — [`ModeConfig::to_mode_string`] round-trips it.
     pub fn parse(s: &str) -> Option<ModeConfig> {
-        match s {
+        let (mode, tail) = match s.split_once(':') {
+            Some((m, t)) => (m, Some(t)),
+            None => (s, None),
+        };
+        let kv = parse_params(tail);
+        let f = |k: &str, d: f32| kv.get(k).and_then(|v| v.parse::<f32>().ok()).unwrap_or(d);
+        let u = |k: &str, d: u16| kv.get(k).and_then(|v| v.parse::<u16>().ok()).unwrap_or(d);
+        match mode {
             "none" | "" => Some(ModeConfig::None),
             "afsk1200" => Some(ModeConfig::Afsk1200 { tx: true }),
             "ft8" => Some(ModeConfig::Ft8),
-            "cw" => Some(ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }),
-            "rtty" => Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }),
-            "psk31" => Some(ModeConfig::Psk31 { center_hz: 1000.0 }),
+            "cw" => Some(ModeConfig::Cw { wpm: u("wpm", 20), tone_hz: f("tone", 700.0) }),
+            "rtty" => Some(ModeConfig::Rtty { baud: f("baud", 45.45), shift_hz: f("shift", 170.0) }),
+            "psk31" => Some(ModeConfig::Psk31 { center_hz: f("center", 1000.0) }),
             "ft4" => Some(ModeConfig::Ft4),
             "jt65" => Some(ModeConfig::Jt65),
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
-            "olivia" => Some(ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 }),
+            "olivia" => {
+                Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
+            }
             _ => None,
+        }
+    }
+
+    /// Canonical mode string: bare label for parameterless modes, `label:k=v,…`
+    /// for parametric ones. Round-trips through [`ModeConfig::parse`], so it is the
+    /// form the daemon persists when a client supplies structured mode params.
+    pub fn to_mode_string(&self) -> String {
+        match self {
+            ModeConfig::Cw { wpm, tone_hz } => format!("cw:wpm={wpm},tone={tone_hz}"),
+            ModeConfig::Rtty { baud, shift_hz } => format!("rtty:baud={baud},shift={shift_hz}"),
+            ModeConfig::Psk31 { center_hz } => format!("psk31:center={center_hz}"),
+            ModeConfig::Olivia { tones, bandwidth_hz } => {
+                format!("olivia:tones={tones},bw={bandwidth_hz}")
+            }
+            other => other.label().to_string(),
         }
     }
     pub fn label(&self) -> &'static str {
@@ -61,6 +90,16 @@ impl ModeConfig {
             ModeConfig::Olivia { .. } => "olivia",
         }
     }
+}
+
+/// Parse a `key=value,key=value` parameter tail into a lookup. Empty or absent
+/// tails yield an empty map; malformed entries (no `=`) are skipped.
+fn parse_params(tail: Option<&str>) -> std::collections::HashMap<&str, &str> {
+    tail.unwrap_or("")
+        .split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect()
 }
 
 /// The framework fixture: a passthrough that satisfies the trait surface so the
@@ -127,6 +166,56 @@ mod tests {
             ModeConfig::parse("olivia"),
             Some(ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 })
         );
+    }
+
+    #[test]
+    fn parse_accepts_parametric_strings() {
+        assert_eq!(
+            ModeConfig::parse("cw:wpm=25,tone=600"),
+            Some(ModeConfig::Cw { wpm: 25, tone_hz: 600.0 })
+        );
+        assert_eq!(
+            ModeConfig::parse("rtty:baud=75,shift=850"),
+            Some(ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0 })
+        );
+        assert_eq!(
+            ModeConfig::parse("psk31:center=1500"),
+            Some(ModeConfig::Psk31 { center_hz: 1500.0 })
+        );
+        assert_eq!(
+            ModeConfig::parse("olivia:tones=16,bw=500"),
+            Some(ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 })
+        );
+    }
+
+    #[test]
+    fn parse_partial_or_bad_params_fall_back_to_defaults() {
+        assert_eq!(
+            ModeConfig::parse("cw:wpm=30"),
+            Some(ModeConfig::Cw { wpm: 30, tone_hz: 700.0 })
+        );
+        assert_eq!(
+            ModeConfig::parse("cw:wpm=abc,tone=550"),
+            Some(ModeConfig::Cw { wpm: 20, tone_hz: 550.0 })
+        );
+        assert_eq!(ModeConfig::parse("bogus:x=1"), None);
+    }
+
+    #[test]
+    fn to_mode_string_round_trips_through_parse() {
+        let cases = [
+            ModeConfig::None,
+            ModeConfig::Afsk1200 { tx: true },
+            ModeConfig::Ft8,
+            ModeConfig::Cw { wpm: 25, tone_hz: 600.0 },
+            ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0 },
+            ModeConfig::Psk31 { center_hz: 1500.0 },
+            ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 },
+            ModeConfig::Wspr,
+        ];
+        for c in cases {
+            assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c.clone()), "round-trip {c:?}");
+        }
     }
 
     #[test]

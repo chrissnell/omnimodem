@@ -40,7 +40,7 @@ async fn phase1_exit_criterion_roundtrip() {
 
     // (1) Configure a virtual channel.
     let cfg = client
-        .configure_channel(ConfigureChannelRequest { channel: 0, name: "vfo-a".into(), mode: "none".into() })
+        .configure_channel(ConfigureChannelRequest { channel: 0, name: "vfo-a".into(), mode: "none".into(), mode_params: None })
         .await
         .unwrap()
         .into_inner();

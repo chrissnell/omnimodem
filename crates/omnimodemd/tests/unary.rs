@@ -40,6 +40,7 @@ async fn configure_get_transmit_roundtrip() {
             channel: 0,
             name: "vfo-a".into(),
             mode: "none".into(),
+            mode_params: None,
         })
         .await
         .unwrap()
@@ -62,7 +63,7 @@ async fn configure_get_transmit_roundtrip() {
 
     // Empty name is rejected.
     let err = client
-        .configure_channel(ConfigureChannelRequest { channel: 1, name: "".into(), mode: "none".into() })
+        .configure_channel(ConfigureChannelRequest { channel: 1, name: "".into(), mode: "none".into(), mode_params: None })
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
