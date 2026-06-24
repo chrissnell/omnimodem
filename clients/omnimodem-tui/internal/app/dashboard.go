@@ -23,7 +23,7 @@ func (m *Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, devicesCmd(m.c)
 	case "o":
 		m.enterOperate()
-		return m, nil
+		return m, tea.Batch(enableSpectrumCmd(m.c, m.sel, 64), tickCmd())
 	}
 	return m, nil
 }
