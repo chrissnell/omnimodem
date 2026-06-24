@@ -70,7 +70,49 @@ service ModemControl {
 message ConfigureChannelRequest {
   uint32 channel = 1;     // logical channel id; reused id updates in place
   string name = 2;        // operator-facing label
-  string mode = 3;        // Phase 1 placeholder, e.g. "none"
+  // Mode selector. A bare label ("cw", "ft8", "psk31") resolves with default
+  // parameters; a parametric form ("cw:wpm=25,tone=600") overrides individual
+  // params. Prefer the typed `mode_params` below for parametric modes — when set,
+  // it is authoritative and supplies both the mode and its parameters.
+  string mode = 3;
+  // Optional structured per-mode parameters (channel-config protocol expansion).
+  // When present, its oneof variant selects the mode and its values; `mode` is
+  // then ignored. Absent ⇒ the `mode` string is used as-is (backward compatible).
+  ModeParams mode_params = 4;
+}
+
+// Typed per-mode parameters. The set oneof variant selects the mode.
+message ModeParams {
+  oneof params {
+    CwParams cw = 1;
+    RttyParams rtty = 2;
+    Psk31Params psk31 = 3;
+    OliviaParams olivia = 4;
+    Afsk1200Params afsk1200 = 5;
+  }
+}
+
+message CwParams {
+  uint32 wpm = 1;       // words per minute
+  float  tone_hz = 2;   // sidetone / mark frequency
+}
+
+message RttyParams {
+  float baud = 1;       // symbol rate (e.g. 45.45)
+  float shift_hz = 2;   // mark/space shift (e.g. 170)
+}
+
+message Psk31Params {
+  float center_hz = 1;  // audio center frequency
+}
+
+message OliviaParams {
+  uint32 tones = 1;         // number of tones (e.g. 32)
+  uint32 bandwidth_hz = 2;  // bandwidth in Hz (e.g. 1000)
+}
+
+message Afsk1200Params {
+  bool tx = 1;          // enable the transmit modulator
 }
 
 message ConfigureChannelResponse {

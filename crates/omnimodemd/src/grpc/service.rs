@@ -44,11 +44,12 @@ impl ModemControl for ControlService {
         if req.name.is_empty() {
             return Err(Status::invalid_argument("channel name must not be empty"));
         }
+        let mode = effective_mode(req.mode, req.mode_params);
         let (tx, rx) = oneshot::channel();
         self.send_command(Command::ConfigureChannel {
             id: ChannelId(req.channel),
             name: req.name,
-            mode: req.mode,
+            mode,
             reply: tx,
         })?;
         rx.await
@@ -340,14 +341,53 @@ fn is_packet_mode(mode: &str) -> bool {
     matches!(mode, "afsk1200")
 }
 
+/// Resolve a `ConfigureChannel` request's mode. Typed `mode_params`, when present,
+/// is authoritative: its oneof variant selects the mode and supplies its
+/// parameters, encoded into the canonical mode string the core persists. Absent ⇒
+/// the `mode` string is used unchanged (backward compatible).
+fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
+    use crate::mode::ModeConfig;
+    use proto::mode_params::Params;
+    let Some(p) = params.and_then(|p| p.params) else {
+        return mode;
+    };
+    match p {
+        Params::Cw(c) => ModeConfig::Cw { wpm: c.wpm as u16, tone_hz: c.tone_hz }.to_mode_string(),
+        Params::Rtty(r) => {
+            ModeConfig::Rtty { baud: r.baud, shift_hz: r.shift_hz }.to_mode_string()
+        }
+        Params::Psk31(p) => ModeConfig::Psk31 { center_hz: p.center_hz }.to_mode_string(),
+        Params::Olivia(o) => {
+            ModeConfig::Olivia { tones: o.tones as u16, bandwidth_hz: o.bandwidth_hz as u16 }
+                .to_mode_string()
+        }
+        Params::Afsk1200(a) => ModeConfig::Afsk1200 { tx: a.tx }.to_mode_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_packet_mode;
+    use super::{effective_mode, is_packet_mode};
+    use crate::proto;
 
     #[test]
     fn only_afsk_is_a_packet_mode() {
         assert!(is_packet_mode("afsk1200"));
         assert!(!is_packet_mode("ft8"));
         assert!(!is_packet_mode("none"));
+    }
+
+    #[test]
+    fn effective_mode_passes_bare_string_through() {
+        assert_eq!(effective_mode("ft8".into(), None), "ft8");
+        assert_eq!(effective_mode("cw".into(), Some(proto::ModeParams { params: None })), "cw");
+    }
+
+    #[test]
+    fn effective_mode_encodes_typed_params_to_canonical_string() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Cw(proto::CwParams { wpm: 25, tone_hz: 600.0 })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "cw:wpm=25,tone=600");
     }
 }
