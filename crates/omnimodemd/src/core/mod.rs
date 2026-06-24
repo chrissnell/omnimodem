@@ -446,6 +446,17 @@ fn configure_audio(
         AudioBinding { rx_dev: device_id, tx_dev: tx_device_id, tx_rate },
     );
     live.gains.entry(id).or_default(); // default unity until SetAudioGain
+
+    // A re-bind supersedes any workers already running for this channel: drop them
+    // so the try_spawn_workers calls (after this, and after the ptt step) rebuild
+    // them against the fresh capture/sink AND the channel's current mode. Without
+    // this, reconfiguring — e.g. switching modes — left the old RX/TX workers (and
+    // the TX worker's old modulator) running, so RX decoding and the transmitted
+    // audio never changed. try_spawn_workers consumed the prior capture/sink into
+    // those workers, so dropping them also releases the stale streams.
+    live.rx_workers.remove(&id);
+    live.tx_workers.remove(&id);
+
     Ok(ConfigureAudioOk { rx_rate, tx_rate })
 }
 
@@ -1203,6 +1214,58 @@ mod tests {
             .await
             .expect("TransmitComplete within timeout");
             assert_eq!(done, TransmitId(1));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    async fn configure_ptt_ch(core: &CoreHandle, id: ChannelId, dev: DeviceId) {
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::ConfigurePtt {
+                id,
+                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false },
+                reply: tx,
+            })
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    async fn key_ptt_call(core: &CoreHandle, channel: ChannelId) -> Result<(), CoreError> {
+        let (tx, rx) = oneshot::channel();
+        core.commands
+            .send(Command::KeyPtt { channel, keyed: true, reply: tx })
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    // Reconfiguring a channel must rebuild its workers. A moded channel's TX
+    // worker owns PTT, so manual KeyPtt is rejected; after re-binding the channel
+    // to None the stale worker must be gone and KeyPtt allowed again. Without the
+    // re-bind teardown the old worker — and its modulator — survive, which is why
+    // switching modes produced no audible change.
+    #[test]
+    fn reconfiguring_a_channel_rebuilds_its_workers() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
+            // The moded TX worker owns PTT, so a manual key is rejected.
+            assert!(key_ptt_call(&core, ChannelId(0)).await.is_err());
+
+            // Re-bind to None: the re-bind must tear the old TX worker down.
+            configure_channel(&core, ChannelId(0), "none").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
+            // Worker gone -> manual key is allowed again.
+            assert!(key_ptt_call(&core, ChannelId(0)).await.is_ok());
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
