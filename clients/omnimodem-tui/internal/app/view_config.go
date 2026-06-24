@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // devEntry is a list.Item (and list.DefaultItem) for a device.
@@ -58,6 +59,7 @@ type configView struct {
 func newDevList(title string) list.Model {
 	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	l.Title = title
+	l.SetShowTitle(false)  // the modal frame supplies the title
 	l.SetShowHelp(false)
 	l.SetShowStatusBar(false)
 	return l
@@ -293,15 +295,20 @@ func (v *configView) Render(w, h int) string {
 		mark(fMethod, "method ‹ "+methodLabel(v.method())+" › (←/→)") + "\n")
 	b.WriteString(mark(fApply, "Apply   "+applyHint(v.canApply())) + "\n\n")
 
-	// Show the device list for whichever device field is focused (RX by default).
+	// The device list for the focused field (RX by default) renders inside a
+	// bordered modal box so it stands apart from the form text above.
 	lst, label := v.activeList()
+	modalW := w
+	if modalW > 64 {
+		modalW = 64
+	}
 	listH := h - 9
 	if listH < 3 {
 		listH = 3
 	}
-	lst.SetSize(w, listH)
-	b.WriteString(ui.Dim.Render(label+" — <enter> choose · </> filter") + "\n")
-	b.WriteString(lst.View())
+	lst.SetSize(modalW-4, listH)
+	box := ui.Modal(label+"  ‹enter› choose · ‹/› filter", lst.View(), modalW)
+	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, box))
 	return b.String()
 }
 
