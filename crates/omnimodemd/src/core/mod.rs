@@ -710,6 +710,9 @@ fn poll_hotplug(
                     live.rx_workers.remove(&c); // stop RX on the departed rig
                     live.tx_workers.remove(&c);
                     live.metrics.remove(&c);
+                    // Drop the spectrum control so a replugged device starts with
+                    // the waterfall OFF rather than silently resuming the FFT.
+                    live.spectra.remove(&c);
                     lease.release_all(c); // free any lease held on the gone rig
                 }
                 let ptt_chans: Vec<ChannelId> = live

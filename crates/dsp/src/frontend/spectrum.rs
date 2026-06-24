@@ -54,6 +54,10 @@ impl SpectrumPlan {
     /// Build the geometry. `rate` is the *sample rate of the tapped samples* (the
     /// demod native rate), `nfft` the FFT length. `req_bin_count` is clamped down
     /// to the number of FFT bins inside `[freq_lo, freq_hi]` (never up-sampled).
+    ///
+    /// `freq_lo`/`freq_hi` are clamped to `[0, rate/2]`; equal or inverted edges
+    /// snap to a minimal window (one output bin over two FFT bins) rather than
+    /// erroring, so a degenerate request still yields a valid line.
     pub fn new(
         nfft: usize,
         rate: f32,
@@ -65,8 +69,13 @@ impl SpectrumPlan {
     ) -> Self {
         let nyq_bin = nfft / 2;
         let bin_res = rate / nfft as f32; // Hz per FFT bin
-        let lo = freq_lo.max(0.0);
-        let hi = freq_hi.max(0.0);
+        // Clamp the window to [0, Nyquist] so axis labels can't run past the data
+        // even when a caller passes raw, unclamped edges directly.
+        let nyq_hz = rate / 2.0;
+        let freq_lo = freq_lo.clamp(0.0, nyq_hz);
+        let freq_hi = freq_hi.clamp(0.0, nyq_hz);
+        let lo = freq_lo;
+        let hi = freq_hi;
         let mut lo_bin = (lo / bin_res).floor() as usize;
         let mut hi_bin = (hi / bin_res).ceil() as usize;
         lo_bin = lo_bin.min(nyq_bin);
@@ -237,6 +246,16 @@ mod tests {
         let setup = SpectrumSetup::resolve(12_000, 256, 2048, 15, 0.0, 0.0);
         assert_eq!(setup.hop, 800);
         assert_eq!(setup.rate_hz, 15);
+    }
+
+    #[test]
+    fn out_of_range_window_is_clamped_to_nyquist() {
+        // A high edge above Nyquist must be clamped: labels stay within the data
+        // (Nyquist = 24 kHz at 48 kHz), instead of running up to the raw 40 kHz.
+        let plan = SpectrumPlan::new(2048, 48_000.0, 64, 10_000.0, 40_000.0, -120.0, 0.0);
+        let max_label = plan.freq_start_hz + (plan.bin_count as f32 - 1.0) * plan.freq_step_hz;
+        assert!(max_label <= 24_000.0, "max label {max_label} exceeds Nyquist 24 kHz");
+        assert!(plan.freq_start_hz >= 10_000.0, "low edge should be preserved");
     }
 
     #[test]

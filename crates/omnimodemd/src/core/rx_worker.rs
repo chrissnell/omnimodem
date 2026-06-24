@@ -285,9 +285,13 @@ impl SpectrumTap {
         for frame in self.stft.feed(samples) {
             let half = half_spectrum_dbfs(&frame, self.stft.window_sum());
             let bins = self.plan.render(&half);
+            let timestamp_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             let _ = telemetry.send(TelemetryEvent::SpectrumFrame {
                 channel: self.channel,
-                timestamp_ns: 0,
+                timestamp_ns,
                 freq_start_hz: self.plan.freq_start_hz,
                 freq_step_hz: self.plan.freq_step_hz,
                 db_floor: self.plan.db_floor,
@@ -678,10 +682,11 @@ mod tests {
 
         let mut lines = Vec::new();
         while let Ok(ev) = tele_rx.try_recv() {
-            if let TelemetryEvent::SpectrumFrame { channel, bins, freq_step_hz, .. } = ev {
+            if let TelemetryEvent::SpectrumFrame { channel, bins, freq_step_hz, timestamp_ns, .. } = ev {
                 assert_eq!(channel, ChannelId(7));
                 assert_eq!(bins.len(), 64, "expected 64 output bins");
                 assert!(freq_step_hz > 0.0);
+                assert!(timestamp_ns > 0, "frame should carry a wall-clock timestamp");
                 lines.push(bins);
             }
         }
