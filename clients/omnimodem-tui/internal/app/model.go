@@ -5,16 +5,9 @@ import (
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
-)
-
-type screen int
-
-const (
-	screenConnect screen = iota
-	screenDashboard
-	screenConfig
-	screenOperate
+	"github.com/charmbracelet/lipgloss"
 )
 
 // chanLive is the per-channel live state, fed by the event stream.
@@ -30,27 +23,26 @@ type chanLive struct {
 	clockOff  float64
 }
 
-// Model is the Elm root. Screens read/write the shared fields; only Update mutates.
+// Model is the root window manager: it owns the client, the event stream, shared
+// live state, terminal size, a stack of Views, and a transient toast. It renders
+// chrome (header/footer/toast) around the active view.
 type Model struct {
 	c         client.ModemClient
 	addr      string
-	screen    screen
+	version   string
 	width     int
 	height    int
-	err       string
 	live      map[uint32]*chanLive
-	sel       uint32 // selected channel
+	sel       uint32
 	events    <-chan *pb.Event
-	cancel    context.CancelFunc // tears down the event-stream goroutine on quit
+	cancel    context.CancelFunc
 	connected bool
-
-	// sub-screen state, attached on entry to that screen.
-	cfg *configState
-	op  *operateState
+	stack     []View
+	toast     *ui.Toast
 }
 
 func New(c client.ModemClient, addr string) *Model {
-	return &Model{c: c, addr: addr, screen: screenConnect, live: map[uint32]*chanLive{}}
+	return &Model{c: c, addr: addr, version: "dev", live: map[uint32]*chanLive{}}
 }
 
 func (m *Model) Init() tea.Cmd { return connectCmd(m.c) }
@@ -95,67 +87,79 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
+		switch msg.String() {
+		case "ctrl+c":
 			if m.cancel != nil {
-				m.cancel() // stop the event-stream goroutine before exiting
+				m.cancel()
 			}
 			return m, tea.Quit
+		case "esc":
+			// Let the active view tear down (e.g. operate halts TX / stops the
+			// spectrum), then pop. Only "esc" is global "back" — "q" is left for
+			// views (text fields need it; Channels maps it to quit).
+			if len(m.stack) > 1 {
+				v := m.top()
+				nv, cmd := v.Update(msg)
+				m.stack[len(m.stack)-1] = nv
+				m.pop()
+				return m, cmd
+			}
 		}
-		return m.updateScreen(msg)
+		return m.routeToView(msg)
 	case connectedMsg:
 		m.connected = true
-		m.screen = screenDashboard
 		m.events = msg.events
 		m.cancel = msg.cancel
+		m.stack = []View{newChannelsView(m)}
 		return m, tea.Batch(snapshotCmd(m.c), waitForEvent(m.events), tickCmd())
 	case eventMsg:
-		// Operate screen consumes some events (spectrum, tx-complete) before the
-		// central fold; give it first refusal while on that screen.
-		if m.screen == screenOperate {
-			return m.updateOperate(msg)
-		}
 		m.applyEvent(msg.ev)
-		return m, waitForEvent(m.events)
+		_, cmd := m.routeToView(msg) // let the active view react too
+		return m, tea.Batch(cmd, waitForEvent(m.events))
 	case eventClosedMsg:
 		m.connected = false
-		m.err = "event stream closed"
+		m.toast = ui.NewToast("event stream closed", ui.SeverityError)
 		return m, nil
 	case snapshotMsg:
 		m.applyEvent(&pb.Event{Kind: &pb.Event_Snapshot{Snapshot: msg.state}})
 		return m, nil
 	case rpcErrMsg:
-		m.err = msg.err.Error()
+		m.toast = ui.NewToast(msg.err.Error(), ui.SeverityError)
 		return m, nil
 	case tickMsg:
-		return m.updateScreen(msg)
+		if m.toast != nil && m.toast.Expired() {
+			m.toast = nil
+		}
+		_, cmd := m.routeToView(msg)
+		return m, tea.Batch(cmd, tickCmd())
 	}
-	return m.updateScreen(msg)
+	return m.routeToView(msg)
 }
 
-// updateScreen dispatches to the active screen's handler.
-func (m *Model) updateScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch m.screen {
-	case screenConfig:
-		return m.updateConfig(msg)
-	case screenOperate:
-		return m.updateOperate(msg)
-	case screenDashboard:
-		return m.updateDashboard(msg)
+func (m *Model) routeToView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if v := m.top(); v != nil {
+		nv, cmd := v.Update(msg)
+		m.stack[len(m.stack)-1] = nv
+		return m, cmd
 	}
 	return m, nil
 }
 
 func (m *Model) View() string {
-	body := ""
-	switch m.screen {
-	case screenConnect:
-		body = "Connecting to " + m.addr + " …"
-	case screenDashboard:
-		body = m.viewDashboard()
-	case screenConfig:
-		body = m.viewConfig()
-	case screenOperate:
-		body = m.viewOperate()
+	if !m.connected || len(m.stack) == 0 {
+		return "Connecting to " + m.addr + " …"
 	}
-	return body + "\n" + m.statusBar()
+	v := m.top()
+	header := ui.Header(m.connected, m.addr, m.version, m.width)
+	footer := ui.Footer(v.Hints(), m.width)
+	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	if bodyH < 3 {
+		bodyH = 3
+	}
+	body := ui.Frame(v.Title(), v.Render(m.width-4, bodyH-2), true, m.width, bodyH)
+	out := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	if m.toast != nil {
+		out += "\n" + m.toast.Line()
+	}
+	return out
 }
