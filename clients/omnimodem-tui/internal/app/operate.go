@@ -46,22 +46,27 @@ func (m *Model) enterOperate() {
 	m.op = op
 }
 
-// ft8Send transmits the current ladder message, logs the QSO when it reaches
-// 73/RR73, then advances the ladder.
+// ft8Send transmits the next message and starts the TX FSM. With no DX worked
+// yet it (re)sends CQ without advancing — CQ is not a ladder step. With a DX
+// target it sends the current ladder message, logs the QSO exactly once as it
+// sends RR73, then advances.
 func (m *Model) ft8Send() tea.Cmd {
 	if m.op.tx.active() {
 		return nil
 	}
 	seq := m.op.seq
-	msg := seq.current()
+	var msg string
 	if seq.dxCall == "" {
-		msg = seq.cq()
-	} else if seq.finished() {
-		m.op.qlog.add(seq.dxCall, seq.dxGrid, m.op.rst)
+		msg = seq.cq() // calling CQ: not a ladder step, do not advance
+	} else {
+		msg = seq.current()
+		if seq.step == ladderRR73Step { // RR73 → QSO complete; log once
+			m.op.qlog.add(seq.dxCall, seq.dxGrid, m.op.rst)
+		}
+		seq.advance()
 	}
 	m.op.transcript = append(m.op.transcript, transcriptLine{t: time.Now(), dir: '›', txt: msg})
 	m.op.tx.begin([]byte(msg))
-	seq.advance()
 	return acquireLeaseCmd(m.c, m.sel)
 }
 
@@ -78,6 +83,13 @@ func (m *Model) updateOperate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applyEvent(msg.ev)
 		return m, waitForEvent(m.events)
+	case spectrumCfgMsg:
+		// Seed the waterfall axis from the daemon's clamped params, before the
+		// first SpectrumFrame arrives.
+		m.op.wf.enabled = true
+		m.op.wf.freqStart = msg.resp.GetFreqStartHz()
+		m.op.wf.freqStep = msg.resp.GetFreqStepHz()
+		return m, nil
 	case leaseMsg:
 		if msg.resp.GetGranted() {
 			m.op.tx.onLeaseGranted()

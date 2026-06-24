@@ -13,6 +13,10 @@ type ft8Seq struct {
 	step           int
 }
 
+// ladderRR73Step is the ladder step that sends RR73 — i.e. the point at which
+// the QSO is complete and should be logged exactly once.
+const ladderRR73Step = 3
+
 func newFT8Seq(myCall, myGrid string) *ft8Seq {
 	return &ft8Seq{myCall: myCall, myGrid: myGrid, report: -10}
 }
@@ -38,9 +42,6 @@ func (s *ft8Seq) current() string {
 
 // cq is the calling message (Tx6).
 func (s *ft8Seq) cq() string { return fmt.Sprintf("CQ %s %s", s.myCall, s.myGrid) }
-
-// finished reports whether the ladder has reached RR73/73 (→ prompt a log entry).
-func (s *ft8Seq) finished() bool { return s.step >= 3 }
 
 // slotPosition returns seconds into the current 15 s FT8 slot (0..15).
 func slotPosition(at time.Time) float64 {

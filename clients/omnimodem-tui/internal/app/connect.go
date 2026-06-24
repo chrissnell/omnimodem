@@ -8,13 +8,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type connectedMsg struct{ events <-chan *pb.Event }
+type connectedMsg struct {
+	events <-chan *pb.Event
+	cancel context.CancelFunc
+}
 
 // connectCmd opens the event stream (the act of subscribing also proves the
-// daemon is reachable; the first event is the snapshot).
+// daemon is reachable; the first event is the snapshot). The returned cancel
+// func tears the stream goroutine down on quit.
 func connectCmd(c client.ModemClient) tea.Cmd {
 	return func() tea.Msg {
-		ch := startEventStream(context.Background(), c)
-		return connectedMsg{events: ch}
+		ctx, cancel := context.WithCancel(context.Background())
+		ch := startEventStream(ctx, c)
+		return connectedMsg{events: ch, cancel: cancel}
 	}
 }

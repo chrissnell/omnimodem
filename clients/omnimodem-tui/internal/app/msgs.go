@@ -18,6 +18,8 @@ type snapshotMsg struct{ state *pb.ModemState }
 type devicesMsg struct{ devices []*pb.DeviceInfo }
 type rpcOKMsg struct{ what string } // generic "mutating RPC succeeded"
 type rpcErrMsg struct{ err error }  // any RPC failure
+type channelBoundMsg struct{} // ConfigureChannel succeeded → chain audio
+type pttBoundMsg struct{}     // ConfigurePtt succeeded → bind complete
 type audioCfgMsg struct{ resp *pb.ConfigureAudioResponse }
 type spectrumCfgMsg struct{ resp *pb.ConfigureSpectrumResponse }
 type leaseMsg struct{ resp *pb.TxLeaseResponse }

@@ -47,7 +47,7 @@ func TestConfigChainsAudioThenPtt(t *testing.T) {
 	m.cfg.rxDev = "usb:1:2:"
 
 	// channel ok → audio
-	if _, cmd := m.updateConfig(rpcOKMsg{what: "channel"}); cmd != nil {
+	if _, cmd := m.updateConfig(channelBoundMsg{}); cmd != nil {
 		cmd()
 	}
 	if len(f.AudioCalls) != 1 {

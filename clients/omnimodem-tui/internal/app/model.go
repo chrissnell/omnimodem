@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,6 +41,7 @@ type Model struct {
 	live      map[uint32]*chanLive
 	sel       uint32 // selected channel
 	events    <-chan *pb.Event
+	cancel    context.CancelFunc // tears down the event-stream goroutine on quit
 	connected bool
 
 	// sub-screen state, attached on entry to that screen.
@@ -93,6 +96,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			if m.cancel != nil {
+				m.cancel() // stop the event-stream goroutine before exiting
+			}
 			return m, tea.Quit
 		}
 		return m.updateScreen(msg)
@@ -100,6 +106,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connected = true
 		m.screen = screenDashboard
 		m.events = msg.events
+		m.cancel = msg.cancel
 		return m, tea.Batch(snapshotCmd(m.c), waitForEvent(m.events), tickCmd())
 	case eventMsg:
 		// Operate screen consumes some events (spectrum, tx-complete) before the

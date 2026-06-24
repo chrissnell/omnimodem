@@ -54,7 +54,7 @@ func (m *Model) applyConfig() tea.Cmd {
 		if err := c.ConfigureChannel(ctx, req); err != nil {
 			return rpcErrMsg{err}
 		}
-		return rpcOKMsg{what: "channel"}
+		return channelBoundMsg{}
 	}
 }
 
@@ -85,7 +85,7 @@ func (m *Model) configurePttCmd() tea.Cmd {
 		if err := c.ConfigurePtt(ctx, req); err != nil {
 			return rpcErrMsg{err}
 		}
-		return rpcOKMsg{what: "ptt"}
+		return pttBoundMsg{}
 	}
 }
 
@@ -122,19 +122,18 @@ func (m *Model) updateConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case devicesMsg:
 		m.cfg.devices = msg.devices
 		return m, nil
+	case channelBoundMsg:
+		return m, m.configureAudioCmd() // chain audio after channel
+	case audioCfgMsg:
+		return m, m.configurePttCmd() // chain ptt after audio
+	case pttBoundMsg:
+		m.screen = screenDashboard // bind complete
+		return m, snapshotCmd(m.c)
 	case rpcOKMsg:
-		switch {
-		case msg.what == "channel":
-			return m, m.configureAudioCmd() // chain audio after channel
-		case msg.what == "ptt":
-			m.screen = screenDashboard // bind complete
-			return m, snapshotCmd(m.c)
-		case strings.HasPrefix(msg.what, "udev:"):
+		if strings.HasPrefix(msg.what, "udev:") {
 			m.cfg.udev = strings.TrimPrefix(msg.what, "udev:")
 		}
 		return m, nil
-	case audioCfgMsg:
-		return m, m.configurePttCmd() // chain ptt after audio
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
