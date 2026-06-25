@@ -15,8 +15,10 @@ var (
 	ColorFg     = lipgloss.Color("15") // bright white: body text
 	ColorTitle  = lipgloss.Color("11") // bright yellow: titles, headers, hotkeys
 	ColorPanel  = lipgloss.Color("0")  // black: panel / desktop background
-	ColorBar    = lipgloss.Color("4")  // blue: top menu + bottom status toolbars
-	ColorSel    = lipgloss.Color("12") // bright blue: selected-row bar
+	// Dark blues from the fixed 256-palette (indices 16+ aren't remapped by the
+	// terminal theme, so they stay blue instead of drifting cyan like ANSI 4/12).
+	ColorBar = lipgloss.Color("18") // dark blue (#000087): menu + status toolbars
+	ColorSel = lipgloss.Color("19") // dark blue (#0000af): selected-row bar
 )
 
 var (
