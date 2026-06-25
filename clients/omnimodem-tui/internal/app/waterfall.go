@@ -8,10 +8,32 @@ import (
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ramp maps a 0..255 intensity to a density glyph (low→high).
 var ramp = []rune{' ', '·', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+
+// wfStyles is a classic waterfall colormap (low→high: navy → blue → cyan →
+// green → yellow → orange → red), built once from fixed 256-palette indices so
+// the colors don't shift with the terminal theme.
+var wfStyles = func() []lipgloss.Style {
+	idx := []string{"17", "19", "21", "33", "45", "51", "46", "118", "226", "220", "208", "196"}
+	s := make([]lipgloss.Style, len(idx))
+	for i, c := range idx {
+		s[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(c))
+	}
+	return s
+}()
+
+// wfColorIdx maps a 0..255 intensity to a colormap index.
+func wfColorIdx(v byte) int {
+	i := int(v) * len(wfStyles) / 256
+	if i >= len(wfStyles) {
+		i = len(wfStyles) - 1
+	}
+	return i
+}
 
 // wfHistory bounds how many recent spectrum lines the waterfall keeps.
 const wfHistory = 16
@@ -60,12 +82,38 @@ func spectrumLine(bins []byte, width int) string {
 	if len(bins) == 0 {
 		return strings.Repeat(" ", width)
 	}
-	var b strings.Builder
+	// Color each glyph by intensity, coalescing consecutive same-color cells into
+	// one styled span so a line emits few escape codes. Blank (silent) cells get
+	// no color — a space carries no ink anyway.
+	var out strings.Builder
+	var run strings.Builder
+	cur := -1 // current colormap index, -1 == uncolored
+	flush := func() {
+		if run.Len() == 0 {
+			return
+		}
+		if cur < 0 {
+			out.WriteString(run.String())
+		} else {
+			out.WriteString(wfStyles[cur].Render(run.String()))
+		}
+		run.Reset()
+	}
 	for x := 0; x < width; x++ {
 		v := bins[x*len(bins)/width]
-		b.WriteRune(ramp[int(v)*(len(ramp)-1)/255])
+		g := ramp[int(v)*(len(ramp)-1)/255]
+		col := -1
+		if g != ' ' {
+			col = wfColorIdx(v)
+		}
+		if col != cur {
+			flush()
+			cur = col
+		}
+		run.WriteRune(g)
 	}
-	return b.String()
+	flush()
+	return out.String()
 }
 
 // axis labels the displayed frequency span under the waterfall.
