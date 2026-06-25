@@ -71,15 +71,30 @@ impl Modulator for Psk31Mod {
 /// the stream is noise, so the buffer is dropped rather than growing unbounded.
 const MAX_PENDING_BITS: usize = 512;
 
+/// Carrier-detect (squelch) smoothing and the minimum in-phase energy fraction
+/// that counts as a locked PSK31 carrier. A real signal sits on the I axis
+/// (fraction → 1); white noise spreads evenly across I and Q (fraction ≈ 0.5),
+/// so decoding only runs above the threshold — no characters off the noise floor.
+const CARRIER_EMA: f32 = 0.05;
+const CARRIER_OPEN: f32 = 0.75;
+/// Absolute energy floor so true digital silence reads as "no carrier".
+const CARRIER_FLOOR: f32 = 1e-6;
+
 pub struct Psk31Demod {
     center_hz: f32,
     nco: DownConverter,
     costas: CostasLoop,
     gardner: GardnerTed,
-    // Integrate-and-dump accumulator over the current symbol (matched filter).
+    // Integrate-and-dump accumulators over the current symbol (matched filter):
+    // I carries the data, Q is used only for carrier detection.
     acc_i: f32,
+    acc_q: f32,
     prev_i: f32,
     have_prev: bool,
+    // Smoothed in-phase / quadrature symbol energy for the squelch. A locked
+    // PSK31 carrier sits on the I axis (e_i >> e_q); noise spreads evenly.
+    e_i: f32,
+    e_q: f32,
     /// Previous reversal bit, for the incremental second differential layer.
     diff_prev: u8,
     /// Varicode data bits not yet resolved into a completed character; drained
@@ -98,8 +113,11 @@ impl Psk31Demod {
             costas: CostasLoop::new(0.01, 0.02),
             gardner: GardnerTed::new(rate / PSK31_BAUD),
             acc_i: 0.0,
+            acc_q: 0.0,
             prev_i: 0.0,
             have_prev: false,
+            e_i: 0.0,
+            e_q: 0.0,
             diff_prev: 0,
             pending: Vec::new(),
             sample_index: 0,
@@ -154,12 +172,28 @@ impl Demodulator for Psk31Demod {
             self.sample_index += 1;
             let bb = self.nco.push(x);
             let derot = self.costas.process(bb);
-            // Integrate the de-rotated I across the symbol for matched-filter
+            // Integrate the de-rotated I/Q across the symbol for matched-filter
             // SNR gain; Gardner still times off the instantaneous sample.
             self.acc_i += derot.re;
+            self.acc_q += derot.im;
             if self.gardner.feed(derot.re).is_some() {
                 let sym = self.acc_i;
+                let q = self.acc_q;
                 self.acc_i = 0.0;
+                self.acc_q = 0.0;
+                // Carrier detect: track the smoothed I/Q energy split. A locked
+                // PSK31 carrier concentrates on I; noise spreads evenly. Below the
+                // threshold there's no signal, so drop any partial codeword and
+                // resync the differential decoder instead of emitting noise.
+                self.e_i += CARRIER_EMA * (sym * sym - self.e_i);
+                self.e_q += CARRIER_EMA * (q * q - self.e_q);
+                let energy = self.e_i + self.e_q;
+                if energy < CARRIER_FLOOR || self.e_i < CARRIER_OPEN * energy {
+                    self.pending.clear();
+                    self.have_prev = false;
+                    self.prev_i = 0.0;
+                    continue;
+                }
                 // Differential BPSK symbol = phase reversal vs. the previous
                 // symbol. `diff_bpsk_encode` flips polarity on a data `1`, so a
                 // reversal (sign change) decodes to symbol `1`.
@@ -238,6 +272,18 @@ mod tests {
         let frames = rx.feed(&samples);
         let text = recovered_text(&frames);
         assert!(text.contains(msg), "recovered: {text:?}");
+    }
+
+    #[test]
+    fn noise_does_not_decode() {
+        // Pure white noise carries no PSK31 carrier; the squelch must keep it from
+        // dribbling out characters off the noise floor.
+        let mut rng = crate::testutil::Rng::new(0xC0FFEE);
+        let mut noise = vec![0.0f32; PSK31_RATE as usize * 2]; // 2 s
+        crate::testutil::add_awgn(&mut noise, 0.3, &mut rng);
+        let mut rx = Psk31Demod::new(1000.0);
+        let text = recovered_text(&rx.feed(&noise));
+        assert!(text.len() <= 2, "noise should stay squelched, decoded {text:?}");
     }
 
     #[test]
