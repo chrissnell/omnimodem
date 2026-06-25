@@ -42,9 +42,9 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::None => DemodKind::None,
         ModeConfig::Afsk1200 { .. } => DemodKind::Streaming(Box::new(Afsk1200Demod::ensemble(9))),
         ModeConfig::Cw { wpm, tone_hz } => DemodKind::Streaming(Box::new(CwDemod::new(*wpm, *tone_hz))),
-        ModeConfig::Rtty { baud, shift_hz } => {
-            DemodKind::Streaming(Box::new(RttyDemod::new(*baud, *shift_hz)))
-        }
+        ModeConfig::Rtty { baud, shift_hz, center_hz, reverse } => DemodKind::Streaming(Box::new(
+            RttyDemod::with_center(*baud, *shift_hz, *center_hz).reversed(*reverse),
+        )),
         ModeConfig::Psk31 { center_hz } => {
             DemodKind::Streaming(Box::new(Psk31Demod::new(*center_hz)))
         }
@@ -76,7 +76,9 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::None => Some(Box::new(NullMode)),
         ModeConfig::Afsk1200 { .. } => Some(Box::new(Afsk1200Mod::new())),
         ModeConfig::Cw { wpm, tone_hz } => Some(Box::new(CwMod::new(*wpm, *tone_hz))),
-        ModeConfig::Rtty { baud, shift_hz } => Some(Box::new(RttyMod::new(*baud, *shift_hz))),
+        ModeConfig::Rtty { baud, shift_hz, center_hz, .. } => {
+            Some(Box::new(RttyMod::with_center(*baud, *shift_hz, *center_hz)))
+        }
         ModeConfig::Psk31 { center_hz } => Some(Box::new(Psk31Mod::new(*center_hz))),
         ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
         ModeConfig::Ft4 => Some(Box::new(Ft4Mod::new())),
@@ -152,7 +154,7 @@ mod tests {
             ModeConfig::Afsk1200 { tx: true },
             ModeConfig::Ft8,
             ModeConfig::Cw { wpm: 20, tone_hz: 700.0 },
-            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 },
+            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0, reverse: false },
             ModeConfig::Psk31 { center_hz: 1000.0 },
         ] {
             assert!(build_modulator(&cfg).is_some(), "no modulator for {cfg:?}");

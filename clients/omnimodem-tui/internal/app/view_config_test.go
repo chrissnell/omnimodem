@@ -27,6 +27,41 @@ func TestConfigNameAcceptsLettersAndSpace(t *testing.T) {
 	}
 }
 
+// Up/Down arrows must traverse the form fields (not just Tab/Shift-Tab).
+func TestConfigArrowsTraverseFields(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	if v.focus != fName {
+		t.Fatalf("initial focus should be Name, got %d", v.focus)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if v.focus != fCall {
+		t.Fatalf("down should advance to Call, got %d", v.focus)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if v.focus != fName {
+		t.Fatalf("up should return to Name, got %d", v.focus)
+	}
+}
+
+// The Grid field exists and edits the operator's station locator (uppercased).
+func TestConfigGridFieldSetsStationGrid(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	v.Update(tea.KeyMsg{Type: tea.KeyDown}) // -> Call
+	v.Update(tea.KeyMsg{Type: tea.KeyDown}) // -> Grid
+	if v.focus != fGrid {
+		t.Fatalf("expected Grid focus, got %d", v.focus)
+	}
+	v.grid.SetValue("")
+	for _, r := range "em10" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.myGrid != "EM10" {
+		t.Fatalf("grid must sync to the model uppercased, got %q", m.myGrid)
+	}
+}
+
 // The device picker is a modal: hidden until a device field is opened with
 // enter, shown while picking, and gone again once a device is chosen.
 func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {

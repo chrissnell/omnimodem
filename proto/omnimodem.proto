@@ -100,6 +100,8 @@ message CwParams {
 message RttyParams {
   float baud = 1;       // symbol rate (e.g. 45.45)
   float shift_hz = 2;   // mark/space shift (e.g. 170)
+  float center_hz = 3;  // audio center; 0 ⇒ default (2210 Hz, US ham RTTY)
+  bool  reverse = 4;    // swap mark/space (reverse RTTY; depends on sideband)
 }
 
 message Psk31Params {
@@ -185,6 +187,7 @@ message SpectrumFrame {
   float  db_floor      = 5;   // dBFS mapped to bin value 0
   float  db_ceiling    = 6;   // dBFS mapped to bin value 255
   bytes  bins          = 7;   // uint8 quantized dBFS, len == bin_count, low->high freq
+  bool   transmit      = 8;   // true: transmitted (TX) spectrum; false: received (RX)
 }
 
 message ChannelConfigured { uint32 channel = 1; }

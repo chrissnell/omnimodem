@@ -3,19 +3,36 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Palette — one small, consistent set of colors used across the app.
+// A BBS-reader inspired 16-color DOS palette: a black desktop with bright-cyan
+// double borders, blue toolbars (top menu + bottom status bar), bright-yellow
+// titles/hotkeys, white body text, and a white-on-bright-blue selection bar.
+// Using the ANSI 0–15 slots keeps it faithful on any terminal.
 var (
-	ColorAccent = lipgloss.Color("39")  // bright blue: focus, selection
-	ColorDim    = lipgloss.Color("241") // muted: borders, hints
-	ColorError  = lipgloss.Color("203") // red: error toasts
-	ColorOK     = lipgloss.Color("78")  // green: connected/OK
-	ColorFg     = lipgloss.Color("252")
+	ColorAccent = lipgloss.Color("14") // bright cyan: borders, focus, links
+	ColorDim    = lipgloss.Color("8")  // gray: hints
+	ColorError  = lipgloss.Color("9")  // bright red: errors
+	ColorOK     = lipgloss.Color("10") // bright green: connected/OK
+	ColorFg     = lipgloss.Color("15") // bright white: body text
+	ColorTitle  = lipgloss.Color("11") // bright yellow: titles, headers, hotkeys
+	ColorPanel  = lipgloss.Color("16") // true black (#000000, fixed 256-palette so the
+	//                                    terminal theme can't render it dark grey)
+	// Dark blues from the fixed 256-palette (indices 16+ aren't remapped by the
+	// terminal theme, so they stay blue instead of drifting cyan like ANSI 4/12).
+	ColorBar = lipgloss.Color("18") // dark blue (#000087): menu + status toolbars
+	ColorSel = lipgloss.Color("19") // dark blue (#0000af): selected-row bar
 )
 
 var (
-	Accent     = lipgloss.NewStyle().Foreground(ColorAccent)
-	Dim        = lipgloss.NewStyle().Foreground(ColorDim)
-	Title      = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	FooterKey  = lipgloss.NewStyle().Foreground(ColorAccent)
-	FooterText = lipgloss.NewStyle().Foreground(ColorDim)
+	// Text styles on the black panel background.
+	Accent = lipgloss.NewStyle().Foreground(ColorAccent)
+	Dim    = lipgloss.NewStyle().Foreground(ColorDim)
+	Title  = lipgloss.NewStyle().Foreground(ColorTitle).Bold(true)
+
+	// Blue toolbars with bright text — the menu/status bars on the black desktop.
+	MenuBar   = lipgloss.NewStyle().Background(ColorBar).Foreground(ColorFg)
+	StatusBar = lipgloss.NewStyle().Background(ColorBar).Foreground(ColorFg)
+
+	// Footer hotkeys live on the status bar: a bold yellow key, white action.
+	FooterKey  = lipgloss.NewStyle().Background(ColorBar).Foreground(ColorTitle).Bold(true)
+	FooterText = lipgloss.NewStyle().Background(ColorBar).Foreground(ColorFg)
 )

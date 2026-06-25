@@ -7,7 +7,20 @@ import (
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
+
+// dosTableStyles paints the channel table for the black DOS panel: a yellow
+// header, white cells, and a white-on-bright-blue highlighted row.
+func dosTableStyles() table.Styles {
+	s := table.DefaultStyles()
+	s.Header = s.Header.Foreground(ui.ColorTitle).Bold(true).BorderForeground(ui.ColorAccent)
+	// Leave cells uncolored (plain text): they then inherit the panel's
+	// white-on-black, and — crucially — emit no per-cell reset that would punch
+	// holes in the Selected highlight bar, so the row-level style fills the row.
+	s.Selected = lipgloss.NewStyle().Foreground(ui.ColorFg).Background(ui.ColorSel).Bold(true)
+	return s
+}
 
 type channelsView struct {
 	m *Model
@@ -19,7 +32,7 @@ func newChannelsView(m *Model) *channelsView {
 		{Title: "CH", Width: 4}, {Title: "NAME", Width: 10}, {Title: "MODE", Width: 12},
 		{Title: "DEVICE", Width: 22}, {Title: "PTT", Width: 4}, {Title: "RX dBFS", Width: 8},
 	}
-	t := table.New(table.WithColumns(cols), table.WithFocused(true))
+	t := table.New(table.WithColumns(cols), table.WithFocused(true), table.WithStyles(dosTableStyles()))
 	v := &channelsView{m: m, t: t}
 	v.refresh()
 	return v

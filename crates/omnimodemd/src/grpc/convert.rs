@@ -217,6 +217,7 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             db_floor,
             db_ceiling,
             bins,
+            transmit,
         } => Kind::SpectrumFrame(proto::SpectrumFrame {
             channel: channel.0,
             timestamp_ns,
@@ -225,6 +226,7 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             db_floor,
             db_ceiling,
             bins,
+            transmit,
         }),
     };
     proto::Event { kind: Some(kind) }

@@ -69,8 +69,11 @@ pub fn decode(table: &VaricodeTable, bits: &[u8]) -> String {
                 zeros = 0;
             }
         } else {
-            // A single zero inside a codeword is part of it.
-            if zeros == 1 {
+            // A single zero *inside* a codeword is part of it; a stray leading
+            // zero (codeword buffer still empty, e.g. from an odd-length idle/
+            // preamble run) is just separator residue and must be dropped, or it
+            // corrupts the first codeword.
+            if zeros == 1 && !cur.is_empty() {
                 cur.push('0');
             }
             zeros = 0;
@@ -267,5 +270,17 @@ mod tests {
             let bits = encode(&PSK31, s);
             assert_eq!(decode(&PSK31, &bits), s);
         }
+    }
+
+    #[test]
+    fn odd_leading_zero_run_does_not_corrupt_first_char() {
+        // A PSK31 idle is a run of zeros of arbitrary parity; a leftover single
+        // zero before the first codeword must be dropped, not absorbed into it.
+        let mut bits = vec![0u8; 5]; // odd-length leading idle
+        bits.extend(encode(&PSK31, "CQ"));
+        assert_eq!(decode(&PSK31, &bits), "CQ");
+        let mut even = vec![0u8; 4];
+        even.extend(encode(&PSK31, "CQ"));
+        assert_eq!(decode(&PSK31, &even), "CQ");
     }
 }

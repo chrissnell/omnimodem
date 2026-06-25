@@ -11,6 +11,14 @@
 
 const LTRS: u8 = 0x1F;
 const FIGS: u8 = 0x1B;
+/// Space code (`' '` in both tables). Used for unshift-on-space.
+const SPACE: u8 = 0x04;
+
+/// Unshift-on-space (USOS): a space reverts the shift to Letters. This is
+/// standard RTTY practice — figures runs are short and almost always followed by
+/// a space, so reverting on space stops a single corrupted FIGS shift (from a
+/// bit error) from turning the rest of a line into symbol garbage.
+const USOS: bool = true;
 
 /// Letters table indexed by 5-bit code; `'\0'` marks shift/unused slots.
 const LETTERS: [char; 32] = [
@@ -50,6 +58,11 @@ pub fn encode(text: &str) -> Vec<u8> {
                 Shift::Figures => fig,
             };
             out.push(code);
+            // Match the USOS receiver: a space reverts it to Letters, so the
+            // encoder must track that and re-assert FIGS for the next figure.
+            if USOS && code == SPACE {
+                shift = Shift::Letters;
+            }
             continue;
         }
         if let Some(code) = find(&LETTERS, c) {
@@ -104,6 +117,11 @@ impl Decoder {
                     Shift::Figures => &FIGURES,
                 };
                 let c = table[(code & 0x1F) as usize];
+                // Unshift-on-space: revert to Letters after a space so a stray
+                // FIGS shift can't corrupt the rest of the line.
+                if USOS && code == SPACE {
+                    self.shift = Shift::Letters;
+                }
                 if c == '\0' {
                     None
                 } else {
@@ -149,6 +167,19 @@ mod tests {
         }
         assert!(saw_figs && saw_ltrs_after);
         assert_eq!(Decoder::new().decode(&codes), "1A");
+    }
+
+    #[test]
+    fn unshift_on_space_recovers_from_stray_figs() {
+        // Simulate a bit error that injects a spurious FIGS shift mid-line. With
+        // USOS, the next space must snap the decoder back to Letters so the rest
+        // of the word is readable instead of decoding as figures.
+        let mut codes = encode("DE NW5W");
+        codes.insert(0, FIGS); // stray shift before the text
+        let decoded = Decoder::new().decode(&codes);
+        // "DE" before the first space decodes as figures (corrupted), but
+        // everything after the space recovers.
+        assert!(decoded.ends_with("NW5W"), "USOS did not recover: {decoded:?}");
     }
 
     #[test]

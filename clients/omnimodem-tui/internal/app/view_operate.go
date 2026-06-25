@@ -7,6 +7,7 @@ import (
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type transcriptLine struct {
@@ -22,7 +23,10 @@ type operateView struct {
 	compose    string
 	transcript []transcriptLine
 	tx         txState
-	wf         waterfall
+	rxWf       waterfall
+	txWf       waterfall
+	rxOpen     bool // the last transcript line is an in-progress received line
+	draining   bool // a TX-waterfall scroll-off animation is in flight
 	myCall     string
 	myGrid     string
 	theirCall  string
@@ -34,8 +38,8 @@ type operateView struct {
 func newOperateView(m *Model) *operateView {
 	v := &operateView{
 		m:      m,
-		myCall: "NW5W",
-		myGrid: "EM10",
+		myCall: m.myCall,
+		myGrid: m.myGrid,
 		rst:    "599",
 		tx:     txState{watchdog: 30 * time.Second},
 	}
@@ -53,7 +57,14 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		// The window manager has already folded this into live state and will
 		// re-issue waitForEvent; here we only react to operate-specific events.
 		if sf := msg.ev.GetSpectrumFrame(); sf != nil {
-			v.wf.push(sf)
+			if sf.GetTransmit() {
+				v.txWf.push(sf)
+			} else {
+				v.rxWf.push(sf)
+			}
+		}
+		if rf := msg.ev.GetRxFrame(); rf != nil && rf.GetChannel() == v.m.sel {
+			v.appendRx(string(rf.GetData()))
 		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
@@ -61,9 +72,7 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		}
 		return v, nil
 	case spectrumCfgMsg:
-		v.wf.enabled = true
-		v.wf.freqStart = msg.resp.GetFreqStartHz()
-		v.wf.freqStep = msg.resp.GetFreqStepHz()
+		// The per-frame events carry the frequency axis; nothing to do here.
 		return v, nil
 	case leaseMsg:
 		if msg.resp.GetGranted() {
@@ -82,7 +91,23 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			v.m.toast = ui.NewToast("TX watchdog: aborted", ui.SeverityError)
 			return v, releaseLeaseCmd(v.m.c, v.m.sel)
 		}
+		// Once a transmission ends, scroll its waterfall off to black. The fast
+		// drain animation runs only while there's something to clear.
+		if !v.draining && !v.tx.active() && v.txWf.hasSignal() {
+			v.draining = true
+			return v, txDrainCmd()
+		}
 		return v, nil
+	case txDrainMsg:
+		if v.tx.active() || !v.txWf.hasSignal() {
+			if !v.txWf.hasSignal() {
+				v.txWf.rows = nil // fully scrolled off — leave the pane blank
+			}
+			v.draining = false
+			return v, nil
+		}
+		v.txWf.pushBlank()
+		return v, txDrainCmd()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -140,8 +165,27 @@ func (v *operateView) ft8Send() tea.Cmd {
 		seq.advance()
 	}
 	v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '›', txt: msg})
+	v.rxOpen = false // a TX line closes any in-progress received line
 	v.tx.begin([]byte(msg))
 	return acquireLeaseCmd(v.m.c, v.m.sel)
+}
+
+// appendRx folds streaming decoded text into the transcript. Modes like PSK31
+// decode roughly a character at a time, so received text is accumulated onto a
+// single in-progress received line and broken into a new line at each newline.
+func (v *operateView) appendRx(s string) {
+	for _, r := range s {
+		if r == '\n' || r == '\r' {
+			v.rxOpen = false
+			continue
+		}
+		if !v.rxOpen {
+			v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '‹', txt: ""})
+			v.rxOpen = true
+		}
+		last := &v.transcript[len(v.transcript)-1]
+		last.txt += string(r)
+	}
 }
 
 func (v *operateView) sendCompose() tea.Cmd {
@@ -150,6 +194,7 @@ func (v *operateView) sendCompose() tea.Cmd {
 		return nil
 	}
 	v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '›', txt: line})
+	v.rxOpen = false // a TX line closes any in-progress received line
 	v.tx.begin([]byte(line))
 	v.compose = ""
 	return acquireLeaseCmd(v.m.c, v.m.sel)
@@ -157,19 +202,65 @@ func (v *operateView) sendCompose() tea.Cmd {
 
 func (v *operateView) Render(w, h int) string {
 	var b strings.Builder
+
+	// Two waterfalls side by side, fixed at the top: RX (received) on the left,
+	// TX (transmitted) on the right.
+	wfRows := h / 3
+	if wfRows < 3 {
+		wfRows = 3
+	}
+	if wfRows > 8 {
+		wfRows = 8
+	}
+	const gap = 2
+	col := (w - gap) / 2
+	if col < 8 {
+		col = 8
+	}
+	// Every cell carries the black panel background (label padding, the gap, and
+	// the waterfall rows) so no grey leaks through between the colored spans.
+	head := ui.Title.Background(ui.ColorPanel).Width(col)
+	bodyH := wfRows + 1 // waterfall rows + axis line
+	// msgPane centers a message both ways in a pane's body area, on black.
+	msgPane := func(msg string) string {
+		text := lipgloss.NewStyle().Foreground(ui.ColorAccent).Background(ui.ColorPanel).
+			Width(col).Align(lipgloss.Center).Render(msg)
+		return lipgloss.Place(col, bodyH, lipgloss.Center, lipgloss.Center, text,
+			lipgloss.WithWhitespaceBackground(ui.ColorPanel))
+	}
+	column := func(label, override string, wf *waterfall) string {
+		if override != "" {
+			return head.Render(label) + "\n" + msgPane(override)
+		}
+		return head.Render(label) + "\n" + wf.render(col, wfRows) + "\n" + wf.axis(col)
+	}
+	rxMsg := ""
+	if v.tx.active() {
+		rxMsg = "RX channel muted during TX" // the rig can't receive while keyed
+	}
+	txMsg := ""
+	if len(v.txWf.rows) == 0 {
+		txMsg = "waterfall idle" // nothing transmitted (or it has scrolled off)
+	}
+	gapBlock := lipgloss.NewStyle().Background(ui.ColorPanel).Width(gap).Height(wfRows + 2).Render("")
+	b.WriteString(lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		column("RX", rxMsg, &v.rxWf),
+		gapBlock,
+		column("TX", txMsg, &v.txWf),
+	) + "\n\n")
+
 	if v.seq != nil {
 		b.WriteString(fmt.Sprintf("FT8 · slot %.0f/15s · DX [%s %s]\n\n",
 			slotPosition(time.Now()), orDash(v.seq.dxCall), v.seq.dxGrid))
 		b.WriteString("next: " + v.seq.current() + "\n")
 		b.WriteString("cq:   " + v.seq.cq() + "\n\n")
-		b.WriteString(v.wf.line(w) + "\n")
-		b.WriteString(fmt.Sprintf("\nlogged QSOs: %d", len(v.qlog.entries)))
+		b.WriteString(fmt.Sprintf("logged QSOs: %d", len(v.qlog.entries)))
 		return b.String()
 	}
 	for _, l := range v.transcript {
 		b.WriteString(fmt.Sprintf("%s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
 	}
-	b.WriteString(v.wf.line(w) + "\n\n")
 	b.WriteString("› " + v.compose)
 	if v.tx.active() {
 		b.WriteString("   " + ui.Accent.Render("[TX]"))

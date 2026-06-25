@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/omnimodemd", "crates/dsp"]
+members = ["crates/omnimodemd", "crates/dsp", "crates/wavtool"]
 resolver = "2"
 
 [workspace.package]

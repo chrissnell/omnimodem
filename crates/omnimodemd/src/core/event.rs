@@ -53,5 +53,7 @@ pub enum TelemetryEvent {
         db_floor: f32,
         db_ceiling: f32,
         bins: Vec<u8>,
+        /// True for the transmitted (TX) spectrum, false for received (RX).
+        transmit: bool,
     },
 }

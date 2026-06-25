@@ -297,6 +297,7 @@ impl SpectrumTap {
                 db_floor: self.plan.db_floor,
                 db_ceiling: self.plan.db_ceiling,
                 bins,
+                transmit: false,
             });
         }
     }

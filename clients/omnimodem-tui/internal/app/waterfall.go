@@ -1,46 +1,187 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ramp maps a 0..255 intensity to a density glyph (low→high).
 var ramp = []rune{' ', '·', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
+// wfStyles is a classic waterfall colormap (low→high: navy → blue → cyan →
+// green → yellow → orange → red), built once from fixed 256-palette indices so
+// the colors don't shift with the terminal theme.
+var wfStyles = func() []lipgloss.Style {
+	idx := []string{"17", "19", "21", "33", "45", "51", "46", "118", "226", "220", "208", "196"}
+	s := make([]lipgloss.Style, len(idx))
+	for i, c := range idx {
+		// Set the true-black background on every cell so the colored glyphs don't
+		// leave the surrounding panel's grey showing between styled spans.
+		s[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Background(ui.ColorPanel)
+	}
+	return s
+}()
+
+// wfBlank fills silent cells with a true-black background (a bare space would
+// otherwise expose the terminal's default background between colored spans).
+var wfBlank = lipgloss.NewStyle().Background(ui.ColorPanel)
+
+// wfColorIdx maps a 0..255 intensity to a colormap index.
+func wfColorIdx(v byte) int {
+	i := int(v) * len(wfStyles) / 256
+	if i >= len(wfStyles) {
+		i = len(wfStyles) - 1
+	}
+	return i
+}
+
+// wfHistory bounds how many recent spectrum lines the waterfall keeps.
+const wfHistory = 16
+
 type waterfall struct {
-	last      *pb.SpectrumFrame
+	rows      [][]byte // recent frames' bins, oldest first; newest appended
 	freqStart float32
 	freqStep  float32
-	enabled   bool
 }
 
 func (w *waterfall) push(f *pb.SpectrumFrame) {
-	w.last = f
 	w.freqStart = f.GetFreqStartHz()
 	w.freqStep = f.GetFreqStepHz()
+	// Push every frame so the waterfall scrolls continuously: a transmission
+	// scrolls up and off, and an idle channel flattens to the noise floor (black
+	// for a digitally-silent input) instead of freezing on the last burst.
+	w.rows = append(w.rows, f.GetBins())
+	if len(w.rows) > wfHistory {
+		w.rows = w.rows[len(w.rows)-wfHistory:]
+	}
 }
 
-// line renders the latest spectrum into `width` glyphs (resampling bins to fit).
-func (w *waterfall) line(width int) string {
-	if width <= 0 {
+// pushBlank scrolls a silent line in — used to drain the TX waterfall to black
+// between transmissions so a finished burst scrolls off instead of pausing.
+func (w *waterfall) pushBlank() {
+	n := 64
+	if len(w.rows) > 0 {
+		n = len(w.rows[len(w.rows)-1])
+	}
+	w.rows = append(w.rows, make([]byte, n))
+	if len(w.rows) > wfHistory {
+		w.rows = w.rows[len(w.rows)-wfHistory:]
+	}
+}
+
+// hasSignal reports whether any retained line still carries signal (above the
+// silence floor), so the drain knows when the pane has fully scrolled to black.
+func (w *waterfall) hasSignal() bool {
+	for _, r := range w.rows {
+		for _, v := range r {
+			if v >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// render draws up to `rows` lines of waterfall history (resampled to `width`),
+// newest at the bottom, with blank lines padding the top until enough history
+// accumulates — so it occupies a fixed block that doesn't jump around.
+func (w *waterfall) render(width, rows int) string {
+	if width <= 0 || rows <= 0 {
 		return ""
 	}
-	if w.last == nil || len(w.last.GetBins()) == 0 {
-		return strings.Repeat(" ", width)
-	}
-	bins := w.last.GetBins()
 	var b strings.Builder
-	for x := 0; x < width; x++ {
-		bi := x * len(bins) / width
-		v := bins[bi]
-		g := ramp[int(v)*(len(ramp)-1)/255]
-		b.WriteRune(g)
+	have := len(w.rows)
+	for i := 0; i < rows; i++ {
+		idx := have - rows + i // bottom row is the newest frame
+		if idx < 0 {
+			b.WriteString(wfBlank.Render(strings.Repeat(" ", width)))
+		} else {
+			b.WriteString(spectrumLine(w.rows[idx], width))
+		}
+		if i < rows-1 {
+			b.WriteByte('\n')
+		}
 	}
 	return b.String()
+}
+
+// spectrumLine renders one frame's bins into `width` density glyphs.
+func spectrumLine(bins []byte, width int) string {
+	if len(bins) == 0 {
+		return wfBlank.Render(strings.Repeat(" ", width))
+	}
+	// Color each glyph by intensity, coalescing consecutive same-color cells into
+	// one styled span so a line emits few escape codes. Silent cells render on the
+	// black background so the line is solid black end to end.
+	var out strings.Builder
+	var run strings.Builder
+	cur := -1 // current colormap index, -1 == uncolored
+	flush := func() {
+		if run.Len() == 0 {
+			return
+		}
+		if cur < 0 {
+			out.WriteString(wfBlank.Render(run.String()))
+		} else {
+			out.WriteString(wfStyles[cur].Render(run.String()))
+		}
+		run.Reset()
+	}
+	for x := 0; x < width; x++ {
+		v := bins[x*len(bins)/width]
+		g := ramp[int(v)*(len(ramp)-1)/255]
+		col := -1
+		if g != ' ' {
+			col = wfColorIdx(v)
+		}
+		if col != cur {
+			flush()
+			cur = col
+		}
+		run.WriteRune(g)
+	}
+	flush()
+	return out.String()
+}
+
+// axis labels the displayed frequency span under the waterfall.
+// axis labels colored like the rest of the panel: red numbers, green "Hz" units,
+// all on the black background.
+var (
+	wfNum  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(ui.ColorPanel) // red
+	wfUnit = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Background(ui.ColorPanel)  // green
+)
+
+func (w *waterfall) axis(width int) string {
+	if w.freqStep == 0 || len(w.rows) == 0 {
+		msg := " waterfall idle — transmit, or feed a signal to the RX device"
+		if len(msg) < width {
+			msg += strings.Repeat(" ", width-len(msg))
+		}
+		return lipgloss.NewStyle().Foreground(ui.ColorAccent).Background(ui.ColorPanel).Render(msg)
+	}
+	n := len(w.rows[len(w.rows)-1])
+	lo := int(w.freqStart)
+	if lo < 0 {
+		lo = 0
+	}
+	hi := int(w.freqStart + w.freqStep*float32(n))
+	loStr := fmt.Sprintf("%d", lo)
+	hiStr := fmt.Sprintf("%d", hi)
+	// " Hz" suffix is 3 visible cells; size the gap from the plain widths.
+	gap := width - (len(loStr) + 3) - (len(hiStr) + 3)
+	if gap < 1 {
+		gap = 1
+	}
+	sp := wfBlank.Render(" ")
+	label := func(num string) string { return wfNum.Render(num) + sp + wfUnit.Render("Hz") }
+	return label(loStr) + wfBlank.Render(strings.Repeat(" ", gap)) + label(hiStr)
 }
 
 // enableSpectrumCmd asks the daemon to start the per-channel spectrum stream

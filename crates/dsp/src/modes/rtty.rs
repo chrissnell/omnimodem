@@ -15,17 +15,32 @@ use crate::types::{Cplx, Frame, FrameMeta, FramePayload, Sample};
 
 pub const RTTY_RATE: u32 = 8_000;
 
-/// Audio center frequency the mark/space pair straddles (center +/- shift/2).
-const CENTER_HZ: f32 = 1500.0;
+/// Default audio center the mark/space pair straddles (center +/- shift/2).
+/// US ham RTTY is standardised on 2125/2295 Hz, i.e. a 2210 Hz center, so that
+/// is the default. Both the modulator and demodulator take a configurable
+/// center (`with_center`) for the cases that differ.
+pub const CENTER_HZ: f32 = 2210.0;
 
 /// Baseband channel filter: passes the mark/space pair (well inside +/- shift)
-/// while rejecting the 2*center image the real->complex mix leaves behind.
+/// while rejecting the 2*center image the real->complex mix leaves behind. The
+/// cutoff is wide enough to cover the ±shift the demod cares about; the center
+/// is retuned by the down-converter, so the same filter works at any center.
 const LPF_TAPS: usize = 31;
 const LPF_CUTOFF_HZ: f32 = 300.0;
 
 /// Mark idle cells emitted before the first character so the discriminator and
 /// start-bit sync settle on the idle (mark) line before the first start edge.
 const PREAMBLE_CELLS: usize = 8;
+
+/// Carrier squelch. A real FSK tone sits inside the narrow channel filter, so
+/// most of its power survives the low-pass (in-band / total ≈ 0.5); white noise
+/// is spread across the whole band and the filter throws most of it away
+/// (≈ 0.08). Gating on that level-independent ratio keeps the framer from
+/// slicing the noise floor into Baudot junk, with no dependence on signal level.
+const SQUELCH_EMA: f32 = 0.002;
+const SQUELCH_OPEN: f32 = 0.3;
+/// Absolute power floor so digital silence reads as "no carrier".
+const SQUELCH_FLOOR: f32 = 1e-9;
 
 pub struct RttyMod {
     baud: f32,
@@ -35,7 +50,12 @@ pub struct RttyMod {
 
 impl RttyMod {
     pub fn new(baud: f32, shift_hz: f32) -> Self {
-        RttyMod { baud, shift_hz, center_hz: CENTER_HZ }
+        Self::with_center(baud, shift_hz, CENTER_HZ)
+    }
+
+    /// Modulate at an explicit audio center (e.g. 2210 Hz for US ham RTTY).
+    pub fn with_center(baud: f32, shift_hz: f32, center_hz: f32) -> Self {
+        RttyMod { baud, shift_hz, center_hz }
     }
 }
 
@@ -68,7 +88,10 @@ impl Modulator for RttyMod {
             bits.push(true); // stop (>=1.5 stop bits)
         }
         bits.extend(std::iter::repeat_n(true, PREAMBLE_CELLS)); // trailing idle
-        let fsk = Fsk2::new(RTTY_RATE as f32, sps, self.center_hz, self.shift_hz);
+        // Amateur RTTY convention (LSB): the mark (idle) tone is the *lower* of
+        // the pair — 2125 Hz mark / 2295 Hz space at a 2210 Hz center. A negative
+        // shift puts `Fsk2`'s mark below center to match.
+        let fsk = Fsk2::new(RTTY_RATE as f32, sps, self.center_hz, -self.shift_hz);
         Ok(fsk.modulate(&bits))
     }
 }
@@ -76,10 +99,18 @@ impl Modulator for RttyMod {
 pub struct RttyDemod {
     baud: f32,
     shift_hz: f32,
+    center_hz: f32,
+    /// Reverse the mark/space sense. The default is the amateur LSB convention
+    /// (mark = lower audio tone); `reverse` selects USB/inverted signals.
+    reverse: bool,
     nco: DownConverter,
     lpf_i: Fir,
     lpf_q: Fir,
     disc: FmDiscriminator,
+    // Smoothed in-band (post-filter) and total (pre-filter) power for the
+    // carrier squelch; their ratio tells a tone from the noise floor.
+    p_in: f32,
+    p_tot: f32,
     sync: StartBitSync,
     baudot: BaudotDecoder,
     text: String,
@@ -88,20 +119,37 @@ pub struct RttyDemod {
 
 impl RttyDemod {
     pub fn new(baud: f32, shift_hz: f32) -> Self {
+        Self::with_center(baud, shift_hz, CENTER_HZ)
+    }
+
+    /// Demodulate around an explicit audio center (e.g. 2210 Hz for US ham
+    /// RTTY). The down-converter retunes to `center_hz`; everything downstream
+    /// works at baseband, so the rest of the chain is center-independent.
+    pub fn with_center(baud: f32, shift_hz: f32, center_hz: f32) -> Self {
         let rate = RTTY_RATE as f32;
         let taps = design_lowpass(LPF_TAPS, LPF_CUTOFF_HZ, rate);
         RttyDemod {
             baud,
             shift_hz,
-            nco: DownConverter::new(CENTER_HZ, rate),
+            center_hz,
+            reverse: false,
+            nco: DownConverter::new(center_hz, rate),
             lpf_i: Fir::new(taps.clone()),
             lpf_q: Fir::new(taps),
             disc: FmDiscriminator::new(),
+            p_in: 0.0,
+            p_tot: 0.0,
             sync: StartBitSync::new(rate / baud),
             baudot: BaudotDecoder::new(),
             text: String::new(),
             sample_index: 0,
         }
+    }
+
+    /// Swap the mark/space sense (reverse RTTY). Returns self for chaining.
+    pub fn reversed(mut self, reverse: bool) -> Self {
+        self.reverse = reverse;
+        self
     }
 }
 
@@ -114,12 +162,23 @@ impl Demodulator for RttyDemod {
         for &x in samples {
             self.sample_index += 1;
             let bb = self.nco.push(x);
+            let total = bb.norm_sqr(); // power before the channel filter
             // Channel-filter the complex baseband (kills the 2*center image) so
             // the discriminator sees a clean tone.
             let bb = Cplx::new(self.lpf_i.push(bb.re), self.lpf_q.push(bb.im));
-            // Instantaneous frequency after down-conversion to center: positive
-            // => above center => mark (high tone) => logic 1.
-            let level = self.disc.push(bb) > 0.0;
+            // Carrier squelch: smoothed in-band / total power ratio. A tone
+            // survives the narrow filter, noise does not.
+            self.p_in += SQUELCH_EMA * (bb.norm_sqr() - self.p_in);
+            self.p_tot += SQUELCH_EMA * (total - self.p_tot);
+            let open = self.p_tot > SQUELCH_FLOOR && self.p_in > SQUELCH_OPEN * self.p_tot;
+            // Instantaneous frequency after down-conversion to center. Amateur
+            // RTTY (LSB) puts the mark tone *below* center, so a negative
+            // frequency is mark (logic 1); `reverse` swaps that for USB/inverted
+            // signals. Keep the discriminator running every sample so its phase
+            // reference stays continuous, but with no carrier hold the line at
+            // the idle mark so the framer never syncs on a noise edge.
+            let freq = self.disc.push(bb);
+            let level = if open { (freq < 0.0) ^ self.reverse } else { true };
             if let Some(code_bits) = self.sync.feed(level) {
                 let mut code = 0u8;
                 for (i, &b) in code_bits.iter().enumerate() {
@@ -147,7 +206,7 @@ impl Demodulator for RttyDemod {
     }
 
     fn reset(&mut self) {
-        *self = RttyDemod::new(self.baud, self.shift_hz);
+        *self = RttyDemod::with_center(self.baud, self.shift_hz, self.center_hz).reversed(self.reverse);
     }
 }
 
@@ -190,5 +249,24 @@ mod tests {
             })
             .collect();
         assert!(text.contains(msg), "got {text:?}");
+    }
+
+    #[test]
+    fn noise_does_not_decode() {
+        // White noise carries no FSK tone; the squelch must keep the framer from
+        // slicing the noise floor into Baudot characters.
+        let mut rng = crate::testutil::Rng::new(0xBADC0DE);
+        let mut noise = vec![0.0f32; RTTY_RATE as usize * 2]; // 2 s
+        crate::testutil::add_awgn(&mut noise, 0.3, &mut rng);
+        let mut rx = RttyDemod::new(45.45, 170.0);
+        let text: String = rx
+            .feed(&noise)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.len() <= 2, "noise should stay squelched, decoded {text:?}");
     }
 }
