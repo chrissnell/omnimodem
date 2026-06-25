@@ -16,17 +16,14 @@ func TestWaterfallColorIdx(t *testing.T) {
 	}
 }
 
-func TestWaterfallHoldsThroughSilence(t *testing.T) {
+// Every frame scrolls in (including silent ones) so an idle channel flattens
+// instead of freezing on the last burst.
+func TestWaterfallScrollsEveryFrame(t *testing.T) {
 	var w waterfall
-	sig := make([]byte, 8)
-	for i := range sig {
-		sig[i] = 200
+	for i := 0; i < 4; i++ {
+		w.push(&pb.SpectrumFrame{Bins: make([]byte, 8), FreqStepHz: 1})
 	}
-	silent := make([]byte, 8) // all zero
-	w.push(&pb.SpectrumFrame{Bins: sig, FreqStepHz: 1})
-	w.push(&pb.SpectrumFrame{Bins: silent, FreqStepHz: 1})
-	w.push(&pb.SpectrumFrame{Bins: silent, FreqStepHz: 1})
-	if len(w.rows) != 1 {
-		t.Fatalf("silent frames must be skipped so the burst stays visible, rows=%d", len(w.rows))
+	if len(w.rows) != 4 {
+		t.Fatalf("idle frames must still scroll in, rows=%d", len(w.rows))
 	}
 }

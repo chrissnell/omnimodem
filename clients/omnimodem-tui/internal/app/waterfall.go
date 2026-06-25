@@ -48,28 +48,13 @@ type waterfall struct {
 func (w *waterfall) push(f *pb.SpectrumFrame) {
 	w.freqStart = f.GetFreqStartHz()
 	w.freqStep = f.GetFreqStepHz()
-	bins := f.GetBins()
-	// Skip silent frames (a digitally-quiet RX input quantizes to all-zero bins).
-	// They carry nothing, and pushing them would scroll a real burst — a brief TX
-	// or a received signal — off-screen within a second. Holding the last active
-	// frames keeps a transmission visible after it ends.
-	if !hasSignal(bins) {
-		return
-	}
-	w.rows = append(w.rows, bins)
+	// Push every frame so the waterfall scrolls continuously: a transmission
+	// scrolls up and off, and an idle channel flattens to the noise floor (black
+	// for a digitally-silent input) instead of freezing on the last burst.
+	w.rows = append(w.rows, f.GetBins())
 	if len(w.rows) > wfHistory {
 		w.rows = w.rows[len(w.rows)-wfHistory:]
 	}
-}
-
-// hasSignal reports whether any bin is above the noise/silence floor.
-func hasSignal(bins []byte) bool {
-	for _, v := range bins {
-		if v >= 2 {
-			return true
-		}
-	}
-	return false
 }
 
 // render draws up to `rows` lines of waterfall history (resampled to `width`),
