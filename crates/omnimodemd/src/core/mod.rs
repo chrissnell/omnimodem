@@ -147,6 +147,14 @@ fn run(
     let mut live = LiveBindings::default();
     let interlock = supervisor.interlock();
     let lease = TxLeaseRegistry::new();
+    // Persistence restores a channel's *config*, but not its live audio/PTT
+    // bindings or workers — so after a restart the channel shows in the snapshot
+    // yet can't RX (no spectrum/waterfall) or TX (AcquireTxLease can't find a
+    // binding). Re-establish the live pipeline for restored channels here.
+    restore_live_bindings(
+        &mut supervisor, &*enumerator, &audio_factory, &interlock, &lease, &mut live, &frames,
+        &telemetry,
+    );
     let mut watcher = HotplugWatcher::new();
     let clock = ClockSource::new();
     // Initialize in the past so the first idle tick publishes immediately.
@@ -183,6 +191,42 @@ fn run(
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// Rebuild the live audio/PTT pipeline and workers for channels restored from
+/// persistence, so RX/TX (and the waterfall) work immediately after a daemon
+/// restart rather than only after the operator reconfigures. Channels that were
+/// never given a real device (still the placeholder), or whose devices are gone,
+/// are left config-only and logged — the operator reconfigures when ready.
+#[allow(clippy::too_many_arguments)]
+fn restore_live_bindings(
+    supervisor: &mut Supervisor,
+    enumerator: &dyn DeviceEnumerator,
+    audio_factory: &AudioBackendFactory,
+    interlock: &crate::ptt::interlock::RxTxInterlock,
+    lease: &TxLeaseRegistry,
+    live: &mut LiveBindings,
+    frames: &broadcast::Sender<FrameEvent>,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) {
+    for cfg in supervisor.snapshot().channels {
+        if cfg.device_id == DeviceId::placeholder() {
+            continue; // configured but never bound to a real RX device
+        }
+        if let Err(e) = configure_audio(
+            supervisor, enumerator, audio_factory, live, cfg.id, cfg.device_id.clone(),
+            cfg.sample_rate, cfg.fanout, cfg.tx_device_id.clone(), cfg.tx_sample_rate,
+        ) {
+            tracing::warn!(channel = cfg.id.0, error = %e, "skipping audio restore on startup");
+            continue;
+        }
+        if let Some(ptt) = cfg.ptt.clone() {
+            if let Err(e) = configure_ptt(supervisor, live, cfg.id, ptt) {
+                tracing::warn!(channel = cfg.id.0, error = %e, "skipping ptt restore on startup");
+            }
+        }
+        try_spawn_workers(cfg.id, supervisor, live, interlock, lease, frames, telemetry);
     }
 }
 
@@ -1267,6 +1311,52 @@ mod tests {
             configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
             // Worker gone -> manual key is allowed again.
             assert!(key_ptt_call(&core, ChannelId(0)).await.is_ok());
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    // A channel restored from persistence must come up fully live (audio bound,
+    // workers spawned) so TX works right after a restart — not only after the
+    // operator reconfigures. Regression for "unknown channel" on TX post-restart.
+    #[test]
+    fn restores_live_pipeline_for_persisted_channels_on_startup() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .upsert_channel(&crate::supervisor::channel::ChannelConfig {
+                id: ChannelId(0),
+                name: "restored".into(),
+                mode: "psk31".into(),
+                device_id: dev_id.clone(),
+                sample_rate: 48_000,
+                fanout: 1,
+                tx_device_id: dev_id.clone(),
+                tx_sample_rate: 0,
+                ptt: Some(PttConfig {
+                    device_id: dev_id.clone(),
+                    method: PttMethod::None,
+                    invert: false,
+                }),
+            })
+            .unwrap();
+        let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();
+        let (core, join) = spawn(
+            sup,
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            // Startup restore must have rebuilt the live audio binding, so a
+            // TX-lease acquire succeeds instead of failing with UnknownChannel.
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::AcquireTxLease { channel: ChannelId(0), reply: tx }).unwrap();
+            assert!(
+                rx.await.unwrap().is_ok(),
+                "restored channel must have a live audio binding after startup"
+            );
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
