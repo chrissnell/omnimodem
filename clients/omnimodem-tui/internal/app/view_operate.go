@@ -25,6 +25,7 @@ type operateView struct {
 	tx         txState
 	rxWf       waterfall
 	txWf       waterfall
+	draining   bool // a TX-waterfall scroll-off animation is in flight
 	myCall     string
 	myGrid     string
 	theirCall  string
@@ -86,7 +87,23 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			v.m.toast = ui.NewToast("TX watchdog: aborted", ui.SeverityError)
 			return v, releaseLeaseCmd(v.m.c, v.m.sel)
 		}
+		// Once a transmission ends, scroll its waterfall off to black. The fast
+		// drain animation runs only while there's something to clear.
+		if !v.draining && !v.tx.active() && v.txWf.hasSignal() {
+			v.draining = true
+			return v, txDrainCmd()
+		}
 		return v, nil
+	case txDrainMsg:
+		if v.tx.active() || !v.txWf.hasSignal() {
+			if !v.txWf.hasSignal() {
+				v.txWf.rows = nil // fully scrolled off — leave the pane blank
+			}
+			v.draining = false
+			return v, nil
+		}
+		v.txWf.pushBlank()
+		return v, txDrainCmd()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":

@@ -3,11 +3,37 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// When TX ends, the TX waterfall must scroll off to black, not pause on its last
+// line: an idle tick starts the drain and drain ticks clear the pane.
+func TestTXWaterfallDrainsWhenIdle(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "psk31"}
+	m.sel = 0
+	v := newOperateView(m)
+	sig := make([]byte, 64)
+	for i := range sig {
+		sig[i] = 200
+	}
+	for k := 0; k < 5; k++ {
+		v.txWf.push(&pb.SpectrumFrame{Bins: sig, FreqStepHz: 1, Transmit: true})
+	}
+	if _, cmd := v.Update(tickMsg(time.Now())); cmd == nil {
+		t.Fatal("an idle tick with TX content should start the scroll-off drain")
+	}
+	for i := 0; i < 60 && v.txWf.hasSignal(); i++ {
+		v.Update(txDrainMsg{})
+	}
+	if v.txWf.hasSignal() {
+		t.Fatal("TX waterfall should drain to black when not transmitting")
+	}
+}
 
 func TestOperateSendTransmits(t *testing.T) {
 	f := &client.Fake{}

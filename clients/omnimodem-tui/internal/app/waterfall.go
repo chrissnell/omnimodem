@@ -62,6 +62,32 @@ func (w *waterfall) push(f *pb.SpectrumFrame) {
 	}
 }
 
+// pushBlank scrolls a silent line in — used to drain the TX waterfall to black
+// between transmissions so a finished burst scrolls off instead of pausing.
+func (w *waterfall) pushBlank() {
+	n := 64
+	if len(w.rows) > 0 {
+		n = len(w.rows[len(w.rows)-1])
+	}
+	w.rows = append(w.rows, make([]byte, n))
+	if len(w.rows) > wfHistory {
+		w.rows = w.rows[len(w.rows)-wfHistory:]
+	}
+}
+
+// hasSignal reports whether any retained line still carries signal (above the
+// silence floor), so the drain knows when the pane has fully scrolled to black.
+func (w *waterfall) hasSignal() bool {
+	for _, r := range w.rows {
+		for _, v := range r {
+			if v >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // render draws up to `rows` lines of waterfall history (resampled to `width`),
 // newest at the bottom, with blank lines padding the top until enough history
 // accumulates — so it occupies a fixed block that doesn't jump around.

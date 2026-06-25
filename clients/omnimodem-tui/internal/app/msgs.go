@@ -27,6 +27,7 @@ type transmitMsg struct{ id uint64 }
 type eventMsg struct{ ev *pb.Event }
 type eventClosedMsg struct{ err error }
 type tickMsg time.Time
+type txDrainMsg struct{}
 
 func snapshotCmd(c client.ModemClient) tea.Cmd {
 	return func() tea.Msg {
@@ -55,4 +56,9 @@ func devicesCmd(c client.ModemClient) tea.Cmd {
 // tickCmd drives the FT8 slot clock and the TX watchdog at 4 Hz.
 func tickCmd() tea.Cmd {
 	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// txDrainCmd paces the TX-waterfall scroll-off between transmissions.
+func txDrainCmd() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg { return txDrainMsg{} })
 }
