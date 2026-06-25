@@ -193,13 +193,17 @@ func (v *operateView) Render(w, h int) string {
 	if col < 8 {
 		col = 8
 	}
+	// Every cell carries the black panel background (label padding, the gap, and
+	// the waterfall rows) so no grey leaks through between the colored spans.
+	head := ui.Title.Background(ui.ColorPanel).Width(col)
 	column := func(label string, wf *waterfall) string {
-		return ui.Title.Render(label) + "\n" + wf.render(col, wfRows) + "\n" + wf.axis(col)
+		return head.Render(label) + "\n" + wf.render(col, wfRows) + "\n" + wf.axis(col)
 	}
+	gapBlock := lipgloss.NewStyle().Background(ui.ColorPanel).Width(gap).Height(wfRows + 2).Render("")
 	b.WriteString(lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		column("RX", &v.rxWf),
-		strings.Repeat(" ", gap),
+		gapBlock,
 		column("TX", &v.txWf),
 	) + "\n\n")
 

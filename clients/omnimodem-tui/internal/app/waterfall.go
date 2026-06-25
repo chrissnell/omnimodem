@@ -100,7 +100,7 @@ func (w *waterfall) render(width, rows int) string {
 	for i := 0; i < rows; i++ {
 		idx := have - rows + i // bottom row is the newest frame
 		if idx < 0 {
-			b.WriteString(strings.Repeat(" ", width))
+			b.WriteString(wfBlank.Render(strings.Repeat(" ", width)))
 		} else {
 			b.WriteString(spectrumLine(w.rows[idx], width))
 		}
