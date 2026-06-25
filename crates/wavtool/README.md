@@ -26,20 +26,23 @@ wavtool decode <file.wav> --mode afsk1200
 Any sample rate / bit depth / channel count is accepted; the tool downmixes to
 mono and resamples to the mode's native rate.
 
-**Center frequency matters.** A demod must be tuned to where the signal sits in
-the audio passband. US ham RTTY is usually 2125/2295 Hz (≈2210 Hz center), but
-recordings vary widely. If a file decodes to nothing or garbage, first run
-`analyze` to see where the energy is, or `--scan` to sweep the center:
+**Center frequency.** A demod must be tuned to where the signal sits in the
+audio passband. **If you don't pass `--center`, the tool auto-detects it** from
+the spectrum (RTTY: the midpoint of the two FSK tones; PSK31/CW: the carrier
+peak, refined to sub-Hz), so an arbitrary recording usually just works:
 
 ```
-wavtool analyze mystery.wav
-  dominant frequencies: 1571 Hz ...      # PSK31 carrier
-  audio-band energy centroid ≈ 1651 Hz
+wavtool decode rtty.wav  --mode rtty
+  center=1001 Hz (auto-detected; override with --center 1001) decoded:
+  WELCOME TO WIKIPEDIA, THE FREE ENCYCLOPEDIA ...
 
-wavtool decode g3plx-rtty.wav --mode rtty --scan
-  ...
-  center=1000 Hz -> "WELCOME TO ..."
+wavtool decode psk31.wav --mode psk31
+  center=1571 Hz (auto-detected; override with --center 1571) decoded:
+  AM DEAR OM ! UR RST 599 ...
 ```
+
+Pass `--center <hz>` to override, `analyze` to see the spectrum, or `--scan` to
+sweep every center and print what decodes.
 
 **RTTY polarity.** Whether mark is the high or low tone depends on the sideband,
 so half of all recordings are "reverse". If RTTY decodes as symbol/figures
