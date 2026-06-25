@@ -15,11 +15,16 @@ use crate::types::{Cplx, Frame, FrameMeta, FramePayload, Sample};
 
 pub const RTTY_RATE: u32 = 8_000;
 
-/// Audio center frequency the mark/space pair straddles (center +/- shift/2).
-const CENTER_HZ: f32 = 1500.0;
+/// Default audio center the mark/space pair straddles (center +/- shift/2).
+/// Real recordings vary — US ham RTTY commonly sits at 2125/2295 Hz (≈2210
+/// center) — so both the modulator and demodulator take a configurable center;
+/// this is only the default for the convenience constructors.
+pub const CENTER_HZ: f32 = 1500.0;
 
 /// Baseband channel filter: passes the mark/space pair (well inside +/- shift)
-/// while rejecting the 2*center image the real->complex mix leaves behind.
+/// while rejecting the 2*center image the real->complex mix leaves behind. The
+/// cutoff is wide enough to cover the ±shift the demod cares about; the center
+/// is retuned by the down-converter, so the same filter works at any center.
 const LPF_TAPS: usize = 31;
 const LPF_CUTOFF_HZ: f32 = 300.0;
 
@@ -45,7 +50,12 @@ pub struct RttyMod {
 
 impl RttyMod {
     pub fn new(baud: f32, shift_hz: f32) -> Self {
-        RttyMod { baud, shift_hz, center_hz: CENTER_HZ }
+        Self::with_center(baud, shift_hz, CENTER_HZ)
+    }
+
+    /// Modulate at an explicit audio center (e.g. 2210 Hz for US ham RTTY).
+    pub fn with_center(baud: f32, shift_hz: f32, center_hz: f32) -> Self {
+        RttyMod { baud, shift_hz, center_hz }
     }
 }
 
@@ -86,6 +96,7 @@ impl Modulator for RttyMod {
 pub struct RttyDemod {
     baud: f32,
     shift_hz: f32,
+    center_hz: f32,
     nco: DownConverter,
     lpf_i: Fir,
     lpf_q: Fir,
@@ -102,12 +113,20 @@ pub struct RttyDemod {
 
 impl RttyDemod {
     pub fn new(baud: f32, shift_hz: f32) -> Self {
+        Self::with_center(baud, shift_hz, CENTER_HZ)
+    }
+
+    /// Demodulate around an explicit audio center (e.g. 2210 Hz for US ham
+    /// RTTY). The down-converter retunes to `center_hz`; everything downstream
+    /// works at baseband, so the rest of the chain is center-independent.
+    pub fn with_center(baud: f32, shift_hz: f32, center_hz: f32) -> Self {
         let rate = RTTY_RATE as f32;
         let taps = design_lowpass(LPF_TAPS, LPF_CUTOFF_HZ, rate);
         RttyDemod {
             baud,
             shift_hz,
-            nco: DownConverter::new(CENTER_HZ, rate),
+            center_hz,
+            nco: DownConverter::new(center_hz, rate),
             lpf_i: Fir::new(taps.clone()),
             lpf_q: Fir::new(taps),
             disc: FmDiscriminator::new(),
@@ -173,7 +192,7 @@ impl Demodulator for RttyDemod {
     }
 
     fn reset(&mut self) {
-        *self = RttyDemod::new(self.baud, self.shift_hz);
+        *self = RttyDemod::with_center(self.baud, self.shift_hz, self.center_hz);
     }
 }
 
