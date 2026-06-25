@@ -157,19 +157,31 @@ func (v *operateView) sendCompose() tea.Cmd {
 
 func (v *operateView) Render(w, h int) string {
 	var b strings.Builder
+
+	// Waterfall, fixed at the top so it's always visible regardless of how much
+	// transcript or sequencer text follows.
+	wfRows := h / 3
+	if wfRows < 3 {
+		wfRows = 3
+	}
+	if wfRows > 8 {
+		wfRows = 8
+	}
+	b.WriteString(ui.Title.Render("WATERFALL") + "\n")
+	b.WriteString(v.wf.render(w, wfRows) + "\n")
+	b.WriteString(v.wf.axis(w) + "\n\n")
+
 	if v.seq != nil {
 		b.WriteString(fmt.Sprintf("FT8 · slot %.0f/15s · DX [%s %s]\n\n",
 			slotPosition(time.Now()), orDash(v.seq.dxCall), v.seq.dxGrid))
 		b.WriteString("next: " + v.seq.current() + "\n")
 		b.WriteString("cq:   " + v.seq.cq() + "\n\n")
-		b.WriteString(v.wf.line(w) + "\n")
-		b.WriteString(fmt.Sprintf("\nlogged QSOs: %d", len(v.qlog.entries)))
+		b.WriteString(fmt.Sprintf("logged QSOs: %d", len(v.qlog.entries)))
 		return b.String()
 	}
 	for _, l := range v.transcript {
 		b.WriteString(fmt.Sprintf("%s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
 	}
-	b.WriteString(v.wf.line(w) + "\n\n")
 	b.WriteString("› " + v.compose)
 	if v.tx.active() {
 		b.WriteString("   " + ui.Accent.Render("[TX]"))
