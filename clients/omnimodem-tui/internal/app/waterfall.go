@@ -42,7 +42,6 @@ type waterfall struct {
 	rows      [][]byte // recent frames' bins, oldest first; newest appended
 	freqStart float32
 	freqStep  float32
-	enabled   bool
 }
 
 func (w *waterfall) push(f *pb.SpectrumFrame) {

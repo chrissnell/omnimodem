@@ -7,6 +7,7 @@ import (
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type transcriptLine struct {
@@ -22,7 +23,8 @@ type operateView struct {
 	compose    string
 	transcript []transcriptLine
 	tx         txState
-	wf         waterfall
+	rxWf       waterfall
+	txWf       waterfall
 	myCall     string
 	myGrid     string
 	theirCall  string
@@ -53,7 +55,11 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		// The window manager has already folded this into live state and will
 		// re-issue waitForEvent; here we only react to operate-specific events.
 		if sf := msg.ev.GetSpectrumFrame(); sf != nil {
-			v.wf.push(sf)
+			if sf.GetTransmit() {
+				v.txWf.push(sf)
+			} else {
+				v.rxWf.push(sf)
+			}
 		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
@@ -61,9 +67,7 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		}
 		return v, nil
 	case spectrumCfgMsg:
-		v.wf.enabled = true
-		v.wf.freqStart = msg.resp.GetFreqStartHz()
-		v.wf.freqStep = msg.resp.GetFreqStepHz()
+		// The per-frame events carry the frequency axis; nothing to do here.
 		return v, nil
 	case leaseMsg:
 		if msg.resp.GetGranted() {
@@ -158,8 +162,8 @@ func (v *operateView) sendCompose() tea.Cmd {
 func (v *operateView) Render(w, h int) string {
 	var b strings.Builder
 
-	// Waterfall, fixed at the top so it's always visible regardless of how much
-	// transcript or sequencer text follows.
+	// Two waterfalls side by side, fixed at the top: RX (received) on the left,
+	// TX (transmitted) on the right.
 	wfRows := h / 3
 	if wfRows < 3 {
 		wfRows = 3
@@ -167,9 +171,20 @@ func (v *operateView) Render(w, h int) string {
 	if wfRows > 8 {
 		wfRows = 8
 	}
-	b.WriteString(ui.Title.Render("WATERFALL") + "\n")
-	b.WriteString(v.wf.render(w, wfRows) + "\n")
-	b.WriteString(v.wf.axis(w) + "\n\n")
+	const gap = 2
+	col := (w - gap) / 2
+	if col < 8 {
+		col = 8
+	}
+	column := func(label string, wf *waterfall) string {
+		return ui.Title.Render(label) + "\n" + wf.render(col, wfRows) + "\n" + wf.axis(col)
+	}
+	b.WriteString(lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		column("RX", &v.rxWf),
+		strings.Repeat(" ", gap),
+		column("TX", &v.txWf),
+	) + "\n\n")
 
 	if v.seq != nil {
 		b.WriteString(fmt.Sprintf("FT8 · slot %.0f/15s · DX [%s %s]\n\n",

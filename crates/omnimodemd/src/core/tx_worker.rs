@@ -207,10 +207,22 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
         });
         cfg.interlock.begin_tx(&cfg.rig);
         let _ = cfg.telemetry.send(TelemetryEvent::PttKeyed { channel: cfg.channel, keyed: true });
-        // Show the transmitted signal on the operate waterfall — the RX tap is
-        // muted while we key, so this is the only spectrum during TX.
-        emit_tx_spectrum(cfg.channel, &cfg.spectrum, &samples, cfg.rate, &cfg.telemetry);
+        // Emit the transmitted spectrum to the operate waterfall, paced over the
+        // burst in a helper thread so it scrolls live for the whole transmission
+        // (the RX tap is muted while we key). The thread ends with the burst, or
+        // early if the worker is cancelled.
+        let tx_spectrum = spawn_tx_spectrum(
+            cfg.channel,
+            cfg.spectrum.clone(),
+            samples,
+            cfg.rate,
+            cfg.telemetry.clone(),
+            cancel.clone(),
+        );
         let outcome = drive_tx_cycle(cfg.driver.as_mut(), &cfg.sink, pcm, cfg.rate, TX_POLL);
+        if let Some(h) = tx_spectrum {
+            let _ = h.join();
+        }
         let _ = cfg.telemetry.send(TelemetryEvent::PttKeyed { channel: cfg.channel, keyed: false });
         cfg.interlock.end_tx(&cfg.rig);
         let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
@@ -225,49 +237,52 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
     }
 }
 
-/// Emit a bounded waterfall of the about-to-be-played TX audio so the operate
-/// screen shows the transmitted signal (the RX tap is muted while we key). A
-/// no-op unless the channel's spectrum stream is enabled. The samples are at the
-/// playback rate, so the tap resolves against that rate.
-fn emit_tx_spectrum(
+/// Spawn a helper that emits the transmitted spectrum to the operate waterfall,
+/// one line per STFT hop spread across the burst's airtime so it scrolls live
+/// while the audio plays — rather than arriving in an instant burst that scrolls
+/// off before the transmission ends. Returns `None` (nothing spawned) when the
+/// spectrum stream is disabled; the thread also stops early if the worker is
+/// cancelled. Samples are at the playback rate, so the tap resolves against it.
+fn spawn_tx_spectrum(
     channel: ChannelId,
-    spectrum: &SpectrumControl,
-    samples: &[f32],
+    spectrum: SpectrumControl,
+    samples: Vec<f32>,
     rate: u32,
-    telemetry: &broadcast::Sender<TelemetryEvent>,
-) {
-    let Some(cfg) = spectrum.snapshot() else {
-        return; // spectrum stream not enabled — nobody is watching
-    };
+    telemetry: broadcast::Sender<TelemetryEvent>,
+    cancel: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let cfg = spectrum.snapshot()?; // disabled => nobody is watching
     if rate == 0 || samples.is_empty() {
-        return;
+        return None;
     }
-    let setup = SpectrumSetup::resolve(
-        rate, cfg.bin_count, cfg.fft_size, cfg.rate_hz, cfg.freq_lo_hz, cfg.freq_hi_hz,
-    );
-    let mut stft = Stft::new(setup.nfft, setup.hop);
-    let plan = setup.plan;
-    let frames = stft.feed(samples);
-    if frames.is_empty() {
-        return;
-    }
-    let window_sum = stft.window_sum();
-    // Cap emitted lines so a long burst can't flood the lossy event bus: take an
-    // evenly spaced subset spanning the burst.
-    const MAX_LINES: usize = 24;
-    let step = frames.len().div_ceil(MAX_LINES).max(1);
-    for frame in frames.iter().step_by(step) {
-        let half = half_spectrum_dbfs(frame, window_sum);
-        let _ = telemetry.send(TelemetryEvent::SpectrumFrame {
-            channel,
-            timestamp_ns: 0,
-            freq_start_hz: plan.freq_start_hz,
-            freq_step_hz: plan.freq_step_hz,
-            db_floor: plan.db_floor,
-            db_ceiling: plan.db_ceiling,
-            bins: plan.render(&half),
-        });
-    }
+    Some(std::thread::spawn(move || {
+        let setup = SpectrumSetup::resolve(
+            rate, cfg.bin_count, cfg.fft_size, cfg.rate_hz, cfg.freq_lo_hz, cfg.freq_hi_hz,
+        );
+        let mut stft = Stft::new(setup.nfft, setup.hop);
+        let plan = setup.plan;
+        let frames = stft.feed(&samples);
+        let window_sum = stft.window_sum();
+        // One frame per hop of airtime keeps the scroll in step with the audio.
+        let interval = Duration::from_nanos((setup.hop as u64 * 1_000_000_000) / rate.max(1) as u64);
+        for frame in frames {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let half = half_spectrum_dbfs(&frame, window_sum);
+            let _ = telemetry.send(TelemetryEvent::SpectrumFrame {
+                channel,
+                timestamp_ns: 0,
+                freq_start_hz: plan.freq_start_hz,
+                freq_step_hz: plan.freq_step_hz,
+                db_floor: plan.db_floor,
+                db_ceiling: plan.db_ceiling,
+                bins: plan.render(&half),
+                transmit: true,
+            });
+            std::thread::sleep(interval);
+        }
+    }))
 }
 
 /// Interpret opaque transmit-payload bytes into a `Frame` for `mode`. Text modes

@@ -1165,6 +1165,7 @@ type SpectrumFrame struct {
 	DbFloor       float32                `protobuf:"fixed32,5,opt,name=db_floor,json=dbFloor,proto3" json:"db_floor,omitempty"`               // dBFS mapped to bin value 0
 	DbCeiling     float32                `protobuf:"fixed32,6,opt,name=db_ceiling,json=dbCeiling,proto3" json:"db_ceiling,omitempty"`         // dBFS mapped to bin value 255
 	Bins          []byte                 `protobuf:"bytes,7,opt,name=bins,proto3" json:"bins,omitempty"`                                      // uint8 quantized dBFS, len == bin_count, low->high freq
+	Transmit      bool                   `protobuf:"varint,8,opt,name=transmit,proto3" json:"transmit,omitempty"`                             // true: transmitted (TX) spectrum; false: received (RX)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1246,6 +1247,13 @@ func (x *SpectrumFrame) GetBins() []byte {
 		return x.Bins
 	}
 	return nil
+}
+
+func (x *SpectrumFrame) GetTransmit() bool {
+	if x != nil {
+		return x.Transmit
+	}
+	return false
 }
 
 type ChannelConfigured struct {
@@ -3094,7 +3102,7 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\fclock_offset\x18\v \x01(\v2\x19.omnimodem.v1.ClockOffsetH\x00R\vclockOffset\x12G\n" +
 	"\x0fchannel_metrics\x18\f \x01(\v2\x1c.omnimodem.v1.ChannelMetricsH\x00R\x0echannelMetrics\x12D\n" +
 	"\x0espectrum_frame\x18\r \x01(\v2\x1b.omnimodem.v1.SpectrumFrameH\x00R\rspectrumFrameB\x06\n" +
-	"\x04kind\"\xe0\x01\n" +
+	"\x04kind\"\xfc\x01\n" +
 	"\rSpectrumFrame\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12!\n" +
 	"\ftimestamp_ns\x18\x02 \x01(\x04R\vtimestampNs\x12\"\n" +
@@ -3104,7 +3112,8 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\bdb_floor\x18\x05 \x01(\x02R\adbFloor\x12\x1d\n" +
 	"\n" +
 	"db_ceiling\x18\x06 \x01(\x02R\tdbCeiling\x12\x12\n" +
-	"\x04bins\x18\a \x01(\fR\x04bins\"-\n" +
+	"\x04bins\x18\a \x01(\fR\x04bins\x12\x1a\n" +
+	"\btransmit\x18\b \x01(\bR\btransmit\"-\n" +
 	"\x11ChannelConfigured\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\"l\n" +
 	"\vClockOffset\x12\x19\n" +

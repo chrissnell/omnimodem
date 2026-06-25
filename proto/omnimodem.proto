@@ -185,6 +185,7 @@ message SpectrumFrame {
   float  db_floor      = 5;   // dBFS mapped to bin value 0
   float  db_ceiling    = 6;   // dBFS mapped to bin value 255
   bytes  bins          = 7;   // uint8 quantized dBFS, len == bin_count, low->high freq
+  bool   transmit      = 8;   // true: transmitted (TX) spectrum; false: received (RX)
 }
 
 message ChannelConfigured { uint32 channel = 1; }
