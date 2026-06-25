@@ -10,14 +10,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// dosTableStyles paints the channel table to match the blue DOS panel: yellow
-// header, white cells, and a black-on-cyan highlighted row.
+// dosTableStyles paints the channel table for the black DOS panel: a yellow
+// header, white cells, and a white-on-bright-blue highlighted row.
 func dosTableStyles() table.Styles {
 	s := table.DefaultStyles()
-	s.Header = s.Header.Foreground(ui.ColorTitle).Background(ui.ColorPanel).
-		Bold(true).BorderForeground(ui.ColorAccent)
-	s.Cell = s.Cell.Foreground(ui.ColorFg).Background(ui.ColorPanel)
-	s.Selected = lipgloss.NewStyle().Foreground(ui.ColorInk).Background(ui.ColorAccent).Bold(true)
+	s.Header = s.Header.Foreground(ui.ColorTitle).Bold(true).BorderForeground(ui.ColorAccent)
+	// Leave cells uncolored (plain text): they then inherit the panel's
+	// white-on-black, and — crucially — emit no per-cell reset that would punch
+	// holes in the Selected highlight bar, so the row-level style fills the row.
+	s.Selected = lipgloss.NewStyle().Foreground(ui.ColorFg).Background(ui.ColorSel).Bold(true)
 	return s
 }
 

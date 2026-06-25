@@ -68,12 +68,12 @@ func newDevList(title string) list.Model {
 	del := list.NewDefaultDelegate()
 	del.ShowDescription = false
 	del.SetSpacing(0)
-	// DOS dialog palette: white rows on the blue panel, black-on-cyan highlight.
+	// DOS dialog palette: white rows on the black panel, white-on-blue highlight.
 	del.Styles.NormalTitle = del.Styles.NormalTitle.Foreground(ui.ColorFg).Background(ui.ColorPanel)
 	del.Styles.DimmedTitle = del.Styles.DimmedTitle.Foreground(ui.ColorDim).Background(ui.ColorPanel)
 	del.Styles.SelectedTitle = del.Styles.SelectedTitle.
-		Foreground(ui.ColorInk).Background(ui.ColorAccent).Bold(true).
-		BorderLeftForeground(ui.ColorAccent)
+		Foreground(ui.ColorFg).Background(ui.ColorSel).Bold(true).
+		BorderLeftForeground(ui.ColorSel)
 	l := list.New(nil, del, 0, 0)
 	l.Title = title
 	l.SetShowTitle(false)  // the modal frame supplies the title

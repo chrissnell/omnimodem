@@ -7,16 +7,16 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Header is the top menu bar (black on light gray, DOS style): the app name in
-// Borland red, then the connection dot + address + version, filling the width.
+// Header is the top menu bar (a blue toolbar): the app name in bright yellow,
+// then the connection dot + address + version, filling the width.
 func Header(connected bool, addr, version string, w int) string {
-	name := lipgloss.NewStyle().Background(ColorMenu).Foreground(lipgloss.Color("1")).
+	name := lipgloss.NewStyle().Background(ColorBar).Foreground(ColorTitle).
 		Bold(true).Render(" omnimodem ")
 	dotColor, glyph, state := ColorDim, "○", "connecting"
 	if connected {
 		dotColor, glyph, state = ColorOK, "●", "connected"
 	}
-	dot := lipgloss.NewStyle().Background(ColorMenu).Foreground(dotColor).Render(glyph)
+	dot := lipgloss.NewStyle().Background(ColorBar).Foreground(dotColor).Render(glyph)
 	right := dot + MenuBar.Render(fmt.Sprintf(" %s · %s · %s ", state, addr, version))
 	gap := max(0, w-lipgloss.Width(name)-lipgloss.Width(right))
 	return name + MenuBar.Render(strings.Repeat(" ", gap)) + right
