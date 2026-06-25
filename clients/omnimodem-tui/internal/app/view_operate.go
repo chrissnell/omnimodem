@@ -25,6 +25,7 @@ type operateView struct {
 	tx         txState
 	rxWf       waterfall
 	txWf       waterfall
+	rxOpen     bool // the last transcript line is an in-progress received line
 	draining   bool // a TX-waterfall scroll-off animation is in flight
 	myCall     string
 	myGrid     string
@@ -61,6 +62,9 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			} else {
 				v.rxWf.push(sf)
 			}
+		}
+		if rf := msg.ev.GetRxFrame(); rf != nil && rf.GetChannel() == v.m.sel {
+			v.appendRx(string(rf.GetData()))
 		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
@@ -161,8 +165,27 @@ func (v *operateView) ft8Send() tea.Cmd {
 		seq.advance()
 	}
 	v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '›', txt: msg})
+	v.rxOpen = false // a TX line closes any in-progress received line
 	v.tx.begin([]byte(msg))
 	return acquireLeaseCmd(v.m.c, v.m.sel)
+}
+
+// appendRx folds streaming decoded text into the transcript. Modes like PSK31
+// decode roughly a character at a time, so received text is accumulated onto a
+// single in-progress received line and broken into a new line at each newline.
+func (v *operateView) appendRx(s string) {
+	for _, r := range s {
+		if r == '\n' || r == '\r' {
+			v.rxOpen = false
+			continue
+		}
+		if !v.rxOpen {
+			v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '‹', txt: ""})
+			v.rxOpen = true
+		}
+		last := &v.transcript[len(v.transcript)-1]
+		last.txt += string(r)
+	}
 }
 
 func (v *operateView) sendCompose() tea.Cmd {
@@ -171,6 +194,7 @@ func (v *operateView) sendCompose() tea.Cmd {
 		return nil
 	}
 	v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '›', txt: line})
+	v.rxOpen = false // a TX line closes any in-progress received line
 	v.tx.begin([]byte(line))
 	v.compose = ""
 	return acquireLeaseCmd(v.m.c, v.m.sel)

@@ -76,3 +76,18 @@ func TestOperateSendTransmits(t *testing.T) {
 		t.Fatal("transcript should show the sent line")
 	}
 }
+
+// Received text (decoded by the daemon and delivered as RxFrame events) must
+// appear in the transcript; streaming modes accumulate onto one line.
+func TestOperateShowsReceivedText(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "psk31"}
+	m.sel = 0
+	v := newOperateView(m)
+	for _, c := range "CQ TEST" {
+		v.Update(eventMsg{&pb.Event{Kind: &pb.Event_RxFrame{RxFrame: &pb.RxFrame{Channel: 0, Data: []byte(string(c))}}}})
+	}
+	if len(v.transcript) != 1 || v.transcript[0].txt != "CQ TEST" || v.transcript[0].dir != '‹' {
+		t.Fatalf("expected one received line 'CQ TEST', got %+v", v.transcript)
+	}
+}
