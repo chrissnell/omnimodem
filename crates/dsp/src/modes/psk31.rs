@@ -122,8 +122,15 @@ impl Psk31Demod {
         Psk31Demod {
             center_hz,
             nco: DownConverter::new(center_hz, rate),
-            // Narrow loop bandwidth for the slow 31.25 baud carrier.
-            costas: CostasLoop::new(0.01, 0.02),
+            // Costas loop bandwidth. A narrow loop tracks the slow 31.25 baud
+            // carrier with less jitter, but locks so slowly (~2 s) that a small
+            // center error eats the start of a transmission — and exactly how
+            // much depends on the residual offset, so the same recording decodes
+            // differently on different machines. A wider loop acquires within a
+            // few symbols and then holds a static offset of tens of Hz, which
+            // makes decoding robust to an imperfect center (e.g. the spectral
+            // auto-detect being a fraction of a hertz off).
+            costas: CostasLoop::new(0.06, 0.02),
             gardner: GardnerTed::new(rate / PSK31_BAUD),
             acc_i: 0.0,
             prev_i: 0.0,
