@@ -385,28 +385,37 @@ func (v *configView) choose() {
 }
 
 func (v *configView) Render(w, h int) string {
-	mark := func(f cfgFocus, s string) string {
-		if v.focus == f {
-			return ui.Accent.Render("▸ " + s)
-		}
-		return "  " + s
-	}
 	chosen := func(id string) string {
 		if id == "" {
 			return ui.Dim.Render("(none)")
 		}
 		return ui.Accent.Render("✓ " + id)
 	}
+	field := func(f cfgFocus, label, val string) string {
+		row := fmt.Sprintf("%-10s %s", label, val)
+		if v.focus == f {
+			return ui.Accent.Render("▸ " + row)
+		}
+		return "  " + row
+	}
+	cyc := "  " + ui.Dim.Render("(←/→)")
+
 	var b strings.Builder
-	b.WriteString(mark(fName, "Name    "+v.name.View()) + "\n")
-	b.WriteString(mark(fCall, "Call    "+v.call.View()) + "\n")
-	b.WriteString(mark(fGrid, "Grid    "+v.grid.View()) + "\n")
-	b.WriteString(mark(fMode, "Mode    ‹ "+v.modeLabel()+" ›  (←/→)") + "\n")
-	b.WriteString(mark(fRx, "RX dev  "+chosen(v.rxID)) + "\n")
-	b.WriteString(mark(fTx, "TX dev  "+chosenOrSame(v.txID)) + "\n")
-	b.WriteString(mark(fPtt, "PTT dev "+chosen(v.pttID)) + "   " +
-		mark(fMethod, "method ‹ "+methodLabel(v.method())+" › (←/→)") + "\n")
-	b.WriteString(mark(fApply, "Apply   "+applyHint(v.canApply())) + "\n")
+	b.WriteString(ui.Title.Render("STATION") + "\n")
+	b.WriteString(field(fName, "Name", v.name.View()) + "\n")
+	b.WriteString(field(fCall, "Call", v.call.View()) + "\n")
+	b.WriteString(field(fGrid, "Grid", v.grid.View()) + "\n\n")
+
+	b.WriteString(ui.Title.Render("MODE") + "\n")
+	b.WriteString(field(fMode, "Mode", "‹ "+v.modeLabel()+" ›"+cyc) + "\n\n")
+
+	b.WriteString(ui.Title.Render("AUDIO") + "\n")
+	b.WriteString(field(fRx, "RX Device", chosen(v.rxID)) + "\n")
+	b.WriteString(field(fTx, "TX Device", chosenOrSame(v.txID)) + "\n")
+	b.WriteString(field(fPtt, "PTT Device", chosen(v.pttID)) + "\n")
+	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n\n")
+
+	b.WriteString(v.applyButton() + "\n")
 
 	// The device picker is a modal: it appears only while a device field is being
 	// chosen, and disappears once a device is selected (or the pick is cancelled).
@@ -456,11 +465,18 @@ func (v *configView) Hints() []ui.Hint {
 	}
 }
 
-func applyHint(ok bool) string {
-	if ok {
-		return "↵"
+// applyButton renders a DOS-dialog-style Apply button: a yellow [ Apply ] that
+// becomes a white-on-dark-blue highlighted button when focused, and dims with a
+// hint until an RX device is chosen.
+func (v *configView) applyButton() string {
+	if !v.canApply() {
+		return "  " + ui.Dim.Render("[ Apply ]  pick an RX device first")
 	}
-	return "(pick RX device)"
+	style := lipgloss.NewStyle().Foreground(ui.ColorTitle).Bold(true)
+	if v.focus == fApply {
+		style = lipgloss.NewStyle().Foreground(ui.ColorFg).Background(ui.ColorSel).Bold(true)
+	}
+	return "  " + style.Render("[ Apply ]")
 }
 
 func methodLabel(m pb.PttMethod) string {
