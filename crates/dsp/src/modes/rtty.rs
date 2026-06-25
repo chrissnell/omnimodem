@@ -88,7 +88,10 @@ impl Modulator for RttyMod {
             bits.push(true); // stop (>=1.5 stop bits)
         }
         bits.extend(std::iter::repeat_n(true, PREAMBLE_CELLS)); // trailing idle
-        let fsk = Fsk2::new(RTTY_RATE as f32, sps, self.center_hz, self.shift_hz);
+        // Amateur RTTY convention (LSB): the mark (idle) tone is the *lower* of
+        // the pair — 2125 Hz mark / 2295 Hz space at a 2210 Hz center. A negative
+        // shift puts `Fsk2`'s mark below center to match.
+        let fsk = Fsk2::new(RTTY_RATE as f32, sps, self.center_hz, -self.shift_hz);
         Ok(fsk.modulate(&bits))
     }
 }
@@ -97,6 +100,9 @@ pub struct RttyDemod {
     baud: f32,
     shift_hz: f32,
     center_hz: f32,
+    /// Reverse the mark/space sense. The default is the amateur LSB convention
+    /// (mark = lower audio tone); `reverse` selects USB/inverted signals.
+    reverse: bool,
     nco: DownConverter,
     lpf_i: Fir,
     lpf_q: Fir,
@@ -126,6 +132,7 @@ impl RttyDemod {
             baud,
             shift_hz,
             center_hz,
+            reverse: false,
             nco: DownConverter::new(center_hz, rate),
             lpf_i: Fir::new(taps.clone()),
             lpf_q: Fir::new(taps),
@@ -137,6 +144,12 @@ impl RttyDemod {
             text: String::new(),
             sample_index: 0,
         }
+    }
+
+    /// Swap the mark/space sense (reverse RTTY). Returns self for chaining.
+    pub fn reversed(mut self, reverse: bool) -> Self {
+        self.reverse = reverse;
+        self
     }
 }
 
@@ -158,13 +171,14 @@ impl Demodulator for RttyDemod {
             self.p_in += SQUELCH_EMA * (bb.norm_sqr() - self.p_in);
             self.p_tot += SQUELCH_EMA * (total - self.p_tot);
             let open = self.p_tot > SQUELCH_FLOOR && self.p_in > SQUELCH_OPEN * self.p_tot;
-            // Instantaneous frequency after down-conversion to center: positive
-            // => above center => mark (high tone) => logic 1. Keep the
-            // discriminator running every sample so its phase reference stays
-            // continuous, but with no carrier hold the line at the idle mark so
-            // the framer never syncs on a noise edge.
+            // Instantaneous frequency after down-conversion to center. Amateur
+            // RTTY (LSB) puts the mark tone *below* center, so a negative
+            // frequency is mark (logic 1); `reverse` swaps that for USB/inverted
+            // signals. Keep the discriminator running every sample so its phase
+            // reference stays continuous, but with no carrier hold the line at
+            // the idle mark so the framer never syncs on a noise edge.
             let freq = self.disc.push(bb);
-            let level = if open { freq > 0.0 } else { true };
+            let level = if open { (freq < 0.0) ^ self.reverse } else { true };
             if let Some(code_bits) = self.sync.feed(level) {
                 let mut code = 0u8;
                 for (i, &b) in code_bits.iter().enumerate() {
@@ -192,7 +206,7 @@ impl Demodulator for RttyDemod {
     }
 
     fn reset(&mut self) {
-        *self = RttyDemod::with_center(self.baud, self.shift_hz, self.center_hz);
+        *self = RttyDemod::with_center(self.baud, self.shift_hz, self.center_hz).reversed(self.reverse);
     }
 }
 

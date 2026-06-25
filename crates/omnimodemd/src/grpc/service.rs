@@ -360,7 +360,8 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
             } else {
                 omnimodem_dsp::modes::rtty::CENTER_HZ
             };
-            ModeConfig::Rtty { baud: r.baud, shift_hz: r.shift_hz, center_hz }.to_mode_string()
+            ModeConfig::Rtty { baud: r.baud, shift_hz: r.shift_hz, center_hz, reverse: r.reverse }
+                .to_mode_string()
         }
         Params::Psk31(p) => ModeConfig::Psk31 { center_hz: p.center_hz }.to_mode_string(),
         Params::Olivia(o) => {

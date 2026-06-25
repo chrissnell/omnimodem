@@ -38,6 +38,7 @@ struct Params {
     text: String,
     out: String,
     scan: bool,
+    reverse: bool,
 }
 
 fn main() {
@@ -68,6 +69,7 @@ fn main() {
         text: flag(rest, "--text").unwrap_or_default(),
         out: flag(rest, "--out").unwrap_or_else(|| "out.wav".into()),
         scan: rest.iter().any(|a| a == "--scan"),
+        reverse: rest.iter().any(|a| a == "--reverse"),
         mode,
     };
 
@@ -77,7 +79,11 @@ fn main() {
             None => Err("decode needs a <file.wav> argument".into()),
         },
         "gen" => generate(&p),
-        other => Err(format!("unknown command {other:?} (expected decode|gen)")),
+        "analyze" => match file {
+            Some(f) => analyze(&f),
+            None => Err("analyze needs a <file.wav> argument".into()),
+        },
+        other => Err(format!("unknown command {other:?} (expected decode|gen|analyze)")),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -92,7 +98,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn build_demod(p: &Params, center: f32) -> Result<Box<dyn Demodulator>, String> {
     Ok(match p.mode.as_str() {
-        "rtty" => Box::new(RttyDemod::with_center(p.baud, p.shift, center)),
+        "rtty" => Box::new(RttyDemod::with_center(p.baud, p.shift, center).reversed(p.reverse)),
         "psk31" => Box::new(Psk31Demod::new(center)),
         "cw" => Box::new(CwDemod::new(p.wpm, center)),
         "olivia" => Box::new(OliviaDemod::new(p.tones, p.bw)),
@@ -173,6 +179,66 @@ fn generate(p: &Params) -> Result<(), String> {
         p.center,
         p.mode,
     );
+    Ok(())
+}
+
+/// FFT the recording and report where the signal energy actually sits, so you
+/// can pick the right --center (or see that the file isn't what you think).
+fn analyze(path: &str) -> Result<(), String> {
+    use rustfft::{num_complex::Complex, FftPlanner};
+    let (mono, rate) = read_wav(path)?;
+    println!("analyze {path}: {rate} Hz, {} samples ({:.1}s)", mono.len(), mono.len() as f32 / rate as f32);
+    // Average the power spectrum over Hann-windowed frames for a stable estimate.
+    let n = 8192.min(mono.len().next_power_of_two());
+    if n < 64 {
+        return Err("file too short to analyze".into());
+    }
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(n);
+    let mut power = vec![0.0f64; n / 2];
+    let mut frames = 0usize;
+    let hop = n / 2;
+    let mut pos = 0;
+    while pos + n <= mono.len() {
+        let mut buf: Vec<Complex<f32>> = (0..n)
+            .map(|i| {
+                let w = 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n as f32).cos();
+                Complex::new(mono[pos + i] * w, 0.0)
+            })
+            .collect();
+        fft.process(&mut buf);
+        for (k, p) in power.iter_mut().enumerate() {
+            *p += (buf[k].norm_sqr()) as f64;
+        }
+        frames += 1;
+        pos += hop;
+    }
+    if frames == 0 {
+        return Err("file too short to analyze".into());
+    }
+    let bin_hz = rate as f32 / n as f32;
+    let peak = power.iter().cloned().fold(0.0f64, f64::max).max(1e-12);
+    // Top peaks (local maxima) in the audio band.
+    let mut peaks: Vec<(usize, f64)> = (1..power.len() - 1)
+        .filter(|&k| power[k] >= power[k - 1] && power[k] >= power[k + 1])
+        .map(|k| (k, power[k]))
+        .collect();
+    peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    println!("dominant frequencies (bin {bin_hz:.1} Hz):");
+    for (k, p) in peaks.iter().take(6) {
+        let db = 10.0 * (p / peak).log10();
+        println!("  {:>6.0} Hz  {:>6.1} dB", *k as f32 * bin_hz, db);
+    }
+    // Energy centroid across the SSB audio band — a decent center estimate.
+    let (lo, hi) = ((300.0 / bin_hz) as usize, (2700.0 / bin_hz).min((n / 2 - 1) as f32) as usize);
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (k, &pk) in power.iter().enumerate().take(hi + 1).skip(lo) {
+        num += k as f64 * pk;
+        den += pk;
+    }
+    if den > 0.0 {
+        println!("audio-band energy centroid ≈ {:.0} Hz", (num / den) as f32 * bin_hz);
+    }
     Ok(())
 }
 

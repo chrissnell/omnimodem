@@ -101,6 +101,7 @@ message RttyParams {
   float baud = 1;       // symbol rate (e.g. 45.45)
   float shift_hz = 2;   // mark/space shift (e.g. 170)
   float center_hz = 3;  // audio center; 0 ⇒ default (2210 Hz, US ham RTTY)
+  bool  reverse = 4;    // swap mark/space (reverse RTTY; depends on sideband)
 }
 
 message Psk31Params {

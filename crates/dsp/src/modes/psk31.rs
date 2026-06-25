@@ -4,10 +4,11 @@
 //! cosine DBPSK at `center_hz`. RX: Costas carrier recovery + Gardner timing →
 //! differential decode → Varicode decode.
 
-use crate::fec::gray::diff_bpsk_encode;
 use crate::framing::varicode::{decode as vari_decode, encode as vari_encode, PSK31};
+use crate::frontend::fir::{design_lowpass, Fir};
 use crate::frontend::modulate::DiffPsk;
 use crate::frontend::nco::DownConverter;
+use crate::types::Cplx;
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
 use crate::sync::costas::CostasLoop;
 use crate::sync::timing::GardnerTed;
@@ -51,18 +52,20 @@ impl Modulator for Psk31Mod {
             FramePayload::Text(t) => t,
             _ => return Err(ModError::UnsupportedPayload("psk31 needs text")),
         };
-        // PSK31 idles on continuous phase reversals so the receiver's timing
-        // loop has transitions to lock onto. `diff_bpsk_encode` flips polarity
-        // on a `1`, so the idle preamble is a run of `1` bits, closed by the
-        // `00` inter-character separator that delimits the first real codeword.
-        let mut bits = vec![1u8; PREAMBLE_REVERSALS];
-        bits.push(0);
-        bits.push(0);
-        bits.extend(vari_encode(&PSK31, text));
-        let syms = diff_bpsk_encode(&bits);
-        let sym_u32: Vec<u32> = syms.iter().map(|&b| b as u32).collect();
+        // Standard PSK31: data rides on phase *reversals* — a Varicode `0` is a
+        // reversal, a `1` is a steady carrier — and the line idles on continuous
+        // reversals so the receiver's timing loop has transitions to lock onto.
+        // `DiffPsk::modulate` differentially encodes its input (running phase
+        // sum), so feed it the reversal stream directly — one differential layer,
+        // matching what other PSK31 stacks (fldigi, …) send. (1 = reversal: idle
+        // reversals, the `00` separator as two reversals, then payload bit b →
+        // reversal `1 ^ b`.)
+        let mut rev = vec![1u32; PREAMBLE_REVERSALS];
+        rev.push(1);
+        rev.push(1);
+        rev.extend(vari_encode(&PSK31, text).into_iter().map(|b| (1 ^ b) as u32));
         let psk = DiffPsk::new(PSK31_RATE as f32, self.center_hz, self.sps, 1);
-        Ok(psk.modulate(&sym_u32))
+        Ok(psk.modulate(&rev))
     }
 }
 
@@ -71,37 +74,41 @@ impl Modulator for Psk31Mod {
 /// the stream is noise, so the buffer is dropped rather than growing unbounded.
 const MAX_PENDING_BITS: usize = 512;
 
-/// Carrier-detect (squelch) parameters. The detector measures *carrier
-/// presence*, not lock quality: per symbol it compares the coherent sum of the
-/// de-rotated samples, |Σz|², against the total power, N·Σ|z|². A narrowband
-/// tone adds coherently (ratio → 1) even if the Costas loop hasn't fully locked;
-/// white noise adds incoherently (ratio ≈ 1/N). Keying on presence rather than
-/// lock means a real-but-imperfect signal still decodes instead of going silent.
-const CARRIER_EMA: f32 = 0.1;
-const CARRIER_OPEN: f32 = 0.04;
+/// Carrier squelch: smoothed in-band / total power ratio (same idea as the RTTY
+/// demod). A narrowband PSK31 signal — including the continuous-reversal idle,
+/// whose energy sits at carrier ±15.6 Hz — survives a lowpass a little wider
+/// than the ~31 Hz occupied band, so most of its power passes (ratio high);
+/// white noise spread across the whole band is mostly rejected (ratio low).
+/// This keys on signal *presence*, not Costas lock, and (unlike a DC matched
+/// filter) does not mistake the reversal idle for silence.
+const SQUELCH_CUTOFF_HZ: f32 = 80.0;
+const SQUELCH_TAPS: usize = 127;
+const CARRIER_EMA: f32 = 0.002;
+const CARRIER_OPEN: f32 = 0.15;
 /// Absolute power floor so true digital silence reads as "no carrier".
-const CARRIER_FLOOR: f32 = 1e-6;
+const CARRIER_FLOOR: f32 = 1e-9;
 
 pub struct Psk31Demod {
     center_hz: f32,
     nco: DownConverter,
     costas: CostasLoop,
     gardner: GardnerTed,
-    // Integrate-and-dump accumulators over the current symbol (matched filter):
-    // I carries the data, Q is used only for carrier detection.
+    // Integrate-and-dump accumulator over the current symbol (matched filter):
+    // the de-rotated in-phase value carries the data.
     acc_i: f32,
-    acc_q: f32,
-    // Total de-rotated power and sample count over the current symbol, for the
-    // carrier-presence squelch (coherent sum vs. total power).
-    acc_pow: f32,
-    nsym: u32,
     prev_i: f32,
     have_prev: bool,
-    /// Smoothed coherent-power ratio (|Σz|² / N·Σ|z|²): ≈1 for a tone, ≈1/N for
-    /// noise. The squelch opens above [`CARRIER_OPEN`].
-    coh: f32,
-    /// Previous reversal bit, for the incremental second differential layer.
-    diff_prev: u8,
+    // Once the squelch opens we join the bit stream mid-symbol; `synced` gates
+    // decoding until a `00` character boundary appears, so the leading partial
+    // codeword (and acquisition transient) is discarded instead of emitted.
+    synced: bool,
+    zrun: u8,
+    // Carrier squelch: a lowpass on the complex baseband plus smoothed in-band
+    // and total power; their ratio tells a PSK31 signal from the noise floor.
+    lpf_i: Fir,
+    lpf_q: Fir,
+    p_in: f32,
+    p_tot: f32,
     /// Varicode data bits not yet resolved into a completed character; drained
     /// at each `00` separator so this stays bounded (no whole-stream re-decode).
     pending: Vec<u8>,
@@ -111,6 +118,7 @@ pub struct Psk31Demod {
 impl Psk31Demod {
     pub fn new(center_hz: f32) -> Self {
         let rate = PSK31_RATE as f32;
+        let taps = design_lowpass(SQUELCH_TAPS, SQUELCH_CUTOFF_HZ, rate);
         Psk31Demod {
             center_hz,
             nco: DownConverter::new(center_hz, rate),
@@ -118,13 +126,14 @@ impl Psk31Demod {
             costas: CostasLoop::new(0.01, 0.02),
             gardner: GardnerTed::new(rate / PSK31_BAUD),
             acc_i: 0.0,
-            acc_q: 0.0,
-            acc_pow: 0.0,
-            nsym: 0,
             prev_i: 0.0,
             have_prev: false,
-            coh: 0.0,
-            diff_prev: 0,
+            synced: false,
+            zrun: 0,
+            lpf_i: Fir::new(taps.clone()),
+            lpf_q: Fir::new(taps),
+            p_in: 0.0,
+            p_tot: 0.0,
             pending: Vec::new(),
             sample_index: 0,
         }
@@ -177,47 +186,47 @@ impl Demodulator for Psk31Demod {
         for &x in samples {
             self.sample_index += 1;
             let bb = self.nco.push(x);
+            // Carrier squelch: lowpass the raw baseband and track the in-band vs.
+            // total power. The lowpass is wide enough to pass the PSK31 band
+            // (including the ±15.6 Hz reversal idle), so the gate stays open on a
+            // real signal but closes on the broadband noise floor.
+            let f = Cplx::new(self.lpf_i.push(bb.re), self.lpf_q.push(bb.im));
+            self.p_in += CARRIER_EMA * (f.norm_sqr() - self.p_in);
+            self.p_tot += CARRIER_EMA * (bb.norm_sqr() - self.p_tot);
             let derot = self.costas.process(bb);
-            // Integrate the de-rotated I/Q across the symbol for matched-filter
-            // SNR gain; Gardner still times off the instantaneous sample.
+            // Integrate the de-rotated in-phase value across the symbol for
+            // matched-filter SNR gain; Gardner times off the instantaneous sample.
             self.acc_i += derot.re;
-            self.acc_q += derot.im;
-            self.acc_pow += derot.re * derot.re + derot.im * derot.im;
-            self.nsym += 1;
             if self.gardner.feed(derot.re).is_some() {
                 let sym = self.acc_i;
-                let q = self.acc_q;
-                let coherent = sym * sym + q * q;
-                let total = self.nsym as f32 * self.acc_pow;
-                let pow = self.acc_pow;
                 self.acc_i = 0.0;
-                self.acc_q = 0.0;
-                self.acc_pow = 0.0;
-                self.nsym = 0;
-                // Carrier-presence detect: a coherent tone makes |Σz|² approach
-                // the total power N·Σ|z|² (ratio → 1); noise stays near 1/N. This
-                // keys on a signal being present, not on a clean lock, so a real
-                // but imperfectly-locked carrier still decodes. Below threshold,
-                // drop any partial codeword and resync the differential decoder.
-                let ratio = if total > 0.0 { coherent / total } else { 0.0 };
-                self.coh += CARRIER_EMA * (ratio - self.coh);
-                if pow < CARRIER_FLOOR || self.coh < CARRIER_OPEN {
+                let open = self.p_tot > CARRIER_FLOOR && self.p_in > CARRIER_OPEN * self.p_tot;
+                if !open {
                     self.pending.clear();
                     self.have_prev = false;
                     self.prev_i = 0.0;
+                    self.synced = false;
+                    self.zrun = 0;
                     continue;
                 }
-                // Differential BPSK symbol = phase reversal vs. the previous
-                // symbol. `diff_bpsk_encode` flips polarity on a data `1`, so a
-                // reversal (sign change) decodes to symbol `1`.
+                // Standard PSK31 differential rule: a phase reversal between
+                // consecutive symbols is a data `0`, a steady carrier is a `1`.
+                // (Single differential — this is what fldigi & co. transmit; the
+                // earlier double-differential only ever decoded our own TX.)
                 if self.have_prev {
-                    let reversal = u8::from(sym * self.prev_i < 0.0);
-                    // Second differential layer, applied incrementally (the
-                    // streaming equivalent of `diff_bpsk_decode`): data bit =
-                    // reversal XOR previous reversal.
-                    let data_bit = reversal ^ self.diff_prev;
-                    self.diff_prev = reversal;
-                    self.pending.push(data_bit);
+                    // A steady carrier (no phase reversal) is a `1`, a reversal a `0`.
+                    let data_bit = u8::from(sym * self.prev_i >= 0.0);
+                    if self.synced {
+                        self.pending.push(data_bit);
+                    } else if data_bit == 0 {
+                        // Wait for a `00` boundary before decoding real characters.
+                        self.zrun += 1;
+                        if self.zrun >= 2 {
+                            self.synced = true;
+                        }
+                    } else {
+                        self.zrun = 0;
+                    }
                 }
                 self.prev_i = sym;
                 self.have_prev = true;

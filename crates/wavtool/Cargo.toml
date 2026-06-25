@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 omnimodem-dsp = { path = "../dsp" }
 hound = "3"
+rustfft = "6"
