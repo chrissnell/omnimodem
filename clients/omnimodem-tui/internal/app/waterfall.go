@@ -21,10 +21,16 @@ var wfStyles = func() []lipgloss.Style {
 	idx := []string{"17", "19", "21", "33", "45", "51", "46", "118", "226", "220", "208", "196"}
 	s := make([]lipgloss.Style, len(idx))
 	for i, c := range idx {
-		s[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(c))
+		// Set the true-black background on every cell so the colored glyphs don't
+		// leave the surrounding panel's grey showing between styled spans.
+		s[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Background(ui.ColorPanel)
 	}
 	return s
 }()
+
+// wfBlank fills silent cells with a true-black background (a bare space would
+// otherwise expose the terminal's default background between colored spans).
+var wfBlank = lipgloss.NewStyle().Background(ui.ColorPanel)
 
 // wfColorIdx maps a 0..255 intensity to a colormap index.
 func wfColorIdx(v byte) int {
@@ -82,11 +88,11 @@ func (w *waterfall) render(width, rows int) string {
 // spectrumLine renders one frame's bins into `width` density glyphs.
 func spectrumLine(bins []byte, width int) string {
 	if len(bins) == 0 {
-		return strings.Repeat(" ", width)
+		return wfBlank.Render(strings.Repeat(" ", width))
 	}
 	// Color each glyph by intensity, coalescing consecutive same-color cells into
-	// one styled span so a line emits few escape codes. Blank (silent) cells get
-	// no color — a space carries no ink anyway.
+	// one styled span so a line emits few escape codes. Silent cells render on the
+	// black background so the line is solid black end to end.
 	var out strings.Builder
 	var run strings.Builder
 	cur := -1 // current colormap index, -1 == uncolored
@@ -95,7 +101,7 @@ func spectrumLine(bins []byte, width int) string {
 			return
 		}
 		if cur < 0 {
-			out.WriteString(run.String())
+			out.WriteString(wfBlank.Render(run.String()))
 		} else {
 			out.WriteString(wfStyles[cur].Render(run.String()))
 		}
@@ -119,9 +125,20 @@ func spectrumLine(bins []byte, width int) string {
 }
 
 // axis labels the displayed frequency span under the waterfall.
+// axis labels colored like the rest of the panel: red numbers, green "Hz" units,
+// all on the black background.
+var (
+	wfNum  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(ui.ColorPanel) // red
+	wfUnit = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Background(ui.ColorPanel)  // green
+)
+
 func (w *waterfall) axis(width int) string {
 	if w.freqStep == 0 || len(w.rows) == 0 {
-		return ui.Accent.Render(" waterfall idle — transmit, or feed a signal to the RX device")
+		msg := " waterfall idle — transmit, or feed a signal to the RX device"
+		if len(msg) < width {
+			msg += strings.Repeat(" ", width-len(msg))
+		}
+		return lipgloss.NewStyle().Foreground(ui.ColorAccent).Background(ui.ColorPanel).Render(msg)
 	}
 	n := len(w.rows[len(w.rows)-1])
 	lo := int(w.freqStart)
@@ -129,13 +146,16 @@ func (w *waterfall) axis(width int) string {
 		lo = 0
 	}
 	hi := int(w.freqStart + w.freqStep*float32(n))
-	left := fmt.Sprintf("%d Hz", lo)
-	right := fmt.Sprintf("%d Hz", hi)
-	gap := width - len(left) - len(right)
+	loStr := fmt.Sprintf("%d", lo)
+	hiStr := fmt.Sprintf("%d", hi)
+	// " Hz" suffix is 3 visible cells; size the gap from the plain widths.
+	gap := width - (len(loStr) + 3) - (len(hiStr) + 3)
 	if gap < 1 {
 		gap = 1
 	}
-	return ui.Dim.Render(left + strings.Repeat(" ", gap) + right)
+	sp := wfBlank.Render(" ")
+	label := func(num string) string { return wfNum.Render(num) + sp + wfUnit.Render("Hz") }
+	return label(loStr) + wfBlank.Render(strings.Repeat(" ", gap)) + label(hiStr)
 }
 
 // enableSpectrumCmd asks the daemon to start the per-channel spectrum stream
