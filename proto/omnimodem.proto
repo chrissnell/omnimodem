@@ -144,8 +144,11 @@ message ChannelInfo {
   uint32 channel = 1;
   string name = 2;
   string mode = 3;
-  string device_id = 4;   // stable device identity (placeholder in Phase 1)
+  string device_id = 4;        // stable RX (capture) device identity
   bool running = 5;
+  string tx_device_id = 6;     // TX (playback) device; empty == same as RX
+  string ptt_device_id = 7;    // PTT device; empty when deviceless (None/Vox) or unset
+  PttMethod ptt_method = 8;    // configured PTT method (UNSPECIFIED if unset)
 }
 
 // ---------------------------------------------------------------------------

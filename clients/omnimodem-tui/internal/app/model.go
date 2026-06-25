@@ -12,15 +12,18 @@ import (
 
 // chanLive is the per-channel live state, fed by the event stream.
 type chanLive struct {
-	name      string
-	mode      string
-	deviceID  string
-	running   bool
-	rxDbfs    float32
-	txDbfs    float32
-	pttKeyed  bool
-	clockSync bool
-	clockOff  float64
+	name        string
+	mode        string
+	deviceID    string // RX (capture) device
+	txDeviceID  string // TX (playback) device; "" == same as RX
+	pttDeviceID string // PTT device; "" when deviceless or unset
+	pttMethod   pb.PttMethod
+	running     bool
+	rxDbfs      float32
+	txDbfs      float32
+	pttKeyed    bool
+	clockSync   bool
+	clockOff    float64
 }
 
 // Model is the root window manager: it owns the client, the event stream, shared
@@ -65,6 +68,8 @@ func (m *Model) applyEvent(ev *pb.Event) {
 			m.live[ci.GetChannel()] = &chanLive{
 				name: ci.GetName(), mode: ci.GetMode(),
 				deviceID: ci.GetDeviceId(), running: ci.GetRunning(),
+				txDeviceID: ci.GetTxDeviceId(), pttDeviceID: ci.GetPttDeviceId(),
+				pttMethod: ci.GetPttMethod(),
 			}
 		}
 	case *pb.Event_AudioLevel:

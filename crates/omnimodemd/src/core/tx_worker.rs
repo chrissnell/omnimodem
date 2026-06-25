@@ -14,6 +14,7 @@ use crate::ptt::interlock::RxTxInterlock;
 use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::PttDriver;
+use omnimodem_dsp::frontend::resample::Resampler;
 use omnimodem_dsp::mode::Modulator;
 use omnimodem_dsp::types::{Frame, FramePayload};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -138,6 +139,17 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
                 });
                 continue;
             }
+        };
+        // Bridge the modulator's native rate to the playback stream rate. A
+        // modulator emits baseband at caps().native_rate (CW/RTTY/PSK31 at 8 kHz,
+        // FT8 at 12 kHz); feeding those straight to a 48 kHz sink ran the burst
+        // several times too fast and high-pitched. afsk1200 is already 48 kHz, so
+        // its resampler is a passthrough — which is why only it sounded right.
+        let native = cfg.modulator.caps().native_rate;
+        let samples = if cfg.rate > 0 && native != cfg.rate {
+            Resampler::new(native, cfg.rate, 16).process(&samples)
+        } else {
+            samples
         };
         // Apply runtime TX gain before the i16 conversion; the clamp stays after
         // the multiply so boosting can hit the rails but never overflow i16.
@@ -272,6 +284,63 @@ mod tests {
             assert!(completed, "no TransmitComplete");
         });
         assert!(!backend.played.lock().unwrap().is_empty(), "no audio played");
+        worker.shutdown();
+    }
+
+    #[test]
+    fn modulator_output_is_resampled_to_the_sink_rate() {
+        // CW modulates at 8 kHz; through a 48 kHz sink it must be resampled up
+        // ~6x. Playing it raw (1x) is what made CW/PSK31/RTTY sound several times
+        // too fast and high-pitched.
+        let mk = || {
+            crate::mode::registry::build_modulator(&ModeConfig::Cw { wpm: 20, tone_hz: 700.0 })
+                .unwrap()
+        };
+        assert_eq!(mk().caps().native_rate, 8_000);
+        let raw_len = mk().modulate(&DspFrame::text("E")).unwrap().len();
+
+        let backend = FileBackend::from_samples(vec![], 48_000);
+        let sink = backend.open_playback(48_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 48_000,
+            modulator: mk(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+        });
+        worker.enqueue(TxJob { frame: DspFrame::text("E"), transmit_id: TransmitId(1) }).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            let mut completed = false;
+            for _ in 0..400 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    if let TelemetryEvent::TransmitComplete { .. } = ev {
+                        completed = true;
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(completed, "no TransmitComplete");
+        });
+
+        // Played at 48 kHz from an 8 kHz native burst => ~6x the native samples.
+        // Without the resample step it would be ~raw_len (1x).
+        let played = backend.played.lock().unwrap().len();
+        assert!(
+            played >= raw_len * 5,
+            "expected ~6x resample of {raw_len} native samples, played {played}",
+        );
         worker.shutdown();
     }
 
