@@ -196,15 +196,34 @@ func (v *operateView) Render(w, h int) string {
 	// Every cell carries the black panel background (label padding, the gap, and
 	// the waterfall rows) so no grey leaks through between the colored spans.
 	head := ui.Title.Background(ui.ColorPanel).Width(col)
-	column := func(label string, wf *waterfall) string {
+	bodyH := wfRows + 1 // waterfall rows + axis line
+	// msgPane centers a message both ways in a pane's body area, on black.
+	msgPane := func(msg string) string {
+		text := lipgloss.NewStyle().Foreground(ui.ColorAccent).Background(ui.ColorPanel).
+			Width(col).Align(lipgloss.Center).Render(msg)
+		return lipgloss.Place(col, bodyH, lipgloss.Center, lipgloss.Center, text,
+			lipgloss.WithWhitespaceBackground(ui.ColorPanel))
+	}
+	column := func(label, override string, wf *waterfall) string {
+		if override != "" {
+			return head.Render(label) + "\n" + msgPane(override)
+		}
 		return head.Render(label) + "\n" + wf.render(col, wfRows) + "\n" + wf.axis(col)
+	}
+	rxMsg := ""
+	if v.tx.active() {
+		rxMsg = "RX channel muted during TX" // the rig can't receive while keyed
+	}
+	txMsg := ""
+	if len(v.txWf.rows) == 0 {
+		txMsg = "waterfall idle" // nothing transmitted (or it has scrolled off)
 	}
 	gapBlock := lipgloss.NewStyle().Background(ui.ColorPanel).Width(gap).Height(wfRows + 2).Render("")
 	b.WriteString(lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		column("RX", &v.rxWf),
+		column("RX", rxMsg, &v.rxWf),
 		gapBlock,
-		column("TX", &v.txWf),
+		column("TX", txMsg, &v.txWf),
 	) + "\n\n")
 
 	if v.seq != nil {

@@ -10,6 +10,22 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// The panes show centered status messages: "waterfall idle" on an empty TX pane,
+// and "RX channel muted during TX" on the RX pane while transmitting.
+func TestOperatePaneMessages(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "psk31"}
+	m.sel = 0
+	v := newOperateView(m)
+	if !strings.Contains(v.Render(80, 16), "waterfall idle") {
+		t.Fatal("idle TX pane should show 'waterfall idle'")
+	}
+	v.tx.begin([]byte("CQ"))
+	if !strings.Contains(v.Render(80, 16), "RX channel muted during TX") {
+		t.Fatal("RX pane should show the muted message during TX")
+	}
+}
+
 // When TX ends, the TX waterfall must scroll off to black, not pause on its last
 // line: an idle tick starts the drain and drain ticks clear the pane.
 func TestTXWaterfallDrainsWhenIdle(t *testing.T) {
