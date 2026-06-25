@@ -7,7 +7,19 @@ import (
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
+
+// dosTableStyles paints the channel table to match the blue DOS panel: yellow
+// header, white cells, and a black-on-cyan highlighted row.
+func dosTableStyles() table.Styles {
+	s := table.DefaultStyles()
+	s.Header = s.Header.Foreground(ui.ColorTitle).Background(ui.ColorPanel).
+		Bold(true).BorderForeground(ui.ColorAccent)
+	s.Cell = s.Cell.Foreground(ui.ColorFg).Background(ui.ColorPanel)
+	s.Selected = lipgloss.NewStyle().Foreground(ui.ColorInk).Background(ui.ColorAccent).Bold(true)
+	return s
+}
 
 type channelsView struct {
 	m *Model
@@ -19,7 +31,7 @@ func newChannelsView(m *Model) *channelsView {
 		{Title: "CH", Width: 4}, {Title: "NAME", Width: 10}, {Title: "MODE", Width: 12},
 		{Title: "DEVICE", Width: 22}, {Title: "PTT", Width: 4}, {Title: "RX dBFS", Width: 8},
 	}
-	t := table.New(table.WithColumns(cols), table.WithFocused(true))
+	t := table.New(table.WithColumns(cols), table.WithFocused(true), table.WithStyles(dosTableStyles()))
 	v := &channelsView{m: m, t: t}
 	v.refresh()
 	return v

@@ -42,10 +42,17 @@ type Model struct {
 	connected bool
 	stack     []View
 	toast     *ui.Toast
+	// Operator station identity, used by FT8 sequencing and macros. Set on the
+	// Configure screen.
+	myCall string
+	myGrid string
 }
 
 func New(c client.ModemClient, addr string) *Model {
-	return &Model{c: c, addr: addr, version: "dev", live: map[uint32]*chanLive{}}
+	return &Model{
+		c: c, addr: addr, version: "dev", live: map[uint32]*chanLive{},
+		myCall: "N0CALL", myGrid: "AA00",
+	}
 }
 
 func (m *Model) Init() tea.Cmd { return connectCmd(m.c) }

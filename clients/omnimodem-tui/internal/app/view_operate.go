@@ -34,8 +34,8 @@ type operateView struct {
 func newOperateView(m *Model) *operateView {
 	v := &operateView{
 		m:      m,
-		myCall: "NW5W",
-		myGrid: "EM10",
+		myCall: m.myCall,
+		myGrid: m.myGrid,
 		rst:    "599",
 		tx:     txState{watchdog: 30 * time.Second},
 	}

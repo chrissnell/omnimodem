@@ -2,20 +2,24 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Frame draws a titled, bordered pane sized to w×h (outer dimensions). When
-// focused the border uses the accent color.
+// Frame draws a titled, double-line panel sized to w×h (outer dimensions) in the
+// DOS-desktop style: a blue fill with a bright-cyan double border (white when
+// focused) and a yellow title. Body text inherits the blue panel background.
 func Frame(title, body string, focused bool, w, h int) string {
-	border := ColorDim
+	border := ColorAccent
 	if focused {
-		border = ColorAccent
+		border = ColorFg
 	}
 	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(lipgloss.DoubleBorder()).
 		BorderForeground(border).
+		BorderBackground(ColorPanel).
+		Background(ColorPanel).
+		Foreground(ColorFg).
 		Width(max(1, w-2)).
 		Height(max(1, h-2)).
 		Padding(0, 1)
-	titled := Title.Render(" "+title+" ") + "\n" + body
+	titled := Title.Background(ColorPanel).Render(" "+title+" ") + "\n" + body
 	return style.Render(titled)
 }
 

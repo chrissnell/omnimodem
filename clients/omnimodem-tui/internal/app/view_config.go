@@ -33,6 +33,8 @@ type cfgFocus int
 
 const (
 	fName cfgFocus = iota
+	fCall
+	fGrid
 	fMode
 	fRx
 	fTx
@@ -45,6 +47,8 @@ const (
 type configView struct {
 	m         *Model
 	name      textinput.Model
+	call      textinput.Model
+	grid      textinput.Model
 	modeIdx   int
 	rx        list.Model
 	tx        list.Model
@@ -64,6 +68,12 @@ func newDevList(title string) list.Model {
 	del := list.NewDefaultDelegate()
 	del.ShowDescription = false
 	del.SetSpacing(0)
+	// DOS dialog palette: white rows on the blue panel, black-on-cyan highlight.
+	del.Styles.NormalTitle = del.Styles.NormalTitle.Foreground(ui.ColorFg).Background(ui.ColorPanel)
+	del.Styles.DimmedTitle = del.Styles.DimmedTitle.Foreground(ui.ColorDim).Background(ui.ColorPanel)
+	del.Styles.SelectedTitle = del.Styles.SelectedTitle.
+		Foreground(ui.ColorInk).Background(ui.ColorAccent).Bold(true).
+		BorderLeftForeground(ui.ColorAccent)
 	l := list.New(nil, del, 0, 0)
 	l.Title = title
 	l.SetShowTitle(false)  // the modal frame supplies the title
@@ -75,9 +85,19 @@ func newDevList(title string) list.Model {
 func newConfigView(m *Model) *configView {
 	name := textinput.New()
 	name.Focus()
+	call := textinput.New()
+	call.Placeholder = "N0CALL"
+	call.CharLimit = 12
+	call.SetValue(m.myCall)
+	grid := textinput.New()
+	grid.Placeholder = "AA00"
+	grid.CharLimit = 8
+	grid.SetValue(m.myGrid)
 	v := &configView{
 		m:    m,
 		name: name,
+		call: call,
+		grid: grid,
 		rx:   newDevList("RX device (capture)"),
 		tx:   newDevList("TX device (playback)"),
 		ptt:  newDevList("PTT device"),
@@ -243,27 +263,38 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		case "esc":
 			v.m.pop() // cancel configuration, back to Channels
 			return v, nil
-		case "tab":
+		case "tab", "down":
 			if v.focus < fLast {
 				v.focus++
 			}
 			v.syncFocus()
 			return v, nil
-		case "shift+tab":
+		case "shift+tab", "up":
 			if v.focus > fName {
 				v.focus--
 			}
 			v.syncFocus()
 			return v, nil
 		}
-		// When the name field is focused, every other key is text input — so the
-		// name can contain 'a', spaces, etc. (form-action keys are off-limits here).
-		if v.focus == fName {
+		// Text fields take every other key (so values may hold 'a', spaces, etc.);
+		// ←/→ move the cursor. Call/Grid keep the operator station identity in sync.
+		switch v.focus {
+		case fName:
 			var cmd tea.Cmd
 			v.name, cmd = v.name.Update(msg)
 			return v, cmd
+		case fCall:
+			var cmd tea.Cmd
+			v.call, cmd = v.call.Update(msg)
+			v.m.myCall = strings.ToUpper(strings.TrimSpace(v.call.Value()))
+			return v, cmd
+		case fGrid:
+			var cmd tea.Cmd
+			v.grid, cmd = v.grid.Update(msg)
+			v.m.myGrid = strings.ToUpper(strings.TrimSpace(v.grid.Value()))
+			return v, cmd
 		}
-		// Non-name fields: cycle selectors, open the picker, or apply.
+		// Selector/device/apply fields: cycle, open the picker, or apply.
 		switch msg.String() {
 		case "left":
 			v.cycle(-1)
@@ -295,12 +326,18 @@ func (v *configView) activeList() (*list.Model, string) {
 	}
 }
 
-// syncFocus mirrors the focus index into the name textinput's blink state.
+// syncFocus mirrors the focus index into the text inputs' blink state.
 func (v *configView) syncFocus() {
-	if v.focus == fName {
+	v.name.Blur()
+	v.call.Blur()
+	v.grid.Blur()
+	switch v.focus {
+	case fName:
 		v.name.Focus()
-	} else {
-		v.name.Blur()
+	case fCall:
+		v.call.Focus()
+	case fGrid:
+		v.grid.Focus()
 	}
 }
 
@@ -362,6 +399,8 @@ func (v *configView) Render(w, h int) string {
 	}
 	var b strings.Builder
 	b.WriteString(mark(fName, "Name    "+v.name.View()) + "\n")
+	b.WriteString(mark(fCall, "Call    "+v.call.View()) + "\n")
+	b.WriteString(mark(fGrid, "Grid    "+v.grid.View()) + "\n")
 	b.WriteString(mark(fMode, "Mode    ‹ "+v.modeLabel()+" ›  (←/→)") + "\n")
 	b.WriteString(mark(fRx, "RX dev  "+chosen(v.rxID)) + "\n")
 	b.WriteString(mark(fTx, "TX dev  "+chosenOrSame(v.txID)) + "\n")
@@ -372,7 +411,7 @@ func (v *configView) Render(w, h int) string {
 	// The device picker is a modal: it appears only while a device field is being
 	// chosen, and disappears once a device is selected (or the pick is cancelled).
 	if !v.picking {
-		b.WriteString("\n" + ui.Dim.Render("‹tab› field · ‹←/→› cycle · ‹enter› pick/apply · ‹a› apply · ‹esc› cancel"))
+		b.WriteString("\n" + ui.Dim.Render("‹↑/↓› field · ‹←/→› cycle · ‹enter› pick/apply · ‹a› apply · ‹esc› cancel"))
 		return b.String()
 	}
 	lst, label := v.activeList()
@@ -412,7 +451,7 @@ func (v *configView) Hints() []ui.Hint {
 		}
 	}
 	return []ui.Hint{
-		{Key: "tab", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "pick/apply"},
+		{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "pick/apply"},
 		{Key: "a", Action: "apply"}, {Key: "esc", Action: "cancel"},
 	}
 }
