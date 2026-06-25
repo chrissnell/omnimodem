@@ -48,10 +48,28 @@ type waterfall struct {
 func (w *waterfall) push(f *pb.SpectrumFrame) {
 	w.freqStart = f.GetFreqStartHz()
 	w.freqStep = f.GetFreqStepHz()
-	w.rows = append(w.rows, f.GetBins())
+	bins := f.GetBins()
+	// Skip silent frames (a digitally-quiet RX input quantizes to all-zero bins).
+	// They carry nothing, and pushing them would scroll a real burst — a brief TX
+	// or a received signal — off-screen within a second. Holding the last active
+	// frames keeps a transmission visible after it ends.
+	if !hasSignal(bins) {
+		return
+	}
+	w.rows = append(w.rows, bins)
 	if len(w.rows) > wfHistory {
 		w.rows = w.rows[len(w.rows)-wfHistory:]
 	}
+}
+
+// hasSignal reports whether any bin is above the noise/silence floor.
+func hasSignal(bins []byte) bool {
+	for _, v := range bins {
+		if v >= 2 {
+			return true
+		}
+	}
+	return false
 }
 
 // render draws up to `rows` lines of waterfall history (resampled to `width`),
@@ -119,7 +137,7 @@ func spectrumLine(bins []byte, width int) string {
 // axis labels the displayed frequency span under the waterfall.
 func (w *waterfall) axis(width int) string {
 	if w.freqStep == 0 || len(w.rows) == 0 {
-		return ui.Dim.Render(" waterfall idle — receive a signal to see activity")
+		return ui.Accent.Render(" waterfall idle — transmit, or feed a signal to the RX device")
 	}
 	n := len(w.rows[len(w.rows)-1])
 	lo := int(w.freqStart)
