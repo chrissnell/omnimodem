@@ -9,12 +9,15 @@
 use crate::audio::backend::PlaybackHandle;
 use crate::core::clock::SlotClock;
 use crate::core::event::TelemetryEvent;
+use crate::core::spectrum::SpectrumControl;
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 use crate::ptt::interlock::RxTxInterlock;
 use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::PttDriver;
 use omnimodem_dsp::frontend::resample::Resampler;
+use omnimodem_dsp::frontend::spectrum::{half_spectrum_dbfs, SpectrumSetup};
+use omnimodem_dsp::frontend::stft::Stft;
 use omnimodem_dsp::mode::Modulator;
 use omnimodem_dsp::types::{Frame, FramePayload};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +58,9 @@ pub struct TxWorkerCfg {
     pub slot_s: Option<f32>,
     /// Runtime TX output gain (linear multiplier, 1.0 == unity).
     pub gain: crate::core::AudioGain,
+    /// Channel's shared spectrum control. While transmitting (the RX tap is
+    /// muted) the worker feeds the operate waterfall the transmitted audio.
+    pub spectrum: SpectrumControl,
 }
 
 /// Handle to a running TX worker.
@@ -201,6 +207,9 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
         });
         cfg.interlock.begin_tx(&cfg.rig);
         let _ = cfg.telemetry.send(TelemetryEvent::PttKeyed { channel: cfg.channel, keyed: true });
+        // Show the transmitted signal on the operate waterfall — the RX tap is
+        // muted while we key, so this is the only spectrum during TX.
+        emit_tx_spectrum(cfg.channel, &cfg.spectrum, &samples, cfg.rate, &cfg.telemetry);
         let outcome = drive_tx_cycle(cfg.driver.as_mut(), &cfg.sink, pcm, cfg.rate, TX_POLL);
         let _ = cfg.telemetry.send(TelemetryEvent::PttKeyed { channel: cfg.channel, keyed: false });
         cfg.interlock.end_tx(&cfg.rig);
@@ -213,6 +222,51 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             // PTT error: stop the worker; the core evicts on the next command.
             break;
         }
+    }
+}
+
+/// Emit a bounded waterfall of the about-to-be-played TX audio so the operate
+/// screen shows the transmitted signal (the RX tap is muted while we key). A
+/// no-op unless the channel's spectrum stream is enabled. The samples are at the
+/// playback rate, so the tap resolves against that rate.
+fn emit_tx_spectrum(
+    channel: ChannelId,
+    spectrum: &SpectrumControl,
+    samples: &[f32],
+    rate: u32,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) {
+    let Some(cfg) = spectrum.snapshot() else {
+        return; // spectrum stream not enabled — nobody is watching
+    };
+    if rate == 0 || samples.is_empty() {
+        return;
+    }
+    let setup = SpectrumSetup::resolve(
+        rate, cfg.bin_count, cfg.fft_size, cfg.rate_hz, cfg.freq_lo_hz, cfg.freq_hi_hz,
+    );
+    let mut stft = Stft::new(setup.nfft, setup.hop);
+    let plan = setup.plan;
+    let frames = stft.feed(samples);
+    if frames.is_empty() {
+        return;
+    }
+    let window_sum = stft.window_sum();
+    // Cap emitted lines so a long burst can't flood the lossy event bus: take an
+    // evenly spaced subset spanning the burst.
+    const MAX_LINES: usize = 24;
+    let step = frames.len().div_ceil(MAX_LINES).max(1);
+    for frame in frames.iter().step_by(step) {
+        let half = half_spectrum_dbfs(frame, window_sum);
+        let _ = telemetry.send(TelemetryEvent::SpectrumFrame {
+            channel,
+            timestamp_ns: 0,
+            freq_start_hz: plan.freq_start_hz,
+            freq_step_hz: plan.freq_step_hz,
+            db_floor: plan.db_floor,
+            db_ceiling: plan.db_ceiling,
+            bins: plan.render(&half),
+        });
     }
 }
 
@@ -260,6 +314,7 @@ mod tests {
             telemetry: tele,
             slot_s: None,
             gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -314,6 +369,7 @@ mod tests {
             telemetry: tele,
             slot_s: None,
             gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
         });
         worker.enqueue(TxJob { frame: DspFrame::text("E"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -382,6 +438,7 @@ mod tests {
             telemetry: tele,
             slot_s: None,
             gain: gain.clone(),
+            spectrum: SpectrumControl::default(),
         });
         worker.enqueue(TxJob { frame: DspFrame::packet(bytes), transmit_id: TransmitId(1) }).unwrap();
 
@@ -440,6 +497,7 @@ mod tests {
             telemetry: tele,
             slot_s: None,
             gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -475,5 +533,65 @@ mod tests {
         assert!(matches!(f.payload, FramePayload::Packet(b) if b == vec![1, 2, 3]));
         let f = payload_to_frame(&ModeConfig::Psk31 { center_hz: 1000.0 }, b"CQ".to_vec());
         assert!(matches!(f.payload, FramePayload::Text(t) if t == "CQ"));
+    }
+
+    // With the spectrum stream enabled, transmitting must emit waterfall frames
+    // so the operate screen shows the TX signal (the RX tap is muted while keyed).
+    #[test]
+    fn tx_emits_waterfall_when_spectrum_enabled() {
+        use crate::core::spectrum::SpectrumCfg;
+
+        let backend = FileBackend::from_samples(vec![], 48_000);
+        let sink = backend.open_playback(48_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(256);
+        let spectrum = SpectrumControl::default();
+        spectrum.enable(SpectrumCfg {
+            bin_count: 64,
+            fft_size: 2048,
+            rate_hz: 0,
+            freq_lo_hz: 0.0,
+            freq_hi_hz: 3000.0,
+        });
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 48_000,
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Cw {
+                wpm: 20,
+                tone_hz: 700.0,
+            })
+            .unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+            spectrum,
+        });
+        worker.enqueue(TxJob { frame: DspFrame::text("TEST"), transmit_id: TransmitId(1) }).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let frames = rt.block_on(async {
+            let mut frames = 0;
+            let mut completed = false;
+            for _ in 0..400 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    match ev {
+                        TelemetryEvent::SpectrumFrame { .. } => frames += 1,
+                        TelemetryEvent::TransmitComplete { .. } => completed = true,
+                        _ => {}
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            frames
+        });
+        assert!(frames > 0, "TX must emit waterfall frames when spectrum is enabled");
+        worker.shutdown();
     }
 }

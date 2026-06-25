@@ -555,6 +555,7 @@ fn try_spawn_workers(
                 telemetry: telemetry.clone(),
                 slot_s,
                 gain: gain.clone(),
+                spectrum: spectrum.clone(),
             });
             live.tx_workers.insert(channel, w);
         }
