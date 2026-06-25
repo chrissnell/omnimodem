@@ -14,7 +14,7 @@ pub enum ModeConfig {
     Afsk1200 { tx: bool },
     Ft8,
     Cw { wpm: u16, tone_hz: f32 },
-    Rtty { baud: f32, shift_hz: f32 },
+    Rtty { baud: f32, shift_hz: f32, center_hz: f32 },
     Psk31 { center_hz: f32 },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
@@ -48,7 +48,11 @@ impl ModeConfig {
             "afsk1200" => Some(ModeConfig::Afsk1200 { tx: true }),
             "ft8" => Some(ModeConfig::Ft8),
             "cw" => Some(ModeConfig::Cw { wpm: u("wpm", 20), tone_hz: f("tone", 700.0) }),
-            "rtty" => Some(ModeConfig::Rtty { baud: f("baud", 45.45), shift_hz: f("shift", 170.0) }),
+            "rtty" => Some(ModeConfig::Rtty {
+                baud: f("baud", 45.45),
+                shift_hz: f("shift", 170.0),
+                center_hz: f("center", omnimodem_dsp::modes::rtty::CENTER_HZ),
+            }),
             "psk31" => Some(ModeConfig::Psk31 { center_hz: f("center", 1000.0) }),
             "ft4" => Some(ModeConfig::Ft4),
             "jt65" => Some(ModeConfig::Jt65),
@@ -67,7 +71,9 @@ impl ModeConfig {
     pub fn to_mode_string(&self) -> String {
         match self {
             ModeConfig::Cw { wpm, tone_hz } => format!("cw:wpm={wpm},tone={tone_hz}"),
-            ModeConfig::Rtty { baud, shift_hz } => format!("rtty:baud={baud},shift={shift_hz}"),
+            ModeConfig::Rtty { baud, shift_hz, center_hz } => {
+                format!("rtty:baud={baud},shift={shift_hz},center={center_hz}")
+            }
             ModeConfig::Psk31 { center_hz } => format!("psk31:center={center_hz}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
@@ -145,7 +151,10 @@ mod tests {
         assert_eq!(ModeConfig::parse("afsk1200"), Some(ModeConfig::Afsk1200 { tx: true }));
         assert_eq!(ModeConfig::parse("ft8"), Some(ModeConfig::Ft8));
         assert_eq!(ModeConfig::parse("cw"), Some(ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }));
-        assert_eq!(ModeConfig::parse("rtty"), Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }));
+        assert_eq!(
+            ModeConfig::parse("rtty"),
+            Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0 })
+        );
         assert_eq!(ModeConfig::parse("psk31"), Some(ModeConfig::Psk31 { center_hz: 1000.0 }));
         assert_eq!(ModeConfig::parse("none"), Some(ModeConfig::None));
         assert_eq!(ModeConfig::parse(""), Some(ModeConfig::None));
@@ -176,7 +185,11 @@ mod tests {
         );
         assert_eq!(
             ModeConfig::parse("rtty:baud=75,shift=850"),
-            Some(ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0 })
+            Some(ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0, center_hz: 2210.0 })
+        );
+        assert_eq!(
+            ModeConfig::parse("rtty:baud=45.45,shift=170,center=2125"),
+            Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2125.0 })
         );
         assert_eq!(
             ModeConfig::parse("psk31:center=1500"),
@@ -208,7 +221,7 @@ mod tests {
             ModeConfig::Afsk1200 { tx: true },
             ModeConfig::Ft8,
             ModeConfig::Cw { wpm: 25, tone_hz: 600.0 },
-            ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0 },
+            ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0, center_hz: 2125.0 },
             ModeConfig::Psk31 { center_hz: 1500.0 },
             ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 },
             ModeConfig::Wspr,
@@ -233,7 +246,7 @@ mod tests {
             ModeConfig::Afsk1200 { tx: false }.label(),
             ModeConfig::Ft8.label(),
             ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }.label(),
-            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0 }.label(),
+            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0 }.label(),
             ModeConfig::Psk31 { center_hz: 1000.0 }.label(),
             ModeConfig::Ft4.label(),
             ModeConfig::Jt65.label(),

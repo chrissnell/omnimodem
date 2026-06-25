@@ -16,10 +16,10 @@ use crate::types::{Cplx, Frame, FrameMeta, FramePayload, Sample};
 pub const RTTY_RATE: u32 = 8_000;
 
 /// Default audio center the mark/space pair straddles (center +/- shift/2).
-/// Real recordings vary — US ham RTTY commonly sits at 2125/2295 Hz (≈2210
-/// center) — so both the modulator and demodulator take a configurable center;
-/// this is only the default for the convenience constructors.
-pub const CENTER_HZ: f32 = 1500.0;
+/// US ham RTTY is standardised on 2125/2295 Hz, i.e. a 2210 Hz center, so that
+/// is the default. Both the modulator and demodulator take a configurable
+/// center (`with_center`) for the cases that differ.
+pub const CENTER_HZ: f32 = 2210.0;
 
 /// Baseband channel filter: passes the mark/space pair (well inside +/- shift)
 /// while rejecting the 2*center image the real->complex mix leaves behind. The

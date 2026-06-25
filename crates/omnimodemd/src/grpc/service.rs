@@ -354,7 +354,13 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
     match p {
         Params::Cw(c) => ModeConfig::Cw { wpm: c.wpm as u16, tone_hz: c.tone_hz }.to_mode_string(),
         Params::Rtty(r) => {
-            ModeConfig::Rtty { baud: r.baud, shift_hz: r.shift_hz }.to_mode_string()
+            // center_hz unset (0) ⇒ the default US-ham 2210 Hz center.
+            let center_hz = if r.center_hz > 0.0 {
+                r.center_hz
+            } else {
+                omnimodem_dsp::modes::rtty::CENTER_HZ
+            };
+            ModeConfig::Rtty { baud: r.baud, shift_hz: r.shift_hz, center_hz }.to_mode_string()
         }
         Params::Psk31(p) => ModeConfig::Psk31 { center_hz: p.center_hz }.to_mode_string(),
         Params::Olivia(o) => {
