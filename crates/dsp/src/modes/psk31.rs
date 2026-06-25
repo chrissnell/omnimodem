@@ -71,13 +71,15 @@ impl Modulator for Psk31Mod {
 /// the stream is noise, so the buffer is dropped rather than growing unbounded.
 const MAX_PENDING_BITS: usize = 512;
 
-/// Carrier-detect (squelch) smoothing and the minimum in-phase energy fraction
-/// that counts as a locked PSK31 carrier. A real signal sits on the I axis
-/// (fraction → 1); white noise spreads evenly across I and Q (fraction ≈ 0.5),
-/// so decoding only runs above the threshold — no characters off the noise floor.
-const CARRIER_EMA: f32 = 0.05;
-const CARRIER_OPEN: f32 = 0.75;
-/// Absolute energy floor so true digital silence reads as "no carrier".
+/// Carrier-detect (squelch) parameters. The detector measures *carrier
+/// presence*, not lock quality: per symbol it compares the coherent sum of the
+/// de-rotated samples, |Σz|², against the total power, N·Σ|z|². A narrowband
+/// tone adds coherently (ratio → 1) even if the Costas loop hasn't fully locked;
+/// white noise adds incoherently (ratio ≈ 1/N). Keying on presence rather than
+/// lock means a real-but-imperfect signal still decodes instead of going silent.
+const CARRIER_EMA: f32 = 0.1;
+const CARRIER_OPEN: f32 = 0.04;
+/// Absolute power floor so true digital silence reads as "no carrier".
 const CARRIER_FLOOR: f32 = 1e-6;
 
 pub struct Psk31Demod {
@@ -89,12 +91,15 @@ pub struct Psk31Demod {
     // I carries the data, Q is used only for carrier detection.
     acc_i: f32,
     acc_q: f32,
+    // Total de-rotated power and sample count over the current symbol, for the
+    // carrier-presence squelch (coherent sum vs. total power).
+    acc_pow: f32,
+    nsym: u32,
     prev_i: f32,
     have_prev: bool,
-    // Smoothed in-phase / quadrature symbol energy for the squelch. A locked
-    // PSK31 carrier sits on the I axis (e_i >> e_q); noise spreads evenly.
-    e_i: f32,
-    e_q: f32,
+    /// Smoothed coherent-power ratio (|Σz|² / N·Σ|z|²): ≈1 for a tone, ≈1/N for
+    /// noise. The squelch opens above [`CARRIER_OPEN`].
+    coh: f32,
     /// Previous reversal bit, for the incremental second differential layer.
     diff_prev: u8,
     /// Varicode data bits not yet resolved into a completed character; drained
@@ -114,10 +119,11 @@ impl Psk31Demod {
             gardner: GardnerTed::new(rate / PSK31_BAUD),
             acc_i: 0.0,
             acc_q: 0.0,
+            acc_pow: 0.0,
+            nsym: 0,
             prev_i: 0.0,
             have_prev: false,
-            e_i: 0.0,
-            e_q: 0.0,
+            coh: 0.0,
             diff_prev: 0,
             pending: Vec::new(),
             sample_index: 0,
@@ -176,19 +182,26 @@ impl Demodulator for Psk31Demod {
             // SNR gain; Gardner still times off the instantaneous sample.
             self.acc_i += derot.re;
             self.acc_q += derot.im;
+            self.acc_pow += derot.re * derot.re + derot.im * derot.im;
+            self.nsym += 1;
             if self.gardner.feed(derot.re).is_some() {
                 let sym = self.acc_i;
                 let q = self.acc_q;
+                let coherent = sym * sym + q * q;
+                let total = self.nsym as f32 * self.acc_pow;
+                let pow = self.acc_pow;
                 self.acc_i = 0.0;
                 self.acc_q = 0.0;
-                // Carrier detect: track the smoothed I/Q energy split. A locked
-                // PSK31 carrier concentrates on I; noise spreads evenly. Below the
-                // threshold there's no signal, so drop any partial codeword and
-                // resync the differential decoder instead of emitting noise.
-                self.e_i += CARRIER_EMA * (sym * sym - self.e_i);
-                self.e_q += CARRIER_EMA * (q * q - self.e_q);
-                let energy = self.e_i + self.e_q;
-                if energy < CARRIER_FLOOR || self.e_i < CARRIER_OPEN * energy {
+                self.acc_pow = 0.0;
+                self.nsym = 0;
+                // Carrier-presence detect: a coherent tone makes |Σz|² approach
+                // the total power N·Σ|z|² (ratio → 1); noise stays near 1/N. This
+                // keys on a signal being present, not on a clean lock, so a real
+                // but imperfectly-locked carrier still decodes. Below threshold,
+                // drop any partial codeword and resync the differential decoder.
+                let ratio = if total > 0.0 { coherent / total } else { 0.0 };
+                self.coh += CARRIER_EMA * (ratio - self.coh);
+                if pow < CARRIER_FLOOR || self.coh < CARRIER_OPEN {
                     self.pending.clear();
                     self.have_prev = false;
                     self.prev_i = 0.0;
