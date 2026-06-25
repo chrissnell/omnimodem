@@ -29,7 +29,8 @@ use omnimodem_dsp::types::{Frame, FramePayload, Sample};
 
 struct Params {
     mode: String,
-    center: f32,
+    /// Explicit `--center`; `None` means auto-detect from the spectrum on decode.
+    center: Option<f32>,
     baud: f32,
     shift: f32,
     wpm: u16,
@@ -53,14 +54,8 @@ fn main() {
     // The first non-flag token after the subcommand is the positional file.
     let file = rest.iter().find(|a| !a.starts_with("--")).cloned();
     let mode = flag(rest, "--mode").unwrap_or_else(|| "rtty".into());
-    // Per-mode defaults chosen for real-world recordings (US ham RTTY ≈ 2210 Hz).
-    let default_center = match mode.as_str() {
-        "psk31" => 1000.0,
-        "cw" => 700.0,
-        _ => 2210.0,
-    };
     let p = Params {
-        center: flag(rest, "--center").and_then(|s| s.parse().ok()).unwrap_or(default_center),
+        center: flag(rest, "--center").and_then(|s| s.parse().ok()),
         baud: flag(rest, "--baud").and_then(|s| s.parse().ok()).unwrap_or(45.45),
         shift: flag(rest, "--shift").and_then(|s| s.parse().ok()).unwrap_or(170.0),
         wpm: flag(rest, "--wpm").and_then(|s| s.parse().ok()).unwrap_or(20),
@@ -107,9 +102,36 @@ fn build_demod(p: &Params, center: f32) -> Result<Box<dyn Demodulator>, String> 
     })
 }
 
+/// Per-mode fallback center when none is given and auto-detect declines.
+fn default_center(mode: &str) -> f32 {
+    match mode {
+        "psk31" => 1000.0,
+        "cw" => 700.0,
+        _ => 2210.0,
+    }
+}
+
 fn decode(path: &str, p: &Params) -> Result<(), String> {
     let (mono, in_rate) = read_wav(path)?;
-    let native = build_demod(p, p.center)?.caps().native_rate;
+    let native = build_demod(p, 0.0)?.caps().native_rate;
+
+    if p.scan {
+        let samples = resample(mono, in_rate, native);
+        println!("scan {path}: {in_rate} Hz -> {native} Hz, mode={}", p.mode);
+        // Sweep the center to find where an unknown recording decodes.
+        for c in (500..=2600).step_by(50) {
+            let mut d = build_demod(p, c as f32)?;
+            let text = run(&mut *d, &samples);
+            if !text.trim().is_empty() {
+                println!("  center={c:>4} Hz -> {:?}", trim(&text, 60));
+            }
+        }
+        return Ok(());
+    }
+
+    // Center: explicit --center wins; otherwise estimate it from the spectrum so
+    // an arbitrary recording "just works" without the operator knowing the tone.
+    let coarse = p.center.or_else(|| estimate_center(&mono, in_rate, &p.mode));
     let samples = resample(mono, in_rate, native);
     println!(
         "decode {path}: {in_rate} Hz -> {native} Hz, {} samples ({:.1}s), mode={}",
@@ -117,20 +139,19 @@ fn decode(path: &str, p: &Params) -> Result<(), String> {
         samples.len() as f32 / native as f32,
         p.mode,
     );
-
-    if p.scan {
-        // Sweep the center to find where an unknown recording decodes.
-        for c in (500..=2600).step_by(100) {
-            let mut d = build_demod(p, c as f32)?;
-            let text = run(&mut *d, &samples);
-            println!("  center={c:>4} Hz -> {:?}", trim(&text, 60));
-        }
-        return Ok(());
-    }
-
-    let mut d = build_demod(p, p.center)?;
+    let (center, how) = match (p.center, coarse) {
+        (Some(c), _) => (c, "given".to_string()),
+        (None, Some(c)) => (c, "auto-detected".to_string()),
+        (None, None) => (default_center(&p.mode), "default".to_string()),
+    };
+    let mut d = build_demod(p, center)?;
     let text = run(&mut *d, &samples);
-    println!("center={} Hz decoded:\n{text}", p.center);
+    let hint = if how == "auto-detected" {
+        format!(" (auto-detected; override with --center {center:.0})")
+    } else {
+        String::new()
+    };
+    println!("center={center:.0} Hz{hint} decoded:\n{text}");
     Ok(())
 }
 
@@ -160,10 +181,11 @@ fn generate(p: &Params) -> Result<(), String> {
     if p.text.is_empty() {
         return Err("gen needs --text \"...\"".into());
     }
+    let center = p.center.unwrap_or_else(|| default_center(&p.mode));
     let mut m: Box<dyn Modulator> = match p.mode.as_str() {
-        "rtty" => Box::new(RttyMod::with_center(p.baud, p.shift, p.center)),
-        "psk31" => Box::new(Psk31Mod::new(p.center)),
-        "cw" => Box::new(CwMod::new(p.wpm, p.center)),
+        "rtty" => Box::new(RttyMod::with_center(p.baud, p.shift, center)),
+        "psk31" => Box::new(Psk31Mod::new(center)),
+        "cw" => Box::new(CwMod::new(p.wpm, center)),
         "olivia" => Box::new(OliviaMod::new(p.tones, p.bw)),
         m => return Err(format!("gen does not support mode {m:?}")),
     };
@@ -176,7 +198,7 @@ fn generate(p: &Params) -> Result<(), String> {
         samples.len(),
         samples.len() as f32 / native as f32,
         native,
-        p.center,
+        center,
         p.mode,
     );
     Ok(())
@@ -185,20 +207,27 @@ fn generate(p: &Params) -> Result<(), String> {
 /// FFT the recording and report where the signal energy actually sits, so you
 /// can pick the right --center (or see that the file isn't what you think).
 fn analyze(path: &str) -> Result<(), String> {
-    use rustfft::{num_complex::Complex, FftPlanner};
     let (mono, rate) = read_wav(path)?;
     println!("analyze {path}: {rate} Hz, {} samples ({:.1}s)", mono.len(), mono.len() as f32 / rate as f32);
-    // Average the power spectrum over Hann-windowed frames for a stable estimate.
+    let (power, bin_hz) = power_spectrum(&mono, rate).ok_or("file too short to analyze")?;
+    let peak = power.iter().cloned().fold(0.0f64, f64::max).max(1e-12);
+    println!("dominant frequencies (bin {bin_hz:.1} Hz):");
+    for (k, p) in spectral_peaks(&power).iter().take(6) {
+        println!("  {:>6.0} Hz  {:>6.1} dB", *k as f32 * bin_hz, 10.0 * (p / peak).log10());
+    }
+    Ok(())
+}
+
+/// Average Hann-windowed power spectrum (first half) and the bin width in Hz.
+fn power_spectrum(mono: &[f32], rate: u32) -> Option<(Vec<f64>, f32)> {
+    use rustfft::{num_complex::Complex, FftPlanner};
     let n = 8192.min(mono.len().next_power_of_two());
     if n < 64 {
-        return Err("file too short to analyze".into());
+        return None;
     }
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(n);
+    let fft = FftPlanner::new().plan_fft_forward(n);
     let mut power = vec![0.0f64; n / 2];
-    let mut frames = 0usize;
-    let hop = n / 2;
-    let mut pos = 0;
+    let (hop, mut pos, mut frames) = (n / 2, 0usize, 0usize);
     while pos + n <= mono.len() {
         let mut buf: Vec<Complex<f32>> = (0..n)
             .map(|i| {
@@ -208,38 +237,65 @@ fn analyze(path: &str) -> Result<(), String> {
             .collect();
         fft.process(&mut buf);
         for (k, p) in power.iter_mut().enumerate() {
-            *p += (buf[k].norm_sqr()) as f64;
+            *p += buf[k].norm_sqr() as f64;
         }
         frames += 1;
         pos += hop;
     }
-    if frames == 0 {
-        return Err("file too short to analyze".into());
-    }
-    let bin_hz = rate as f32 / n as f32;
-    let peak = power.iter().cloned().fold(0.0f64, f64::max).max(1e-12);
-    // Top peaks (local maxima) in the audio band.
-    let mut peaks: Vec<(usize, f64)> = (1..power.len() - 1)
+    (frames > 0).then(|| (power, rate as f32 / n as f32))
+}
+
+/// Local-maxima bins, strongest first.
+fn spectral_peaks(power: &[f64]) -> Vec<(usize, f64)> {
+    let mut peaks: Vec<(usize, f64)> = (1..power.len().saturating_sub(1))
         .filter(|&k| power[k] >= power[k - 1] && power[k] >= power[k + 1])
         .map(|k| (k, power[k]))
         .collect();
     peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    println!("dominant frequencies (bin {bin_hz:.1} Hz):");
-    for (k, p) in peaks.iter().take(6) {
-        let db = 10.0 * (p / peak).log10();
-        println!("  {:>6.0} Hz  {:>6.1} dB", *k as f32 * bin_hz, db);
+    peaks
+}
+
+/// Sub-bin peak frequency via parabolic interpolation of the three bins around
+/// `k` — the spectral peak rarely lands exactly on a bin, and PSK31's carrier
+/// loop is sensitive to a fraction of a bin.
+fn interp_freq(power: &[f64], k: usize, bin_hz: f32) -> f32 {
+    if k == 0 || k + 1 >= power.len() {
+        return k as f32 * bin_hz;
     }
-    // Energy centroid across the SSB audio band — a decent center estimate.
-    let (lo, hi) = ((300.0 / bin_hz) as usize, (2700.0 / bin_hz).min((n / 2 - 1) as f32) as usize);
-    let (mut num, mut den) = (0.0f64, 0.0f64);
-    for (k, &pk) in power.iter().enumerate().take(hi + 1).skip(lo) {
-        num += k as f64 * pk;
-        den += pk;
+    let (a, b, c) = (power[k - 1], power[k], power[k + 1]);
+    let denom = a - 2.0 * b + c;
+    let delta = if denom.abs() > f64::EPSILON {
+        (0.5 * (a - c) / denom).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    (k as f32 + delta as f32) * bin_hz
+}
+
+/// Estimate the audio center of a recording from its spectrum so decode works
+/// without the operator knowing the tone. RTTY is two tones (mark/space) → the
+/// center is their midpoint; single-carrier modes (PSK31/CW) sit on one peak.
+fn estimate_center(mono: &[f32], rate: u32, mode: &str) -> Option<f32> {
+    let (power, bin_hz) = power_spectrum(mono, rate)?;
+    let in_band = |k: usize| {
+        let f = k as f32 * bin_hz;
+        (300.0..3000.0).contains(&f)
+    };
+    let peaks: Vec<(usize, f64)> =
+        spectral_peaks(&power).into_iter().filter(|&(k, _)| in_band(k)).collect();
+    let (k0, _) = *peaks.first()?;
+    let f0 = interp_freq(&power, k0, bin_hz);
+    if mode == "rtty" {
+        // The other FSK tone: the strongest peak a plausible shift away (≈ the
+        // 170–1000 Hz amateur range), on either side. Center = midpoint.
+        if let Some(&(k1, _)) = peaks.iter().find(|&&(k, _)| {
+            let d = (k as f32 * bin_hz - f0).abs();
+            (80.0..1200.0).contains(&d)
+        }) {
+            return Some((f0 + interp_freq(&power, k1, bin_hz)) / 2.0);
+        }
     }
-    if den > 0.0 {
-        println!("audio-band energy centroid ≈ {:.0} Hz", (num / den) as f32 * bin_hz);
-    }
-    Ok(())
+    Some(f0)
 }
 
 /// Read a WAV into mono f32 in [-1, 1] plus its sample rate.
