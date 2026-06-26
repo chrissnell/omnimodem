@@ -1,25 +1,27 @@
 //! PSK31 mode assembly: differential BPSK + Varicode at 31.25 baud.
 //!
 //! TX: text → PSK31 Varicode bitstream → differential BPSK symbols → raised-
-//! cosine DBPSK at `center_hz`. RX: Costas carrier recovery + Gardner timing →
-//! differential decode → Varicode decode.
+//! cosine DBPSK at `center_hz`. RX follows fldigi's BPSK31 receiver: a two-stage
+//! `pskcore` matched filter, envelope-asymmetry symbol-timing recovery, and
+//! differential phase detection → Varicode decode.
 
 use crate::framing::varicode::{decode as vari_decode, encode as vari_encode, PSK31};
 use crate::frontend::fir::{design_lowpass, Fir};
 use crate::frontend::modulate::DiffPsk;
 use crate::frontend::nco::DownConverter;
-use crate::types::Cplx;
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
-use crate::sync::costas::CostasLoop;
-use crate::sync::timing::GardnerTed;
-use crate::types::{Frame, FrameMeta, FramePayload, Sample};
+use crate::types::{Cplx, Frame, FrameMeta, FramePayload, Sample};
+use std::f32::consts::{PI, TAU};
 
 pub const PSK31_RATE: u32 = 8_000;
 pub const PSK31_BAUD: f32 = 31.25;
 
-/// Leading idle reversals prepended on TX so the receiver's Costas and Gardner
-/// loops lock before the payload starts.
+/// Leading idle reversals prepended on TX so the receiver's timing and matched
+/// filter settle before the payload starts.
 const PREAMBLE_REVERSALS: usize = 64;
+/// Trailing idle reversals so the receiver's matched-filter group delay can
+/// flush the final character (real PSK31 sends a postamble before unkeying).
+const POSTAMBLE_REVERSALS: usize = 16;
 
 fn samples_per_symbol() -> usize {
     (PSK31_RATE as f32 / PSK31_BAUD).round() as usize // 256
@@ -64,6 +66,7 @@ impl Modulator for Psk31Mod {
         rev.push(1);
         rev.push(1);
         rev.extend(vari_encode(&PSK31, text).into_iter().map(|b| (1 ^ b) as u32));
+        rev.extend(std::iter::repeat_n(1u32, POSTAMBLE_REVERSALS));
         let psk = DiffPsk::new(PSK31_RATE as f32, self.center_hz, self.sps, 1);
         Ok(psk.modulate(&rev))
     }
@@ -88,15 +91,54 @@ const CARRIER_OPEN: f32 = 0.15;
 /// Absolute power floor so true digital silence reads as "no carrier".
 const CARRIER_FLOOR: f32 = 1e-9;
 
+/// Decimation from the 8 kHz audio rate to 16 samples/symbol (500 Hz), matching
+/// fldigi's `symbollen/16` for PSK31. Timing recovery runs at this rate.
+const DECIMATE: usize = 16;
+/// Sub-symbol timing-recovery resolution (`bitsteps` in fldigi).
+const BITSTEPS: usize = 16;
+
+/// fldigi's `pskcore_filter`: a symmetric 65-tap windowed-sinc matched filter for
+/// 31.25-baud PSK. Used twice — as the anti-alias filter before the ÷16
+/// decimation (where it is wideband relative to 8 kHz) and again at 500 Hz
+/// (where the same taps are narrowband, ~one symbol wide: the matched filter).
+/// Ported verbatim from fldigi `src/psk/pskcoeff.cxx` (double literals kept as
+/// written; they round to the nearest f32).
+#[rustfmt::skip]
+#[allow(clippy::excessive_precision)]
+const PSKCORE_FILTER: [f32; 65] = [
+    4.3453566e-005, -0.00049122414, -0.00078771292, -0.0013507826, -0.0021287814,
+    -0.003133466, -0.004366817, -0.0058112187, -0.0074249976, -0.0091398882,
+    -0.010860157, -0.012464086, -0.013807772, -0.014731191, -0.015067057,
+    -0.014650894, -0.013333425, -0.01099166, -0.0075431246, -0.0029527849,
+    0.0027546292, 0.0094932775, 0.017113308, 0.025403511, 0.034099681,
+    0.042895839, 0.051458575, 0.059444853, 0.066521003, 0.072381617,
+    0.076767694, 0.079481619, 0.080420311, 0.079481619, 0.076767694,
+    0.072381617, 0.066521003, 0.059444853, 0.051458575, 0.042895839,
+    0.034099681, 0.025403511, 0.017113308, 0.0094932775, 0.0027546292,
+    -0.0029527849, -0.0075431246, -0.01099166, -0.013333425, -0.014650894,
+    -0.015067057, -0.014731191, -0.013807772, -0.012464086, -0.010860157,
+    -0.0091398882, -0.0074249976, -0.0058112187, -0.004366817, -0.003133466,
+    -0.0021287814, -0.0013507826, -0.00078771292, -0.00049122414, 4.3453566e-005,
+];
+
 pub struct Psk31Demod {
     center_hz: f32,
     nco: DownConverter,
-    costas: CostasLoop,
-    gardner: GardnerTed,
-    // Integrate-and-dump accumulator over the current symbol (matched filter):
-    // the de-rotated in-phase value carries the data.
-    acc_i: f32,
-    prev_i: f32,
+    // fldigi's two-stage matched filter on the complex baseband: fir1 ahead of
+    // the ÷16 decimation, fir2 at 500 Hz (the narrowband symbol matched filter).
+    // Each is a real FIR applied to I and Q.
+    fir1_i: Fir,
+    fir1_q: Fir,
+    fir2_i: Fir,
+    fir2_q: Fir,
+    decim: usize,
+    // Envelope-asymmetry symbol-timing recovery (fldigi `syncbuf`/`bitclk`): one
+    // smoothed symbol-magnitude waveform over BITSTEPS sub-samples; the lower vs.
+    // upper half asymmetry nudges the sampling instant.
+    syncbuf: [f32; BITSTEPS],
+    bitclk: f32,
+    // Previous symbol for differential phase detection.
+    prevsym: Cplx,
     have_prev: bool,
     // Once the squelch opens we join the bit stream mid-symbol; `synced` gates
     // decoding until a `00` character boundary appears, so the leading partial
@@ -119,21 +161,18 @@ impl Psk31Demod {
     pub fn new(center_hz: f32) -> Self {
         let rate = PSK31_RATE as f32;
         let taps = design_lowpass(SQUELCH_TAPS, SQUELCH_CUTOFF_HZ, rate);
+        let mf = || Fir::new(PSKCORE_FILTER.to_vec());
         Psk31Demod {
             center_hz,
             nco: DownConverter::new(center_hz, rate),
-            // Costas loop bandwidth. A narrow loop tracks the slow 31.25 baud
-            // carrier with less jitter, but locks so slowly (~2 s) that a small
-            // center error eats the start of a transmission — and exactly how
-            // much depends on the residual offset, so the same recording decodes
-            // differently on different machines. A wider loop acquires within a
-            // few symbols and then holds a static offset of tens of Hz, which
-            // makes decoding robust to an imperfect center (e.g. the spectral
-            // auto-detect being a fraction of a hertz off).
-            costas: CostasLoop::new(0.06, 0.02),
-            gardner: GardnerTed::new(rate / PSK31_BAUD),
-            acc_i: 0.0,
-            prev_i: 0.0,
+            fir1_i: mf(),
+            fir1_q: mf(),
+            fir2_i: mf(),
+            fir2_q: mf(),
+            decim: 0,
+            syncbuf: [0.0; BITSTEPS],
+            bitclk: 0.0,
+            prevsym: Cplx::new(0.0, 0.0),
             have_prev: false,
             synced: false,
             zrun: 0,
@@ -200,44 +239,73 @@ impl Demodulator for Psk31Demod {
             let f = Cplx::new(self.lpf_i.push(bb.re), self.lpf_q.push(bb.im));
             self.p_in += CARRIER_EMA * (f.norm_sqr() - self.p_in);
             self.p_tot += CARRIER_EMA * (bb.norm_sqr() - self.p_tot);
-            let derot = self.costas.process(bb);
-            // Integrate the de-rotated in-phase value across the symbol for
-            // matched-filter SNR gain; Gardner times off the instantaneous sample.
-            self.acc_i += derot.re;
-            if self.gardner.feed(derot.re).is_some() {
-                let sym = self.acc_i;
-                self.acc_i = 0.0;
-                let open = self.p_tot > CARRIER_FLOOR && self.p_in > CARRIER_OPEN * self.p_tot;
-                if !open {
-                    self.pending.clear();
-                    self.have_prev = false;
-                    self.prev_i = 0.0;
-                    self.synced = false;
-                    self.zrun = 0;
-                    continue;
-                }
-                // Standard PSK31 differential rule: a phase reversal between
-                // consecutive symbols is a data `0`, a steady carrier is a `1`.
-                // (Single differential — this is what fldigi & co. transmit; the
-                // earlier double-differential only ever decoded our own TX.)
-                if self.have_prev {
-                    // A steady carrier (no phase reversal) is a `1`, a reversal a `0`.
-                    let data_bit = u8::from(sym * self.prev_i >= 0.0);
-                    if self.synced {
-                        self.pending.push(data_bit);
-                    } else if data_bit == 0 {
-                        // Wait for a `00` boundary before decoding real characters.
-                        self.zrun += 1;
-                        if self.zrun >= 2 {
-                            self.synced = true;
-                        }
-                    } else {
-                        self.zrun = 0;
-                    }
-                }
-                self.prev_i = sym;
-                self.have_prev = true;
+
+            // fir1: matched filter ahead of the ÷16 decimation. Run it on every
+            // sample to keep its delay line current; use the output only at the
+            // decimation instants.
+            let z1 = Cplx::new(self.fir1_i.push(bb.re), self.fir1_q.push(bb.im));
+            self.decim += 1;
+            if self.decim < DECIMATE {
+                continue;
             }
+            self.decim = 0;
+            // fir2 at 500 Hz: the narrowband symbol matched filter.
+            let z2 = Cplx::new(self.fir2_i.push(z1.re), self.fir2_q.push(z1.im));
+
+            // Envelope-asymmetry timing recovery (fldigi). Draw the symbol's
+            // magnitude waveform into `syncbuf` indexed by the sub-symbol clock,
+            // then steer `bitclk` by the lower/upper-half asymmetry.
+            let idx = (self.bitclk as usize).min(BITSTEPS - 1);
+            self.syncbuf[idx] = 0.8 * self.syncbuf[idx] + 0.2 * z2.norm();
+            let (mut sum, mut ampsum) = (0.0f32, 0.0f32);
+            for i in 0..BITSTEPS / 2 {
+                sum += self.syncbuf[i] - self.syncbuf[i + BITSTEPS / 2];
+                ampsum += self.syncbuf[i] + self.syncbuf[i + BITSTEPS / 2];
+            }
+            let err = if ampsum == 0.0 { 0.0 } else { sum / ampsum };
+            self.bitclk -= err / 5.0;
+            self.bitclk += 1.0;
+            if self.bitclk < 0.0 {
+                self.bitclk += BITSTEPS as f32;
+            }
+            if self.bitclk < BITSTEPS as f32 {
+                continue;
+            }
+            // A full symbol has been drawn: `z2` is the symbol decision point.
+            self.bitclk -= BITSTEPS as f32;
+
+            let open = self.p_tot > CARRIER_FLOOR && self.p_in > CARRIER_OPEN * self.p_tot;
+            if !open {
+                self.pending.clear();
+                self.have_prev = false;
+                self.synced = false;
+                self.zrun = 0;
+                self.prevsym = Cplx::new(0.0, 0.0);
+                continue;
+            }
+            // Differential phase between consecutive symbols. A phase near π is a
+            // reversal (Varicode data `0`); near 0 a steady carrier (`1`).
+            if self.have_prev {
+                let mut phase = (self.prevsym.conj() * z2).arg();
+                if phase < 0.0 {
+                    phase += TAU;
+                }
+                let reversal = (((phase / PI + 0.5) as i32) & 1) << 1; // {0, 2}
+                let data_bit = u8::from(reversal == 0);
+                if self.synced {
+                    self.pending.push(data_bit);
+                } else if data_bit == 0 {
+                    // Wait for a `00` boundary before decoding real characters.
+                    self.zrun += 1;
+                    if self.zrun >= 2 {
+                        self.synced = true;
+                    }
+                } else {
+                    self.zrun = 0;
+                }
+            }
+            self.prevsym = z2;
+            self.have_prev = true;
         }
         // Emit any characters whose `00` separator has now arrived.
         self.drain_completed()
