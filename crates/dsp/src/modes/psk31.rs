@@ -97,10 +97,15 @@ const DECIMATE: usize = 16;
 /// Sub-symbol timing-recovery resolution (`bitsteps` in fldigi).
 const BITSTEPS: usize = 16;
 
+/// fldigi `raisedcosfilt`: a 65-tap raised-cosine (Hann) low-pass, all-positive,
+/// used as `fir1` — the anti-alias filter ahead of the ÷16 decimation. Ported
+/// from fldigi `src/psk/pskcoeff.cxx` (`firc[i] = (1 - cos(2πi/64)) / 128`).
+fn fir1_taps() -> Vec<f32> {
+    (0..=64).map(|i| (1.0 - (TAU * i as f32 / 64.0).cos()) / 128.0).collect()
+}
+
 /// fldigi's `pskcore_filter`: a symmetric 65-tap windowed-sinc matched filter for
-/// 31.25-baud PSK. Used twice — as the anti-alias filter before the ÷16
-/// decimation (where it is wideband relative to 8 kHz) and again at 500 Hz
-/// (where the same taps are narrowband, ~one symbol wide: the matched filter).
+/// 31.25-baud PSK, used as `fir2` at 500 Hz (narrowband, ~one symbol wide).
 /// Ported verbatim from fldigi `src/psk/pskcoeff.cxx` (double literals kept as
 /// written; they round to the nearest f32).
 #[rustfmt::skip]
@@ -124,9 +129,9 @@ const PSKCORE_FILTER: [f32; 65] = [
 pub struct Psk31Demod {
     center_hz: f32,
     nco: DownConverter,
-    // fldigi's two-stage matched filter on the complex baseband: fir1 ahead of
-    // the ÷16 decimation, fir2 at 500 Hz (the narrowband symbol matched filter).
-    // Each is a real FIR applied to I and Q.
+    // fldigi's two-stage filter on the complex baseband: fir1 is a raised-cosine
+    // anti-alias low-pass ahead of the ÷16 decimation; fir2 is the narrowband
+    // `pskcore` symbol matched filter at 500 Hz. Each is a real FIR on I and Q.
     fir1_i: Fir,
     fir1_q: Fir,
     fir2_i: Fir,
@@ -161,14 +166,14 @@ impl Psk31Demod {
     pub fn new(center_hz: f32) -> Self {
         let rate = PSK31_RATE as f32;
         let taps = design_lowpass(SQUELCH_TAPS, SQUELCH_CUTOFF_HZ, rate);
-        let mf = || Fir::new(PSKCORE_FILTER.to_vec());
+        let fir1 = fir1_taps();
         Psk31Demod {
             center_hz,
             nco: DownConverter::new(center_hz, rate),
-            fir1_i: mf(),
-            fir1_q: mf(),
-            fir2_i: mf(),
-            fir2_q: mf(),
+            fir1_i: Fir::new(fir1.clone()),
+            fir1_q: Fir::new(fir1),
+            fir2_i: Fir::new(PSKCORE_FILTER.to_vec()),
+            fir2_q: Fir::new(PSKCORE_FILTER.to_vec()),
             decim: 0,
             syncbuf: [0.0; BITSTEPS],
             bitclk: 0.0,
@@ -355,6 +360,17 @@ mod tests {
         let mut rx = Psk31Demod::new(1000.0);
         let frames = rx.feed(&samples);
         let text = recovered_text(&frames);
+        assert!(text.contains(msg), "recovered: {text:?}");
+    }
+
+    #[test]
+    fn loopback_recovers_text_small_offset() {
+        // A few-Hz carrier offset (the demod has no AFC) must still decode: this
+        // exercises the matched filter + timing recovery off the exact center,
+        // closer to a real off-air signal than the exact-center loopback.
+        let msg = "CQ DE K1ABC";
+        let samples = Psk31Mod::new(1006.0).modulate(&Frame::text(msg)).unwrap();
+        let text = recovered_text(&Psk31Demod::new(1000.0).feed(&samples));
         assert!(text.contains(msg), "recovered: {text:?}");
     }
 
