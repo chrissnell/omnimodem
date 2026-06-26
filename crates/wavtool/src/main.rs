@@ -294,6 +294,22 @@ fn estimate_center(mono: &[f32], rate: u32, mode: &str) -> Option<f32> {
         }) {
             return Some((f0 + interp_freq(&power, k1, bin_hz)) / 2.0);
         }
+        return Some(f0);
+    }
+    // PSK31/CW: the carrier is the symmetry point of the spectrum. The bare peak
+    // can land on a reversal-idle sideband (carrier ±15.6 Hz), so take the energy
+    // centroid in a narrow ±40 Hz window around the peak — that averages the two
+    // sidebands back to the carrier while staying clear of other signals/noise.
+    let half = (40.0 / bin_hz) as usize;
+    let lo = k0.saturating_sub(half);
+    let hi = (k0 + half).min(power.len() - 1);
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (k, &p) in power.iter().enumerate().take(hi + 1).skip(lo) {
+        num += k as f64 * p;
+        den += p;
+    }
+    if den > 0.0 {
+        return Some((num / den) as f32 * bin_hz);
     }
     Some(f0)
 }
