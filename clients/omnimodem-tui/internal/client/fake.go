@@ -19,6 +19,7 @@ type Fake struct {
 	NextTransmitID uint64
 	Err            error // if set, every RPC returns it
 
+	StateCalls    int // GetState invocations (asserts a live-state refresh happened)
 	ChannelCalls  []*pb.ConfigureChannelRequest
 	AudioCalls    []*pb.ConfigureAudioRequest
 	PttCalls      []*pb.ConfigurePttRequest
@@ -30,6 +31,9 @@ type Fake struct {
 }
 
 func (f *Fake) GetState(context.Context) (*pb.ModemState, error) {
+	f.mu.Lock()
+	f.StateCalls++
+	f.mu.Unlock()
 	if f.Err != nil {
 		return nil, f.Err
 	}

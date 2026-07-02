@@ -297,10 +297,13 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		if cmd := v.maybePersist(); cmd != nil {
 			return v, cmd
 		}
-		// Fully drained. If the user pressed esc mid-save, leave now.
+		// Fully drained. If the user pressed esc mid-save, leave now — but still
+		// refresh live state on the way out, so reopening Configure preloads the
+		// devices just saved (m.live is only repopulated by a GetState; the
+		// ChannelConfigured event carries no device fields).
 		if v.closing {
 			v.m.pop()
-			return v, nil
+			return v, snapshotCmd(v.m.c)
 		}
 		// Refresh live state so the channel list underneath reflects the save.
 		return v, snapshotCmd(v.m.c)
