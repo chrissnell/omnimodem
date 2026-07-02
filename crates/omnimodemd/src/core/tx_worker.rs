@@ -609,4 +609,73 @@ mod tests {
         assert!(frames > 0, "TX must emit waterfall frames when spectrum is enabled");
         worker.shutdown();
     }
+
+    // FT8 is a windowed mode whose modulator runs at a different native rate
+    // (12 kHz) than the playback sink and whose bursts are seconds long. Guard
+    // that transmitting FT8 still feeds the operate waterfall — the RX tap is
+    // muted while keyed, so if the TX worker didn't emit here the waterfall would
+    // show nothing for the whole transmission. `slot_s: None` skips the 15 s slot
+    // wait (orthogonal to spectrum emission) so the test stays fast.
+    #[test]
+    fn ft8_tx_emits_waterfall_when_spectrum_enabled() {
+        use crate::core::spectrum::SpectrumCfg;
+
+        let backend = FileBackend::from_samples(vec![], 48_000);
+        let sink = backend.open_playback(48_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(4096);
+        let spectrum = SpectrumControl::default();
+        // Same request the operate screen sends (fft_size/rate_hz default to 0).
+        spectrum.enable(SpectrumCfg {
+            bin_count: 64,
+            fft_size: 0,
+            rate_hz: 0,
+            freq_lo_hz: 0.0,
+            freq_hi_hz: 3000.0,
+        });
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 48_000,
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Ft8).unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+            spectrum,
+        });
+        // A valid FT8 message (standard call/grid exchange).
+        worker
+            .enqueue(TxJob { frame: DspFrame::text("CQ NW5W EM10"), transmit_id: TransmitId(1) })
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let (frames, tx_frames) = rt.block_on(async {
+            let (mut frames, mut tx_frames, mut completed) = (0, 0, false);
+            for _ in 0..600 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    match ev {
+                        TelemetryEvent::SpectrumFrame { transmit, .. } => {
+                            frames += 1;
+                            if transmit {
+                                tx_frames += 1;
+                            }
+                        }
+                        TelemetryEvent::TransmitComplete { .. } => completed = true,
+                        _ => {}
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            (frames, tx_frames)
+        });
+        assert!(frames > 0, "FT8 TX must emit waterfall frames when spectrum is enabled");
+        assert_eq!(frames, tx_frames, "every FT8 TX waterfall frame must be tagged transmit=true");
+        worker.shutdown();
+    }
 }
