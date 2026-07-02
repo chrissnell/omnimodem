@@ -18,9 +18,13 @@ type snapshotMsg struct{ state *pb.ModemState }
 type devicesMsg struct{ devices []*pb.DeviceInfo }
 type rpcOKMsg struct{ what string } // generic "mutating RPC succeeded"
 type rpcErrMsg struct{ err error }  // any RPC failure
-type channelBoundMsg struct{} // ConfigureChannel succeeded → chain audio
-type pttBoundMsg struct{}     // ConfigurePtt succeeded → bind complete
-type audioCfgMsg struct{ resp *pb.ConfigureAudioResponse }
+// saveDoneMsg reports the outcome of the config view's self-contained
+// channel→audio→ptt save (see persistAll). err != nil means a stage failed;
+// warnRxOnly means the channel bound RX-only (no usable TX playback).
+type saveDoneMsg struct {
+	warnRxOnly bool
+	err        error
+}
 type spectrumCfgMsg struct{ resp *pb.ConfigureSpectrumResponse }
 type leaseMsg struct{ resp *pb.TxLeaseResponse }
 type transmitMsg struct{ id uint64 }
