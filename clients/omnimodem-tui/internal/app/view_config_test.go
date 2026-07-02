@@ -226,6 +226,46 @@ func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
 	}
 }
 
+// When TX mirrors RX (one device used for both — e.g. a single BlackHole on
+// macOS), the daemon reports TX empty. The form must still show the effective
+// device with a "(same as RX)" note, not a bare "(same as RX)" that reads as if
+// the TX choice was lost.
+func TestConfigTxShowsEffectiveDeviceWhenSameAsRx(t *testing.T) {
+	// Distinct TX device: shown outright.
+	if got := txDeviceLabel("virtual:BlackHole 16ch", "virtual:BlackHole 2ch"); !strings.Contains(got, "BlackHole 16ch") {
+		t.Fatalf("distinct TX must show its own device, got %q", got)
+	}
+	// TX mirrors RX (empty tx): show the RX device AND the note.
+	got := txDeviceLabel("", "virtual:BlackHole 2ch")
+	if !strings.Contains(got, "BlackHole 2ch") {
+		t.Fatalf("TX mirroring RX must show the RX device, got %q", got)
+	}
+	if !strings.Contains(got, "same as RX") {
+		t.Fatalf("TX mirroring RX must still note (same as RX), got %q", got)
+	}
+	// No RX yet: bare note is fine.
+	if got := txDeviceLabel("", ""); strings.Contains(got, "✓") {
+		t.Fatalf("with no RX, TX must not claim a device, got %q", got)
+	}
+}
+
+// Full reopen render: a channel configured with one device for RX (TX reported
+// empty by the daemon) must render that device in the TX row, not blank.
+func TestConfigReopenRendersTxDeviceForSingleCard(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{
+		name: "vfo-a", mode: "psk31",
+		deviceID: "virtual:BlackHole 2ch", txDeviceID: "", // TX mirrors RX
+	}
+	v := newConfigView(m)
+	out := v.Render(100, 40)
+	// The TX row must carry the device, so the operator sees TX is set.
+	if !strings.Contains(out, "BlackHole 2ch") {
+		t.Fatalf("reopen must show the RX device in the TX row:\n%s", out)
+	}
+}
+
 // Auto-apply: cycling the mode with an RX device chosen must persist the change
 // (a full channel→audio→ptt rebind), so a mode switch takes effect immediately.
 func TestConfigAutoAppliesOnModeChange(t *testing.T) {
