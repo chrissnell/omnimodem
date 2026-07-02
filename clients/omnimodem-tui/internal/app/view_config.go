@@ -69,7 +69,9 @@ type configView struct {
 	methodIdx int
 	focus     cfgFocus
 	picking   bool   // a device-picker modal is open over the form
-	saved     cfgSig // last state persisted to the daemon (for change detection)
+	saved     cfgSig // last state CONFIRMED persisted to the daemon
+	applying  bool   // a save pipeline is in flight (serializes auto-apply)
+	inflight  cfgSig // the sig the in-flight pipeline is persisting
 }
 
 func newDevList(title string) list.Model {
@@ -190,19 +192,32 @@ func (v *configView) sig() cfgSig {
 }
 
 // maybePersist auto-applies the form when a field has changed since the last
-// save. It is the replacement for the old Apply button: callers invoke it after
-// any mutating action (cycling a selector, choosing a device, leaving the name
-// field). Persisting the whole channel on each change re-drives the daemon's
-// channel→audio→ptt rebind, so a mode switch takes effect on the live workers
-// and every device choice (RX, TX, PTT) is saved together. It is a no-op when
-// nothing changed, when no RX device is chosen yet (audio can't bind without a
-// capture device), or when the name is empty (the daemon rejects it).
+// confirmed save. It is the replacement for the old Apply button: callers invoke
+// it after any mutating action (cycling a selector, choosing a device, leaving
+// the name field). Persisting the whole channel on each change re-drives the
+// daemon's channel→audio→ptt rebind, so a mode switch takes effect on the live
+// workers and every device choice (RX, TX, PTT) is saved together.
+//
+// It is a no-op when nothing changed, when no RX device is chosen yet (audio
+// can't bind without a capture device), or when the name is empty (the daemon
+// rejects it). It also serializes: while one pipeline is in flight it starts no
+// second one (the completion handler re-checks and coalesces to the latest
+// state). Serializing avoids two ConfigureChannel RPCs racing to the daemon out
+// of order — the bind commands run in independent goroutines with no ordering
+// guarantee — which could otherwise persist a stale mode.
 func (v *configView) maybePersist() tea.Cmd {
+	if v.applying {
+		return nil // in flight; pttBoundMsg/rpcErrMsg will re-check
+	}
 	cur := v.sig()
 	if cur == v.saved || !v.canApply() || v.name.Value() == "" {
 		return nil
 	}
-	v.saved = cur
+	// v.saved is advanced only once the pipeline confirms (pttBoundMsg), so a
+	// failed save is retried on the next change rather than silently believed
+	// persisted.
+	v.applying = true
+	v.inflight = cur
 	return v.apply()
 }
 
@@ -274,9 +289,20 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		}
 		return v, v.afterAudio()
 	case pttBoundMsg:
-		// Auto-apply keeps the form open; refresh live state so the channel
-		// list underneath (and any later reopen) reflects what was just saved.
-		return v, snapshotCmd(v.m.c)
+		// The full pipeline confirmed: this is the only place v.saved advances,
+		// and only to the state the pipeline actually persisted. Auto-apply keeps
+		// the form open; refresh live state so the channel list underneath (and
+		// any later reopen) reflects what was just saved, then coalesce any change
+		// that arrived while the pipeline was in flight.
+		v.applying = false
+		v.saved = v.inflight
+		return v, tea.Batch(snapshotCmd(v.m.c), v.maybePersist())
+	case rpcErrMsg:
+		// A bind RPC failed (the model shows the toast). Clear the in-flight
+		// guard WITHOUT advancing v.saved so the change is retried on the next
+		// edit; do not auto-retry here, to avoid spinning on a hard failure.
+		v.applying = false
+		return v, nil
 	case tea.KeyMsg:
 		// A device-picker modal is open: it captures all keys. Enter records the
 		// highlighted device and closes the modal; esc cancels and closes. While
@@ -305,8 +331,13 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		// Form navigation (no modal open).
 		switch msg.String() {
 		case "esc":
-			// Changes already auto-applied; flush any pending name edit before
-			// leaving, then back to Channels.
+			// Changes already auto-applied; flush a pending name edit before
+			// leaving, then back to Channels. After pop the follow-on chain
+			// messages route to Channels and are dropped, so only ConfigureChannel
+			// runs here — which is exactly enough for a name change (Mode/Method
+			// persist on ←/→ and devices on choose, so Name is the only field that
+			// can reach esc unsaved, and it needs no audio/ptt rebind). If a future
+			// field defers its save to blur/esc, flush it before pop instead.
 			cmd := v.maybePersist()
 			v.m.pop()
 			return v, cmd

@@ -129,7 +129,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rpcErrMsg:
 		m.toast = ui.NewToast(msg.err.Error(), ui.SeverityError)
-		return m, nil
+		// Let the active view react too (e.g. the config view clears its
+		// in-flight auto-apply guard so the failed save can be retried).
+		_, cmd := m.routeToView(msg)
+		return m, cmd
 	case tickMsg:
 		if m.toast != nil && m.toast.Expired() {
 			m.toast = nil
