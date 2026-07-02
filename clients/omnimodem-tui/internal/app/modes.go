@@ -1,6 +1,11 @@
 package app
 
-import pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+import (
+	"strconv"
+	"strings"
+
+	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+)
 
 // modeParam describes one editable parameter for a mode (label + default).
 type modeParam struct {
@@ -31,6 +36,32 @@ var modes = []modeInfo{
 	{"jt65", "sequencer", 60, nil},
 	{"jt9", "sequencer", 60, nil},
 	{"wspr", "beacon", 120, nil},
+}
+
+// parseModeLabel splits a daemon mode string into its base label and any
+// "key=value" params. The daemon reports parametric modes canonically as
+// `label:k=v,k=v` (e.g. "olivia:tones=32,bw=1000", "cw:wpm=20,tone=700"); a
+// bare label ("ft8") yields no params. Non-numeric values (e.g. rtty's
+// reverse=false) are skipped — the operate/config form only edits numeric params.
+func parseModeLabel(s string) (string, map[string]float64) {
+	base, rest, found := strings.Cut(s, ":")
+	if !found || rest == "" {
+		return s, nil
+	}
+	vals := map[string]float64{}
+	for _, kv := range strings.Split(rest, ",") {
+		k, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if f, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil {
+			vals[strings.TrimSpace(k)] = f
+		}
+	}
+	if len(vals) == 0 {
+		return base, nil
+	}
+	return base, vals
 }
 
 func modeByLabel(label string) *modeInfo {

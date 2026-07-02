@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 func devItem(id, label string, capt, play bool) *pb.DeviceInfo {
@@ -205,5 +205,112 @@ func TestConfigBindChainsThroughPtt(t *testing.T) {
 	}
 	if len(f.PttCalls) != 1 {
 		t.Fatalf("audioCfg should trigger ConfigurePtt, got %d", len(f.PttCalls))
+	}
+}
+
+// parseModeLabel splits the daemon's canonical parametric mode string into a
+// base label (matches the selector) and numeric params (seed the inputs).
+func TestParseModeLabel(t *testing.T) {
+	label, vals := parseModeLabel("olivia:tones=16,bw=500")
+	if label != "olivia" || vals["tones"] != 16 || vals["bw"] != 500 {
+		t.Fatalf("olivia parse = %q %v", label, vals)
+	}
+	// Bare label → no params.
+	if l, v := parseModeLabel("ft8"); l != "ft8" || v != nil {
+		t.Fatalf("bare parse = %q %v", l, v)
+	}
+	// Non-numeric values (rtty's reverse=false) are skipped, numeric ones kept.
+	_, r := parseModeLabel("rtty:baud=45.45,shift=170,center=2210,reverse=false")
+	if r["baud"] != 45.45 || r["shift"] != 170 || r["center"] != 2210 {
+		t.Fatalf("rtty numeric params = %v", r)
+	}
+	if _, ok := r["reverse"]; ok {
+		t.Fatalf("non-numeric reverse must be skipped, got %v", r)
+	}
+}
+
+// Reopening Configure on a parametric channel must select the right mode (not
+// silently fall back to the first) AND seed the param inputs with the saved
+// values — the daemon reports the mode as "olivia:tones=16,bw=500".
+func TestConfigPreloadsParametricMode(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "olivia-net", mode: "olivia:tones=16,bw=500", deviceID: "alsa:Mic"}
+	v := newConfigView(m)
+	if v.modeLabel() != "olivia" {
+		t.Fatalf("parametric mode must select olivia, got %q", v.modeLabel())
+	}
+	if len(v.params) != 2 {
+		t.Fatalf("olivia should expose 2 params, got %d", len(v.params))
+	}
+	got := map[string]string{}
+	for _, p := range v.params {
+		got[p.key] = p.input.Value()
+	}
+	if got["tones"] != "16" || got["bw"] != "500" {
+		t.Fatalf("param inputs must preload saved values, got %v", got)
+	}
+}
+
+// Editing a param and applying must send the operator's value in ModeParams,
+// not the mode default.
+func TestConfigEditedParamReachesConfigureChannel(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "olivia-net", mode: "olivia:tones=32,bw=1000"}
+	v := newConfigView(m)
+	v.rxID = "usb:rx" // satisfy canApply
+	// Edit the first param (tones) 32 -> 8.
+	v.params[0].input.SetValue("8")
+	v.apply()()
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("apply must call ConfigureChannel once, got %d", len(f.ChannelCalls))
+	}
+	o := f.ChannelCalls[0].GetModeParams().GetOlivia()
+	if o == nil {
+		t.Fatalf("olivia params must be sent, got %+v", f.ChannelCalls[0].GetModeParams())
+	}
+	if o.GetTones() != 8 || o.GetBandwidthHz() != 1000 {
+		t.Fatalf("edited params must be sent: tones=%d bw=%d, want 8/1000", o.GetTones(), o.GetBandwidthHz())
+	}
+}
+
+// Down-arrow navigation must step through the mode's param fields between Mode
+// and the audio fields, and cycling the mode rebuilds its param set.
+func TestConfigParamNavigationAndModeCycle(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "cw-net", mode: "cw:wpm=20,tone=700"}
+	v := newConfigView(m)
+	if v.modeLabel() != "cw" || len(v.params) != 2 {
+		t.Fatalf("expected cw with 2 params, got %q/%d", v.modeLabel(), len(v.params))
+	}
+	// Name -> Call -> Grid -> Mode -> Param0 -> Param1 -> RX.
+	for i := 0; i < 3; i++ {
+		v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if v.focus != fMode {
+		t.Fatalf("4th field should be Mode, got %d", v.focus)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if v.focus != fParam || v.paramIdx != 0 {
+		t.Fatalf("after Mode should be param 0, got focus=%d idx=%d", v.focus, v.paramIdx)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if v.focus != fParam || v.paramIdx != 1 {
+		t.Fatalf("should advance to param 1, got focus=%d idx=%d", v.focus, v.paramIdx)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if v.focus != fRx {
+		t.Fatalf("after the last param should be RX, got %d", v.focus)
+	}
+	// Cycle the mode at fMode: params rebuild for the new mode.
+	v.focus = fMode
+	v.Update(tea.KeyMsg{Type: tea.KeyRight})
+	// ft4 (next after cw in the modes slice order is not guaranteed; just assert
+	// the param set matches whatever mode is now selected).
+	if len(v.params) != len(modes[v.modeIdx].params) {
+		t.Fatalf("cycling mode must rebuild params for %q", v.modeLabel())
 	}
 }
