@@ -282,7 +282,12 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			if v.closing {
 				v.m.pop()
 			}
-			return v, nil
+			// Still refresh live state: a save can fail AFTER the daemon already
+			// committed part of it — a PTT config persists before its driver is
+			// opened, so a device-based method with no usable node reports an error
+			// yet the device choice is saved. Reflect the daemon (the source of
+			// truth) so reopening Configure shows what actually persisted.
+			return v, snapshotCmd(v.m.c)
 		}
 		// Confirmed: advance the baseline to exactly what this save persisted.
 		v.saved = v.inflight

@@ -940,6 +940,92 @@ mod tests {
         join.join().unwrap();
     }
 
+    // The operator's exact macOS setup: ONE BlackHole device (a Placeholder id,
+    // since CoreAudio names have no ALSA CARD= token) used for RX, TX, and PTT,
+    // with the default VOX method. After configuring, the snapshot the client
+    // preloads must report the PTT device — "PTT still not persisted" was the
+    // remaining report after the display fixes landed.
+    #[test]
+    fn snapshot_reports_placeholder_ptt_device_single_blackhole() {
+        let bh = DeviceDescriptor {
+            id: DeviceId::Placeholder { tag: "BlackHole 2ch".into() },
+            label: "BlackHole 2ch".into(),
+            has_capture: true,
+            has_playback: true,
+        };
+        let bh_id = bh.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![bh])),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "psk31").await;
+            // Same device for RX and TX (one BlackHole for both).
+            configure_audio_split(&core, ChannelId(0), bh_id.clone(), bh_id.clone()).await;
+            let (t, r) = oneshot::channel();
+            core.commands
+                .send(Command::ConfigurePtt {
+                    id: ChannelId(0),
+                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false },
+                    reply: t,
+                })
+                .unwrap();
+            r.await.unwrap().unwrap();
+
+            let ci = channel_info(&core, ChannelId(0)).await;
+            assert_eq!(ci.device_id, "virtual:BlackHole 2ch", "RX");
+            assert_eq!(ci.ptt_device_id, "virtual:BlackHole 2ch", "PTT device must be reported");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    // A device-based PTT method whose driver can't open (a serial method with no
+    // usable node — exactly what the TUI sends, since it omits node/pin) returns
+    // an error to the client, but the config is still persisted (configure_ptt
+    // commits before opening the driver). The client must therefore refresh from
+    // the snapshot on error, or the saved device looks lost — the "PTT device
+    // still not persisted" report.
+    #[test]
+    fn ptt_config_persists_even_when_driver_open_fails() {
+        let bh = DeviceDescriptor {
+            id: DeviceId::Placeholder { tag: "BlackHole 2ch".into() },
+            label: "BlackHole 2ch".into(),
+            has_capture: true,
+            has_playback: true,
+        };
+        let bh_id = bh.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![bh])),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "psk31").await;
+            configure_audio_split(&core, ChannelId(0), bh_id.clone(), bh_id.clone()).await;
+            let (t, r) = oneshot::channel();
+            core.commands
+                .send(Command::ConfigurePtt {
+                    id: ChannelId(0),
+                    ptt: PttConfig {
+                        device_id: bh_id.clone(),
+                        method: PttMethod::SerialRts { node: String::new() },
+                        invert: false,
+                    },
+                    reply: t,
+                })
+                .unwrap();
+            assert!(r.await.unwrap().is_err(), "opening a serial PTT with no node must error");
+
+            // ...yet the device choice is persisted and surfaced by the snapshot.
+            let ci = channel_info(&core, ChannelId(0)).await;
+            assert_eq!(ci.ptt_device_id, "virtual:BlackHole 2ch");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
     #[test]
     fn transmit_on_unknown_channel_errors() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
