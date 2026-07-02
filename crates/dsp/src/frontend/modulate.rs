@@ -38,7 +38,16 @@ impl Gfsk {
         }
         // Gaussian-shape the frequency trajectory (BT product). Skip for BT<=0.
         let shaped = if self.bt > 0.0 {
-            let taps = (self.sps * 4) | 1;
+            // Size the filter to the Gaussian's real support (±4σ captures
+            // >99.99% of the pulse). A fixed 4-symbol span (`sps*4`) is sized for
+            // very small BT; at FT8/FT4's BT the pulse decays within a fraction of
+            // one symbol, so the vast majority of those taps are ~0 yet each still
+            // costs a multiply in the O(n·taps) direct convolution — ~1.1 billion
+            // ops (~19 s in debug) for one FT8 burst. Cap at the old span so
+            // wide-pulse (small-BT) modes keep their exact behavior.
+            let sigma = self.sps as f32 * (2f32.ln()).sqrt() / (2.0 * PI * self.bt);
+            let half = ((4.0 * sigma).ceil() as usize).clamp(1, self.sps * 2);
+            let taps = (2 * half + 1).min((self.sps * 4) | 1);
             let g = design_gaussian(taps, self.bt, self.sps as f32);
             convolve_same(&freq, &g, freq[0])
         } else {
