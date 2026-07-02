@@ -361,12 +361,22 @@ fn emit_metrics(
 }
 
 /// Flatten a decoded payload to the opaque bytes the proto `RxFrame.data`
-/// carries. Text/message decode to UTF-8; packets/vocoder pass through.
+/// carries. Text/message decode to UTF-8; packets/vocoder pass through. Image
+/// rasters are encoded self-describingly (2-byte big-endian `width`, then the
+/// row-major gray bytes) so the receiver can reconstruct rows without a schema
+/// change; a structured proto `Image` message lands with the first facsimile
+/// mode (Phase 10), when the raster semantics are pinned down.
 fn frame_bytes(p: &FramePayload) -> Vec<u8> {
     match p {
         FramePayload::Packet(b) | FramePayload::Vocoder(b) => b.clone(),
         FramePayload::Text(t) => t.clone().into_bytes(),
         FramePayload::Message77(m) => m.to_vec(),
+        FramePayload::Image { width, gray } => {
+            let mut out = Vec::with_capacity(2 + gray.len());
+            out.extend_from_slice(&width.to_be_bytes());
+            out.extend_from_slice(gray);
+            out
+        }
     }
 }
 

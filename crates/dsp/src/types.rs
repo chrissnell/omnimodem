@@ -42,6 +42,11 @@ pub enum FramePayload {
     Message77([u8; 10]),
     /// Opaque vocoder bits (Phase-5 voice modes).
     Vocoder(Vec<u8>),
+    /// Raster/scanline image for facsimile modes (Hell, WEFAX, and the
+    /// MFSK/THOR/IFKP/FSQ picture sub-protocols). `gray` is row-major 8-bit
+    /// luminance, one `u8` per pixel; `gray.len()` is a whole multiple of
+    /// `width`, so the row count is `gray.len() / width`.
+    Image { width: u16, gray: Vec<u8> },
 }
 
 impl FramePayload {
@@ -64,6 +69,11 @@ impl FramePayload {
             FramePayload::Vocoder(b) => {
                 3u8.hash(h);
                 b.hash(h);
+            }
+            FramePayload::Image { width, gray } => {
+                4u8.hash(h);
+                width.hash(h);
+                gray.hash(h);
             }
         }
     }
@@ -114,5 +124,26 @@ mod tests {
         let f = Frame::packet(vec![1, 2, 3]);
         assert!(!f.meta.crc_ok);
         assert_eq!(f.meta.sample_offset, 0);
+    }
+
+    #[test]
+    fn image_payload_roundtrips_and_hashes() {
+        use std::hash::Hasher;
+        // 2 rows x 3 cols of 8-bit luminance.
+        let img = FramePayload::Image { width: 3, gray: vec![0, 128, 255, 1, 2, 3] };
+        let f = Frame { payload: img.clone(), meta: FrameMeta::default() };
+        assert_eq!(f.payload, img);
+        if let FramePayload::Image { width, gray } = &f.payload {
+            assert_eq!(gray.len() % (*width as usize), 0);
+            assert_eq!(gray.len() / (*width as usize), 2); // 2 rows
+        } else {
+            panic!("expected Image");
+        }
+        // The new variant participates in the dedup hash (distinct tag 4u8).
+        let mut ha = std::collections::hash_map::DefaultHasher::new();
+        img.hash_into(&mut ha);
+        let mut hb = std::collections::hash_map::DefaultHasher::new();
+        FramePayload::Image { width: 3, gray: vec![0, 128, 255, 1, 2, 4] }.hash_into(&mut hb);
+        assert_ne!(ha.finish(), hb.finish());
     }
 }
