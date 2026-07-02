@@ -51,6 +51,19 @@ func TestChannelsNFromEmptyTargetsCh0(t *testing.T) {
 	}
 }
 
+// 'n' fills gaps: with ch0 and ch2 present it must target ch1, not ch3.
+func TestChannelsNFillsGap(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.connected = true
+	m.live[0] = &chanLive{name: "vfo-a"}
+	m.live[2] = &chanLive{name: "vfo-c"}
+	m.push(newChannelsView(m))
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.sel != 1 {
+		t.Fatalf("'n' must fill the lowest gap (1); sel=%d", m.sel)
+	}
+}
+
 func TestChannelsOOpensOperateView(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	m.connected = true
