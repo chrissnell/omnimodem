@@ -21,8 +21,19 @@ func TestFT8LadderAdvance(t *testing.T) {
 
 func TestSlotPosition(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 7, 0, time.UTC)
-	if p := slotPosition(at); p < 6.9 || p > 7.1 {
-		t.Fatalf("slot pos at :07 = %v, want ~7", p)
+	if p := slotPosition(at, 15); p < 6.9 || p > 7.1 {
+		t.Fatalf("slot pos at :07 in a 15 s slot = %v, want ~7", p)
+	}
+	// FT4's 7.5 s slot: :07 is 7.0 into the second 7.5 s window (0..7.5).
+	if p := slotPosition(at, 7.5); p < 6.9 || p > 7.1 {
+		t.Fatalf("slot pos at :07 in a 7.5 s slot = %v, want ~7", p)
+	}
+	// A 60 s slot (JT65/JT9) is anchored to the minute: :07 → 7.
+	if p := slotPosition(at, 60); p < 6.9 || p > 7.1 {
+		t.Fatalf("slot pos at :07 in a 60 s slot = %v, want ~7", p)
+	}
+	if p := slotPosition(at, 0); p != 0 {
+		t.Fatalf("degenerate period must be 0, got %v", p)
 	}
 }
 

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 type transcriptLine struct {
@@ -16,8 +16,10 @@ type transcriptLine struct {
 	txt string
 }
 
-// operateView is the per-channel operate screen: ragchew (transcript + compose +
-// macros + waterfall) or, for FT8-shape modes, the auto-sequence ladder.
+// operateView is the per-channel operate screen. Its surface depends on the
+// mode's shape: ragchew (transcript + compose + macros + waterfall) for chat
+// modes, the auto-sequence ladder for sequencer modes (FT8/FT4/JT65/JT9), or a
+// receive-only spot monitor for beacon modes (WSPR).
 type operateView struct {
 	m          *Model
 	compose    string
@@ -32,6 +34,9 @@ type operateView struct {
 	theirCall  string
 	rst        string
 	seq        *ft8Seq
+	beacon     bool    // receive-only beacon monitor (WSPR): no ladder, no compose
+	modeLabel  string  // active mode label, for the surface header
+	slotSecs   float64 // T/R slot length for sequencer/beacon modes
 	qlog       qsoLog
 }
 
@@ -44,8 +49,15 @@ func newOperateView(m *Model) *operateView {
 		tx:     txState{watchdog: 30 * time.Second},
 	}
 	if cl := m.live[m.sel]; cl != nil {
-		if mi := modeByLabel(cl.mode); mi != nil && mi.shape == "ft8" {
-			v.seq = newFT8Seq(v.myCall, v.myGrid)
+		v.modeLabel = cl.mode
+		if mi := modeByLabel(cl.mode); mi != nil {
+			v.slotSecs = mi.slotSecs
+			switch mi.shape {
+			case "sequencer":
+				v.seq = newFT8Seq(v.myCall, v.myGrid)
+			case "beacon":
+				v.beacon = true
+			}
 		}
 	}
 	return v
@@ -126,11 +138,17 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			}
 			return v, nil
 		case "enter":
+			if v.beacon {
+				return v, nil // beacon TX is scheduled, not keyed from here
+			}
 			if v.seq != nil {
 				return v, v.ft8Send()
 			}
 			return v, v.sendCompose()
 		case "f1", "f2", "f3", "f4", "f5":
+			if v.beacon || v.seq != nil {
+				return v, nil // no free-text macros on the ladder/beacon surfaces
+			}
 			v.compose = expandMacro(macroForKey(msg.String()), macroCtx{
 				myCall: v.myCall, theirCall: v.theirCall, rst: v.rst,
 			})
@@ -140,7 +158,7 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 				v.compose = v.compose[:n-1]
 			}
 		default:
-			if v.seq == nil && len(msg.Runes) > 0 {
+			if v.seq == nil && !v.beacon && len(msg.Runes) > 0 {
 				v.compose += string(msg.Runes)
 			}
 		}
@@ -251,11 +269,21 @@ func (v *operateView) Render(w, h int) string {
 	) + "\n\n")
 
 	if v.seq != nil {
-		b.WriteString(fmt.Sprintf("FT8 · slot %.0f/15s · DX [%s %s]\n\n",
-			slotPosition(time.Now()), orDash(v.seq.dxCall), v.seq.dxGrid))
+		b.WriteString(fmt.Sprintf("%s · slot %.1f/%gs · DX [%s %s]\n\n",
+			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs,
+			orDash(v.seq.dxCall), v.seq.dxGrid))
 		b.WriteString("next: " + v.seq.current() + "\n")
 		b.WriteString("cq:   " + v.seq.cq() + "\n\n")
 		b.WriteString(fmt.Sprintf("logged QSOs: %d", len(v.qlog.entries)))
+		return b.String()
+	}
+	if v.beacon {
+		// Receive-only spot monitor: show decoded spots; no compose/ladder.
+		for _, l := range v.transcript {
+			b.WriteString(fmt.Sprintf("%s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
+		}
+		b.WriteString(fmt.Sprintf("%s beacon · slot %.0f/%gs · spots: %d",
+			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs, len(v.transcript)))
 		return b.String()
 	}
 	for _, l := range v.transcript {
@@ -278,6 +306,9 @@ func (v *operateView) Title() string {
 }
 
 func (v *operateView) Hints() []ui.Hint {
+	if v.beacon {
+		return []ui.Hint{{Key: "esc", Action: "back"}}
+	}
 	if v.seq != nil {
 		return []ui.Hint{
 			{Key: "enter", Action: "send next"}, {Key: "ctrl+x", Action: "halt"}, {Key: "esc", Action: "back"},
