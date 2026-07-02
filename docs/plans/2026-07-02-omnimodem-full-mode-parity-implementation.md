@@ -18,18 +18,34 @@ This is the non-negotiable core of the plan. "Perfect compatibility" means we **
 
 1. **One named reference file per mode.** Every mode task cites the exact upstream file(s) (tables below). That file is the source of truth for constants, tables, bit orderings, symbol/tone maps, sync/preamble patterns, timing, and pre-emphasis/pulse shaping. When the reference and a published spec disagree, **the reference wins** (fldigi/WSJT-X/JS8 interop is the goal, not the spec).
 
-2. **Port verbatim, cite provenance.** Ported constants and tables are transcribed exactly, each with a `// ref: <file>:<lines>` comment. No "cleaner" re-derivation of a varicode table, interleave permutation, or FEC generator — transcribe it. Algorithms are ported structurally (same stages, same order, same rounding), then made idiomatic Rust only where it cannot change output.
+2. **Port the behavior, write it as Rust — not a transliteration.** We replicate what goes on the wire, expressed in idiomatic Rust. Transcribe **data verbatim** (varicode tables, interleave permutations, FEC generator/parity matrices, sync/Costas patterns, tone maps) with a `// ref: <file>:<lines>` cite — never "clean up" a table. But re-express the **code** the Rust way: the references are stateful C++ modem objects (fldigi) and Fortran with COMMON blocks + 1-based arrays (WSJT-X) — a line-by-line transliteration of either is *non-idiomatic and forbidden*. See "What idiomatic-Rust porting means" below.
 
-3. **Stage-level golden vectors, not just end-to-end.** For each mode we extract known-answer vectors from the reference at **every pipeline boundary**, so a break localizes to one stage:
-   - TX side: message → varicode/source-encode → FEC → interleave → symbol/tone sequence → modulated audio.
-   - RX side: reference soft metrics / decoded intermediates where extractable.
-   Vectors land in `crates/dsp/tests/vectors/<mode>_*.{snap,json}` with a provenance header naming the reference commit + how it was generated (P0 gives the extraction tooling).
+3. **Two classes of equivalence — do not conflate them.** Getting this wrong is the most likely correctness trap in the whole program:
+   - **Bit-exact (integer / bit domain):** varicode output, FEC codewords, interleaver permutations, symbol/tone *indices*, sync words, packed 77-bit messages, CRCs. These are deterministic and **must match the reference byte-for-byte**.
+   - **Numerically close (floating-point DSP):** modulated audio samples, filter/NCO/AGC outputs, soft LLRs. FP op-ordering and libm `sin`/`cos` differ across C/Fortran/Rust, so **bit-exact audio is not a realistic target and must not be asserted.** Gate these on a tight tolerance (e.g. max abs error / correlation vs the reference waveform) **and** on the decisive end-to-end cross-decode.
 
-4. **Two gates per mode (Definition of Done, unchanged):**
-   - **KAT parity:** every ported stage matches its golden vector — encode side **bit-exact**; soft-decode side within committed tolerance. (`kat.rs`)
-   - **Bidirectional cross-decode:** our TX decodes in the reference binary AND the reference's TX decodes in ours, gated `#[ignore]` behind the reference binary in `kat.rs`; plus the BER/decode-rate curve meets the committed threshold at every SNR point (`ber.rs`, AWGN + Watterson CCIR). A loopback round-trip (`loopback.rs`) is necessary but **not** sufficient.
+4. **Stage-level golden vectors, not just end-to-end**, so a break localizes to one stage. Extract from the reference at every pipeline boundary — TX: message → source-encode → FEC → interleave → symbol/tone indices → audio; RX: reference soft metrics / decoded intermediates where extractable. Vectors land in `crates/dsp/tests/vectors/<mode>_*.{snap,json}` with a provenance header (reference commit + exact generating command); P0 gives the extraction tooling.
 
-5. **Provenance in code.** Each mode file opens with a doc comment: reference file(s), upstream commit hash, and any deliberate deviation (there should be none affecting the wire; document if unavoidable).
+5. **Two gates per mode (Definition of Done):**
+   - **KAT parity:** every bit-domain stage matches its golden vector byte-for-byte; every FP stage is within its committed tolerance. (`kat.rs`)
+   - **Bidirectional cross-decode:** our TX decodes in the reference binary AND the reference's TX decodes in ours (`#[ignore]`-gated behind the reference binary in `kat.rs`), plus the BER/decode-rate curve meets the committed threshold at every SNR point (`ber.rs`, AWGN + Watterson CCIR). A loopback round-trip (`loopback.rs`) is necessary but **not** sufficient.
+
+6. **No stubs, ever — a task is done only when its gate is green.** This is a hard rule, not a preference:
+   - No `todo!()`, `unimplemented!()`, `unreachable!()` on any reachable path; no `panic!("not yet")`; no functions that return a canned/zeroed result to make a test pass.
+   - No silently-partial submode grids: if a family claims MFSK8/16/32, every listed submode is wired and table-tested, or it is not listed.
+   - A port task closes on a **passing conformance gate against the reference vector**, never on "it compiles" or "loopback works." A stage that cannot yet pass its gate stays open — it is not merged behind a stub.
+   - `crates/dsp` already runs an `alloc_guard` / no-per-sample-alloc discipline and full CI KAT/BER; ported code meets that bar or it does not land.
+
+7. **Provenance in code.** Each mode file opens with a doc comment: reference file(s), upstream commit hash, and any deviation (there must be none affecting the wire; if an FP tolerance is chosen, state it and why).
+
+### What idiomatic-Rust porting means (concrete)
+
+Preserve the *observable behavior* of the reference; discard its *code shape*. Applied to this codebase:
+
+- **Map onto the existing traits, not new god-objects.** fldigi's `modem` subclasses and WSJT-X's `decodeXXX` subroutines become our `Demodulator`/`BlockDemodulator` + `Modulator` impls (`crates/dsp/src/mode.rs`), reusing `frontend`/`sync`/`fec`/`framing`/`ensemble`. No mutable global state — per-instance owned scratch buffers (the trait already forbids per-sample allocation).
+- **Types:** `Complex32`/`f32` (`crate::types`), not hand-rolled real/imag pairs; `Llr`/`SoftBits` for soft info; `FramePayload` variants for output. Fortran 1-based indexing is rebased to 0; `integer*1` bit arrays become `&[u8]`/`bitvec` as appropriate.
+- **Control flow:** iterators/slices/`chunks`/`windows` over C-style index loops; `enum` submodes with a `params()` method over `switch (mode_id)`; `Result<_, ModError>` over sentinel return codes; `const` tables (`static [...]`) over runtime-initialized arrays.
+- **What must NOT change:** the arithmetic that determines a bit-domain output (integer ops, table lookups, bit orderings, rounding/scaling that feeds a slicer). Where the reference's exact operation order matters to an FP result within tolerance, keep that order and note it. Idiom is for structure; it never changes the wire.
 
 ### The uniform per-mode port task template
 
@@ -37,9 +53,9 @@ Every mode in every phase is ported with this same task sequence (the phase plan
 
 - [ ] **T1 — Extract golden vectors.** Run the P0 extraction recipe against `<reference file>` for a fixed test message; commit `vectors/<mode>_*.{snap,json}` with provenance header. Commit.
 - [ ] **T2 — Port the source/char codec** (varicode / JSC / Baudot / 77-bit pack) with `// ref:` cites. Failing KAT test asserting encode == golden vector → implement → pass. Commit.
-- [ ] **T3 — Port the FEC + interleave** (reuse existing `fec::*` where the code family already exists; add tables otherwise). KAT: encoder output == golden vector. Commit.
-- [ ] **T4 — Port the modulator** (symbol/tone map → `frontend::modulate`/NCO, pulse shaping). KAT: modulated audio == golden vector (bit-exact or within FP tolerance). Commit.
-- [ ] **T5 — Port the demodulator** (front end → sync → soft demap → FEC decode → unpack). Loopback round-trip test at high SNR passes. Commit.
+- [ ] **T3 — Port the FEC + interleave** (reuse existing `fec::*` where the code family already exists; transcribe generator/parity tables otherwise). KAT: encoder output == golden vector, **bit-exact** (bit-domain stage). Commit.
+- [ ] **T4 — Port the modulator** (symbol/tone *indices* → `frontend::modulate`/NCO, pulse shaping). KAT: symbol/tone-index sequence **bit-exact** vs golden vector; modulated audio within the committed **FP tolerance** (never asserted bit-exact — see Doctrine §3). Commit.
+- [ ] **T5 — Port the demodulator** (front end → sync → soft demap → FEC decode → unpack). Loopback round-trip at high SNR passes; where extractable, soft-metric KAT vs reference within tolerance. Commit.
 - [ ] **T6 — Register the mode** (`modes/mod.rs` `pub mod`, `ModeConfig` variant + `parse`, `registry.rs` arms). Registry unit test. Commit.
 - [ ] **T7 — Conformance gates.** Add the `#[ignore]` bidirectional cross-decode test + the `ber.rs` decode-rate sweep with a committed threshold. Run the AWGN/Watterson sweep; record the curve. Commit.
 
@@ -53,7 +69,7 @@ Submode grids (Olivia/Contestia/MFSK/THOR/DominoEX/PSK-rate/Q65/JS8/…) are **p
 
 **Files:**
 - Create: `crates/dsp/tests/vectors/README.md` (provenance/extraction convention)
-- Create: `scratch/refvectors/` extraction recipes (per-family shell/Fortran/C++ harness stubs; scratch per CLAUDE.md)
+- Create: `scratch/refvectors/` extraction recipes (per-family shell/Fortran/C++ driver programs that dump reference intermediates; scratch per CLAUDE.md)
 - Modify: `crates/dsp/src/types.rs` (add `FramePayload::Image`)
 - Modify: `crates/omnimodemd/src/grpc/convert.rs` + `proto/*.proto` (thread Image through the RX event)
 - Test: `crates/dsp/src/types.rs` inline tests; `crates/dsp/tests/roundtrip.rs`
@@ -180,8 +196,8 @@ Each phase below instantiates the **per-mode port task template** (T1–T7) for 
 Independent of the fldigi track (reuses the FT8 windowed path — STFT → Costas → LDPC+OSD → 77-bit — not fldigi blocks), so it runs in parallel. Same T1–T7 template; the "modulated audio" golden vectors come from the reference `gen*`/`*sim`/`*code` programs already in `wsjtx/lib/`.
 
 ### Phase W1 — FST4 / FST4W
-- **Reference:** `wsjtx/lib/fst4/`, `wsjtx/lib/fst4_decode.f90`.
-- **New block:** `fec/ldpc_fst4.rs` — the LDPC(240,120) parity tables (transcribed from the reference); reuses the existing BP decoder + OSD.
+- **Reference:** `wsjtx/lib/fst4/` — `genfst4.f90`, `gen_fst4wave.f90`, `fst4_decode.f90`, `encode240_101.f90` + `ldpc_240_101_{generator,parity}.f90`, `encode240_74.f90` + `ldpc_240_74_{generator,parity}.f90`, `get_crc24.f90`.
+- **New block:** `fec/ldpc_fst4.rs` — transcribe the **two** LDPC codes FST4/FST4W use: **(240,101)** (standard, 77-bit + CRC24) and **(240,74)** (the low-`Keff` variant). Reuse the existing LDPC BP decoder + OSD; add these generator/parity tables + the CRC-24. 4-GFSK waveform + long/selectable T/R periods.
 - **Modes:** FST4 (QSO) and FST4W (beacon), all T/R periods (15/30/60/120/300/900/1800 s) — the block demod's `window_s`/`period_s` become parametric.
 
 ### Phase W2 — MSK144

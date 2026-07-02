@@ -102,7 +102,7 @@ existing windowed infrastructure.
 
 - **JT4** — reference `wsjtx/lib/jt4.f90`, `jt4_decode.f90`, `jt4code.f90`. EME/weak-signal 4-tone FSK, submodes A–G (tone spacing). K=32 convolutional + Fano — **reuses our existing `fec::fano` + 4-FSK**; lowest-effort of the group.
 - **MSK144** — reference `wsjtx/lib/decode_msk144.f90`, `genmsk_128_90.f90`, `msk144code.f90`, `msk144decodeframe.f90`. Meteor-scatter; offset-MSK waveform + LDPC(128,90). Needs a new **MSK/OQPSK waveform** block; reuses the LDPC BP decoder.
-- **FST4 / FST4W** — reference `wsjtx/lib/fst4/`, `fst4_decode.f90`. LF/MF 4-GFSK with LDPC(240,120) and long, selectable T/R periods (15/30/60/120/300/900/1800 s). Needs the FST4 **LDPC(240,120) code tables**; reuses the BP decoder + windowed path (with variable window length). FST4W is the beacon variant of the same waveform.
+- **FST4 / FST4W** — reference `wsjtx/lib/fst4/`, `fst4_decode.f90`. LF/MF 4-GFSK with the **(240,101)** and **(240,74)** LDPC codes and long, selectable T/R periods (15/30/60/120/300/900/1800 s). Needs both LDPC table sets (`ldpc_240_101_*`, `ldpc_240_74_*`) + CRC-24; reuses the BP decoder + windowed path (with variable window length). FST4W is the beacon variant of the same waveform.
 - **Q65** — reference `wsjtx/lib/q65_decode.f90`, `q65params.f90`, `qra64code.f90`, and `wsjtx/lib/qra/` (`qra65`, `qracodes`). EME/troposcatter; 65-tone with the **QRA65 (Q-ary Repeat-Accumulate) code** and submodes A–E × T/R periods. Needs a new **QRA65 soft decoder** — the one genuinely new FEC family in this group.
 
 ### WSJT-X utilities (out of scope)
@@ -136,7 +136,7 @@ Everything else is assembly. These are the blocks that don't exist yet, with the
 | RSID encode/detect | `frontend/rsid.rs` | cross-cutting | `rsid/` |
 | MFSK varicode | `framing/mfsk_varicode.rs` | MFSK | `mfskvaricode.cxx` |
 | MSK / OQPSK waveform | `frontend/msk.rs` | MSK144 | `wsjtx/lib/genmsk_128_90.f90`, `decode_msk144.f90` |
-| FST4 LDPC(240,120) tables | `fec/ldpc_fst4.rs` | FST4/FST4W | `wsjtx/lib/fst4/` |
+| FST4 LDPC (240,101)+(240,74) tables | `fec/ldpc_fst4.rs` | FST4/FST4W | `wsjtx/lib/fst4/ldpc_240_*` |
 | QRA65 soft decoder | `fec/qra65.rs` | Q65 | `wsjtx/lib/qra/`, `qra64code.f90` |
 
 Convolutional FEC, soft Viterbi, Fano, Walsh/FHT, interleavers, Golay, the LDPC BP decoder + OSD, the
@@ -167,7 +167,7 @@ path, not fldigi blocks), so these run **in parallel** and can be interleaved by
 
 | Phase | Modes | New blocks | Priority | Rough effort |
 |---|---|---|---|---|
-| **W1 — FST4 / FST4W** | FST4, FST4W (all T/R periods) | LDPC(240,120) tables | **High** (active LF/MF + growing HF QSO) | Low–Med (reuses BP decoder + windowed path) |
+| **W1 — FST4 / FST4W** | FST4, FST4W (all T/R periods) | LDPC (240,101)+(240,74) tables | **High** (active LF/MF + growing HF QSO) | Low–Med (reuses BP decoder + windowed path) |
 | **W2 — MSK144** | MSK144 | MSK/OQPSK waveform | **Med–High** (the VHF meteor-scatter mode) | Med |
 | **W3 — Q65** | Q65 (submodes A–E) | QRA65 soft decoder | **Med** (EME/troposcatter) | Med–High (net-new FEC) |
 | **W4 — JT4** | JT4 (submodes A–G) | none (Fano + 4-FSK) | **Low** (legacy EME) | Low |
