@@ -46,7 +46,6 @@ func newOperateView(m *Model) *operateView {
 		myCall: m.myCall,
 		myGrid: m.myGrid,
 		rst:    "599",
-		tx:     txState{watchdog: 30 * time.Second},
 	}
 	if cl := m.live[m.sel]; cl != nil {
 		v.modeLabel = cl.mode
@@ -60,6 +59,10 @@ func newOperateView(m *Model) *operateView {
 			}
 		}
 	}
+	// Size the TX watchdog to the mode's slot length now that it's known: windowed
+	// modes wait for the daemon's slot-align count-off before keying, so a fixed
+	// timeout would abort long-slot modes before they ever transmit.
+	v.tx = txState{watchdog: txWatchdog(v.slotSecs)}
 	return v
 }
 
