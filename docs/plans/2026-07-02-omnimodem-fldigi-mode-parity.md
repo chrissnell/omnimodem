@@ -1,18 +1,20 @@
-# Omnimodem — fldigi Mode Parity Roadmap
+# Omnimodem — fldigi + WSJT-X Mode Parity Roadmap
 
 > **Type:** program-level roadmap (a plan of plans). Each phase below becomes its own
 > task-by-task executable plan (in the style of `2026-06-20-...-phase4-first-modes.md`)
 > once its scope is confirmed. This document establishes the full parity gap, groups the
-> remaining modes into build-order workstreams, maps every mode to the **fldigi source that
-> is its reference implementation**, and names the new building blocks each group needs.
+> remaining modes into build-order workstreams, maps every mode to the **upstream source that
+> is its reference implementation** (fldigi for the keyboard/data/image modes, WSJT-X for the
+> weak-signal modes), and names the new building blocks each group needs.
 
-**Goal:** Reach full [fldigi](https://sourceforge.net/projects/fldigi/) keyboard/data/image mode
-parity in omnimodem, implementing each mode against fldigi's own DSP as the reference guide, and
-gating each with the existing conformance harness (KAT vectors, bidirectional cross-decode with
-fldigi, BER/decode-rate curves).
+**Goal:** Reach full [fldigi](https://sourceforge.net/projects/fldigi/) **and**
+[WSJT-X](https://sourceforge.net/p/wsjt/wsjtx/) mode parity in omnimodem, implementing each mode
+against its upstream DSP as the reference guide, and gating each with the existing conformance harness
+(KAT vectors, bidirectional cross-decode with the reference binary, BER/decode-rate curves).
 
-**Reference source:** the fldigi tree is checked out at `omnimodem/fldigi/` (`git@github.com:w1hkj/fldigi.git`).
-Per-mode source lives under `fldigi/src/<family>/`.
+**Reference source:**
+- fldigi is checked out at `omnimodem/fldigi/` (`git@github.com:w1hkj/fldigi.git`); per-mode source under `fldigi/src/<family>/`.
+- WSJT-X is checked out at `omnimodem/wsjtx/` (`git@github.com:WSJTX/wsjtx.git`); the DSP is Fortran under `wsjtx/lib/`, the mode enum is `wsjtx/models/Modes.hpp`.
 
 ---
 
@@ -29,7 +31,11 @@ WSJT-X family (not fldigi) and **AFSK1200** is packet. The overlap with fldigi's
 | BPSK (PSK31) | ⚠️ **BPSK31 only** — the rest of the PSK family is missing |
 | Olivia (parametric tones/bandwidth) | ✅ implemented (covers the OLIVIA submode grid) |
 
-So four of fldigi's ~15 mode families are (wholly or partly) covered. The rest is the parity gap.
+So four of fldigi's ~15 mode families are (wholly or partly) covered. On the **WSJT-X** side
+(`wsjtx/models/Modes.hpp` enumerates JT65, JT9, JT4, WSPR, Echo, MSK144, FreqCal, FT8, FT4, FST4,
+FST4W, Q65), omnimodem has FT8, FT4, JT65, JT9, WSPR — so the WSJT-X gap is **JT4, MSK144, FST4,
+FST4W, Q65** (Echo and FreqCal are utilities, not data modes → out of scope, same call as fldigi's
+WWV/FMT). The rest of both catalogs is the parity gap.
 
 The substrate is in good shape. The Phase-5 building-block groups already landed in `crates/dsp/src/fec/`
 (`conv` + soft Viterbi, `fano`, `fht` Walsh/Hadamard, `interleave`, `golay`, `rs_gf64`) and
@@ -86,6 +92,24 @@ source directory to study for that family.
 ### Utilities (out of parity scope, flag only)
 - SSB (audio passthrough), WWV (time-signal analysis), ANALYSIS (freq analysis), FMT (frequency-measurement test), DTMF. These are fldigi tools, not text/data modes. Recommend **out of scope** for mode parity; revisit individually if wanted.
 
+## 2b. The parity gap — remaining WSJT-X modes
+
+Reference source is Fortran under `wsjtx/lib/`. Omnimodem already has the FT8 windowed-decode path
+(STFT → candidate → Costas sync → soft-LLR → LDPC + OSD → CRC → 77-bit unpack) plus the Fano
+sequential decoder (JT9/WSPR), so these modes are mostly new **codes and waveforms** bolted onto
+existing windowed infrastructure.
+
+- **JT4** — reference `wsjtx/lib/jt4.f90`, `jt4_decode.f90`, `jt4code.f90`. EME/weak-signal 4-tone FSK, submodes A–G (tone spacing). K=32 convolutional + Fano — **reuses our existing `fec::fano` + 4-FSK**; lowest-effort of the group.
+- **MSK144** — reference `wsjtx/lib/decode_msk144.f90`, `genmsk_128_90.f90`, `msk144code.f90`, `msk144decodeframe.f90`. Meteor-scatter; offset-MSK waveform + LDPC(128,90). Needs a new **MSK/OQPSK waveform** block; reuses the LDPC BP decoder.
+- **FST4 / FST4W** — reference `wsjtx/lib/fst4/`, `fst4_decode.f90`. LF/MF 4-GFSK with LDPC(240,120) and long, selectable T/R periods (15/30/60/120/300/900/1800 s). Needs the FST4 **LDPC(240,120) code tables**; reuses the BP decoder + windowed path (with variable window length). FST4W is the beacon variant of the same waveform.
+- **Q65** — reference `wsjtx/lib/q65_decode.f90`, `q65params.f90`, `qra64code.f90`, and `wsjtx/lib/qra/` (`qra65`, `qracodes`). EME/troposcatter; 65-tone with the **QRA65 (Q-ary Repeat-Accumulate) code** and submodes A–E × T/R periods. Needs a new **QRA65 soft decoder** — the one genuinely new FEC family in this group.
+
+### WSJT-X utilities (out of scope)
+- **Echo** (moon-echo measurement) and **FreqCal** (frequency calibration) — tools, not QSO/data modes. Same out-of-scope call as fldigi's WWV/FMT.
+
+### Adjacent: JS8
+- **JS8** (JS8Call) is WSJT-X-*derived* but lives in a **separate repo** (`js8call`, not currently a workspace resource), so it is not "WSJT-X parity" per se. It reuses our FT8 core (8-FSK + Costas + LDPC + 77-bit) and adds its own varicode + directed/keyboard protocol + speed variants. Tracked as its own optional phase; needs the JS8Call source added to the workspace to reference it the same way.
+
 ## 3. Cross-cutting parity work (not modes, but needed for real fldigi interop)
 
 - **Image/raster payload.** `crates/dsp/src/types.rs::FramePayload` is `Packet | Text | Message77 | Vocoder`. Hell, WEFAX, and the MFSK/THOR/IFKP/FSQ picture sub-protocols all emit **pixels**. Add a `FramePayload::Image { width, rows, gray }` (or similar) variant and thread it through the daemon RX event path and the gRPC proto. This is a prerequisite for the Hell and WEFAX phases.
@@ -107,13 +131,21 @@ Everything else is assembly. These are the blocks that don't exist yet, with the
 | WEFAX FM demod + IOC phasing | `modes/wefax.rs` | WEFAX | `wefax.cxx` |
 | RSID encode/detect | `frontend/rsid.rs` | cross-cutting | `rsid/` |
 | MFSK varicode | `framing/mfsk_varicode.rs` | MFSK | `mfskvaricode.cxx` |
+| MSK / OQPSK waveform | `frontend/msk.rs` | MSK144 | `wsjtx/lib/genmsk_128_90.f90`, `decode_msk144.f90` |
+| FST4 LDPC(240,120) tables | `fec/ldpc_fst4.rs` | FST4/FST4W | `wsjtx/lib/fst4/` |
+| QRA65 soft decoder | `fec/qra65.rs` | Q65 | `wsjtx/lib/qra/`, `qra64code.f90` |
 
-Convolutional FEC, soft Viterbi, Walsh/FHT, interleavers, Golay, Baudot, PSK varicode, HDLC — **already present** and reused as-is.
+Convolutional FEC, soft Viterbi, Fano, Walsh/FHT, interleavers, Golay, the LDPC BP decoder + OSD, the
+STFT/Costas windowed path, 77-bit message pack/unpack, Baudot, PSK varicode, HDLC — **already present**
+and reused as-is. JT4 needs no new block (Fano + 4-FSK); FST4/FST4W reuse the LDPC BP decoder with new
+code tables; only MSK144's waveform and Q65's QRA65 code are net-new DSP on the WSJT-X side.
 
 ## 5. Proposed phasing (build order follows shared blocks)
 
 Each phase is an independent, shippable workstream and becomes its own executable plan. Ordered by
 value-per-effort given the existing substrate. Priority reflects real on-air usage (EMCOMM/ARES/keyboard).
+
+**fldigi track** — reference `fldigi/src/`:
 
 | Phase | Modes | New blocks | Priority | Rough effort |
 |---|---|---|---|---|
@@ -126,13 +158,24 @@ value-per-effort given the existing substrate. Priority reflects real on-air usa
 | **13 — RSID + FSQ + IFKP** | RSID auto-ID; FSQ; IFKP | RSID; FSQ protocol | **Med** | Med–High (FSQ protocol) |
 | **14 — Long tail** | Throb/ThrobX, 8PSK, OFDM data modes | OFDM core (reused) | **Low** | Low–Med |
 
-**Definition of done for a mode (unchanged, design §"Conformance"):** its KAT vectors pass,
-cross-decode with fldigi works **both** directions, and its BER/decode-rate curve meets the committed
-threshold. A loopback demo is necessary but not sufficient.
+**WSJT-X track** — reference `wsjtx/lib/`. Independent of the fldigi track (reuses the FT8 windowed
+path, not fldigi blocks), so these run **in parallel** and can be interleaved by priority:
 
-Phases 7–9 are the high-value core and depend only on blocks that already exist plus small new pieces —
-they are the recommended immediate targets. Phase 10 (image framework) unblocks the picture
-sub-protocols and WEFAX. The long tail (Phase 14) and the utility tools (§2) are optional.
+| Phase | Modes | New blocks | Priority | Rough effort |
+|---|---|---|---|---|
+| **W1 — FST4 / FST4W** | FST4, FST4W (all T/R periods) | LDPC(240,120) tables | **High** (active LF/MF + growing HF QSO) | Low–Med (reuses BP decoder + windowed path) |
+| **W2 — MSK144** | MSK144 | MSK/OQPSK waveform | **Med–High** (the VHF meteor-scatter mode) | Med |
+| **W3 — Q65** | Q65 (submodes A–E) | QRA65 soft decoder | **Med** (EME/troposcatter) | Med–High (net-new FEC) |
+| **W4 — JT4** | JT4 (submodes A–G) | none (Fano + 4-FSK) | **Low** (legacy EME) | Low |
+| **W5 — JS8** *(optional)* | JS8 normal/fast/turbo/slow | JS8 varicode + directed protocol | **Med** | Med (needs JS8Call repo in workspace) |
+
+**Definition of done for a mode (unchanged, design §"Conformance"):** its KAT vectors pass,
+cross-decode with the reference binary (fldigi **or** WSJT-X) works **both** directions, and its
+BER/decode-rate curve meets the committed threshold. A loopback demo is necessary but not sufficient.
+
+fldigi Phases 7–9 and WSJT-X W1 are the high-value core, depending only on existing blocks plus small
+new pieces — the recommended immediate targets. Phase 10 (image framework) unblocks the picture
+sub-protocols and WEFAX. The long tail (Phase 14, W4) and the utility tools (§2, §2b) are optional.
 
 ## 6. Open scope decisions (for the issue owner)
 
@@ -140,4 +183,5 @@ sub-protocols and WEFAX. The long tail (Phase 14) and the utility tools (§2) ar
 2. **8PSK + OFDM data modes** — full parity, or defer to the long tail? (Recommended: long tail.)
 3. **RSID transmit** — detect-only, or also transmit the ID burst? (Recommended: detect first, TX later.)
 4. **Image sub-protocols** (MFSK/THOR/IFKP picture TX/RX) — parity target, or text-only for those modes first?
-5. **Start point** — confirm Phase 7 (PSK family) as the first executable plan.
+5. **JS8** — in scope as W5 (needs the JS8Call repo added to the workspace), or a separate follow-on?
+6. **Start point** — confirm Phase 7 (PSK family) and/or WSJT-X W1 (FST4/FST4W) as the first executable plan(s).
