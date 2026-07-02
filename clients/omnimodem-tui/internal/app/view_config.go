@@ -494,7 +494,7 @@ func (v *configView) Render(w, h int) string {
 
 	b.WriteString(ui.Title.Render("AUDIO") + "\n")
 	b.WriteString(field(fRx, "RX Device", chosen(v.rxID)) + "\n")
-	b.WriteString(field(fTx, "TX Device", chosenOrSame(v.txID)) + "\n")
+	b.WriteString(field(fTx, "TX Device", txDeviceLabel(v.txID, v.rxID)) + "\n")
 	b.WriteString(field(fPtt, "PTT Device", chosen(v.pttID)) + "\n")
 	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n\n")
 
@@ -526,11 +526,19 @@ func (v *configView) Render(w, h int) string {
 	return b.String()
 }
 
-func chosenOrSame(id string) string {
-	if id == "" {
-		return ui.Dim.Render("(same as RX)")
+// txDeviceLabel renders the TX device field. An empty txID means "TX follows the
+// RX device" (single-rig default, and how the daemon reports TX when it mirrors
+// RX). Show the effective device — the RX id — with a "(same as RX)" note rather
+// than a bare "(same as RX)", which reads as "my TX choice wasn't saved" when the
+// operator deliberately picked the same device (e.g. one BlackHole for both).
+func txDeviceLabel(txID, rxID string) string {
+	if txID != "" {
+		return ui.Accent.Render("✓ " + txID)
 	}
-	return ui.Accent.Render("✓ " + id)
+	if rxID != "" {
+		return ui.Accent.Render("✓ "+rxID) + ui.Dim.Render("  (same as RX)")
+	}
+	return ui.Dim.Render("(same as RX)")
 }
 
 func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }

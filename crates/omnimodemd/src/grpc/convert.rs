@@ -67,7 +67,7 @@ pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig
     // instead of failing the whole bind with "device_id must not be empty".
     let device_id = if req.device_id.is_empty() {
         match &method {
-            PttMethod::None | PttMethod::Vox => DeviceId::Placeholder { tag: "ptt-deviceless".into() },
+            PttMethod::None | PttMethod::Vox => DeviceId::Placeholder { tag: PTT_DEVICELESS_TAG.into() },
             _ => return Err(Status::invalid_argument("device_id must not be empty")),
         }
     } else {
@@ -113,14 +113,19 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
     proto::ModemState { channels }
 }
 
-/// The PTT device id to report. Hide only the internal placeholder that truly
-/// deviceless configs carry; a real device the operator picked must be reported
-/// back so the UI can preload it on reopen — even when the method is VOX/None
-/// (the TUI lets a device be chosen independently of the method, and a hidden
-/// choice reads as "not saved").
+/// Tag of the internal placeholder a deviceless PTT (None/VOX with no device
+/// picked) carries. Must match `proto_ptt_to_config`.
+const PTT_DEVICELESS_TAG: &str = "ptt-deviceless";
+
+/// The PTT device id to report. Hide ONLY the internal deviceless sentinel; any
+/// real device the operator picked must be reported so the UI preloads it on
+/// reopen. Note a real device is NOT always a nice `AlsaCard`: on CoreAudio
+/// (macOS) cpal device names lack an ALSA `CARD=` token, so every real device —
+/// e.g. "BlackHole 2ch" — becomes a `Placeholder{tag: name}`. Hiding all
+/// placeholders (the previous behavior) therefore hid every macOS PTT device.
 fn ptt_device_for_proto(p: &PttConfig) -> String {
     match &p.device_id {
-        DeviceId::Placeholder { .. } => String::new(),
+        DeviceId::Placeholder { tag } if tag == PTT_DEVICELESS_TAG => String::new(),
         d => d.to_canonical_string(),
     }
 }
@@ -338,6 +343,25 @@ mod tests {
         assert_eq!(ci.tx_device_id, "", "TX mirroring RX must report empty");
         assert_eq!(ci.ptt_device_id, "", "deviceless PTT must report empty");
         assert_eq!(ci.ptt_method, proto::PttMethod::Vox as i32);
+    }
+
+    #[test]
+    fn snapshot_reports_real_placeholder_ptt_device_macos() {
+        // On CoreAudio every real device is a Placeholder (cpal names have no ALSA
+        // CARD= token). A PTT device the operator picked must still be reported —
+        // only the internal deviceless sentinel is hidden.
+        let rx = DeviceId::Placeholder { tag: "BlackHole 2ch".into() };
+        let ptt = PttConfig {
+            device_id: DeviceId::Placeholder { tag: "BlackHole 2ch".into() },
+            method: PttMethod::Vox,
+            invert: false,
+        };
+        let snap = ModemSnapshot {
+            channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
+            running: vec![true],
+        };
+        let ci = &snapshot_to_proto(&snap).channels[0];
+        assert_eq!(ci.ptt_device_id, "virtual:BlackHole 2ch");
     }
 
     #[test]
