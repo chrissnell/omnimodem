@@ -12,15 +12,20 @@ import (
 // daemon waits up to a full slot for the boundary, then transmits a ~47 s burst,
 // so the old fixed 30 s watchdog fired mid count-off and nothing ever went out.
 func TestTxWatchdogCoversSlotCountoff(t *testing.T) {
+	// wspr is a 120 s-slot mode; its beacon TX isn't keyed through the operate
+	// view today, so this only pins the pure sizing function for it.
 	for _, tc := range []struct {
 		name string
 		slot float64
 	}{{"ft8", 15}, {"ft4", 7.5}, {"jt65", 60}, {"jt9", 60}, {"wspr", 120}} {
 		wd := txWatchdog(tc.slot)
 		// Worst case from lease grant to burst completion is one slot of count-off
-		// plus a burst that nearly fills a slot, i.e. ~2 slots. The watchdog must
-		// exceed that so it never trips a healthy transmission.
-		worst := time.Duration(2*tc.slot*float64(time.Second))
+		// plus a burst that nearly fills a slot, i.e. ~2 slots. Pin the exact value
+		// (2 slots + margin) so the safety cushion can't silently shrink.
+		worst := time.Duration(2 * tc.slot * float64(time.Second))
+		if wd != worst+txWatchdogMargin {
+			t.Errorf("%s: watchdog = %v, want %v (2 slots + margin)", tc.name, wd, worst+txWatchdogMargin)
+		}
 		if wd <= worst {
 			t.Errorf("%s: watchdog %v must exceed worst-case airtime %v", tc.name, wd, worst)
 		}
