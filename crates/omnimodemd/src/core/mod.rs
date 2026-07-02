@@ -885,6 +885,61 @@ mod tests {
         join.join().unwrap();
     }
 
+    async fn channel_info(core: &CoreHandle, id: ChannelId) -> crate::proto::ChannelInfo {
+        let (t, r) = oneshot::channel();
+        core.commands.send(Command::GetState { reply: t }).unwrap();
+        let snap = r.await.unwrap();
+        crate::grpc::convert::snapshot_to_proto(&snap)
+            .channels
+            .into_iter()
+            .find(|c| c.channel == id.0)
+            .expect("channel present in snapshot")
+    }
+
+    // End-to-end reproduction of the operator report: pick RX, a distinct TX, and
+    // a PTT device (leaving the method at the TUI default VOX), then read back the
+    // snapshot the client preloads on reopen. All three must survive — including
+    // across a later mode change (the TUI sends ConfigureChannel alone for that).
+    #[test]
+    fn snapshot_reports_all_devices_after_config_and_mode_change() {
+        let rx = named_device("Rig-RX");
+        let tx = named_device("Rig-TX");
+        let ptt = named_device("Rig-PTT");
+        let (rx_id, tx_id, ptt_id) = (rx.id.clone(), tx.id.clone(), ptt.id.clone());
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![rx, tx, ptt])),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "psk31").await;
+            configure_audio_split(&core, ChannelId(0), rx_id.clone(), tx_id.clone()).await;
+            let (t, r) = oneshot::channel();
+            core.commands
+                .send(Command::ConfigurePtt {
+                    id: ChannelId(0),
+                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false },
+                    reply: t,
+                })
+                .unwrap();
+            r.await.unwrap().unwrap();
+
+            let ci = channel_info(&core, ChannelId(0)).await;
+            assert_eq!(ci.device_id, rx_id.to_canonical_string(), "RX after config");
+            assert_eq!(ci.tx_device_id, tx_id.to_canonical_string(), "TX after config");
+            assert_eq!(ci.ptt_device_id, ptt_id.to_canonical_string(), "PTT after config");
+
+            configure_channel(&core, ChannelId(0), "rtty").await;
+            let ci = channel_info(&core, ChannelId(0)).await;
+            assert_eq!(ci.mode, "rtty");
+            assert_eq!(ci.device_id, rx_id.to_canonical_string(), "RX after mode change");
+            assert_eq!(ci.tx_device_id, tx_id.to_canonical_string(), "TX after mode change");
+            assert_eq!(ci.ptt_device_id, ptt_id.to_canonical_string(), "PTT after mode change");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
     #[test]
     fn transmit_on_unknown_channel_errors() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
