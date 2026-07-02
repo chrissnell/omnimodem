@@ -465,4 +465,10 @@ func TestConfigEscPersistsAllChosenDevices(t *testing.T) {
 	if n := len(f.PttCalls); n == 0 || f.PttCalls[n-1].GetDeviceId() != "usb:ptt" {
 		t.Fatalf("PTT device must be persisted; ptt calls=%+v", f.PttCalls)
 	}
+	// The close path must refresh live state (GetState) so that reopening
+	// Configure preloads the devices just saved — m.live is only repopulated by
+	// a snapshot, not by the deviceless ChannelConfigured event.
+	if f.StateCalls == 0 {
+		t.Fatal("esc-close must refresh live state so a reopen reflects the save")
+	}
 }
