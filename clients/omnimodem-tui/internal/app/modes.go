@@ -9,19 +9,28 @@ type modeParam struct {
 }
 
 // modeInfo: the modes the operate screen offers, their interaction shape, and
-// their editable params. shape "chat" → ragchew surface; "ft8" → sequencer.
+// their editable params. shape "chat" → ragchew surface; "sequencer" → the
+// structured-QSO auto-sequence ladder (FT8/FT4/JT65/JT9); "beacon" → the
+// receive-only spot monitor (WSPR). slotSecs is the T/R window length for the
+// windowed sequencer/beacon modes (0 for the streaming "chat" modes).
 type modeInfo struct {
-	label  string
-	shape  string // "chat" | "ft8"
-	params []modeParam
+	label    string
+	shape    string // "chat" | "sequencer" | "beacon"
+	slotSecs float64
+	params   []modeParam
 }
 
 var modes = []modeInfo{
-	{"psk31", "chat", []modeParam{{"center", 1000}}},
-	{"rtty", "chat", []modeParam{{"baud", 45.45}, {"shift", 170}}},
-	{"cw", "chat", []modeParam{{"wpm", 20}, {"tone", 700}}},
-	{"afsk1200", "chat", nil},
-	{"ft8", "ft8", nil},
+	{"psk31", "chat", 0, []modeParam{{"center", 1000}}},
+	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
+	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
+	{"afsk1200", "chat", 0, nil},
+	{"olivia", "chat", 0, []modeParam{{"tones", 32}, {"bw", 1000}}},
+	{"ft8", "sequencer", 15, nil},
+	{"ft4", "sequencer", 7.5, nil},
+	{"jt65", "sequencer", 60, nil},
+	{"jt9", "sequencer", 60, nil},
+	{"wspr", "beacon", 120, nil},
 }
 
 func modeByLabel(label string) *modeInfo {
@@ -59,6 +68,10 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		}}}
 	case "afsk1200":
 		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: true}}}
+	case "olivia":
+		return &pb.ModeParams{Params: &pb.ModeParams_Olivia{Olivia: &pb.OliviaParams{
+			Tones: uint32(get("tones", 32)), BandwidthHz: uint32(get("bw", 1000)),
+		}}}
 	default:
 		return nil // ft8/ft4/jt65/jt9/wspr: no params
 	}

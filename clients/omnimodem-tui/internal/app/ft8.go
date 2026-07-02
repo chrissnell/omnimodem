@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -43,7 +44,13 @@ func (s *ft8Seq) current() string {
 // cq is the calling message (Tx6).
 func (s *ft8Seq) cq() string { return fmt.Sprintf("CQ %s %s", s.myCall, s.myGrid) }
 
-// slotPosition returns seconds into the current 15 s FT8 slot (0..15).
-func slotPosition(at time.Time) float64 {
-	return float64(at.UTC().Second()%15) + float64(at.Nanosecond())/1e9
+// slotPosition returns seconds into the current T/R slot of length `period`
+// (0..period), anchored to the UTC epoch. period dividing 60 (15 s FT8, 7.5 s
+// FT4, 60 s JT65/JT9) aligns to UTC minute boundaries; 120 s (WSPR) aligns to
+// even minutes — matching WSJT-X. `period <= 0` degenerates to 0.
+func slotPosition(at time.Time, period float64) float64 {
+	if period <= 0 {
+		return 0
+	}
+	return math.Mod(float64(at.UTC().UnixNano())/1e9, period)
 }
