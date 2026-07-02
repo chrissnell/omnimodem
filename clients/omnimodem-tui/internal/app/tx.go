@@ -40,6 +40,25 @@ func (t *txState) watchdogExpired(now time.Time) bool {
 	return t.watchdog > 0 && t.phase == txTransmitting && now.Sub(t.startedAt) > t.watchdog
 }
 
+// txWatchdogMargin covers RPC latency, the burst tail, and clock jitter on top of
+// the daemon's slot-align wait. It is also the whole watchdog for streaming (chat)
+// modes, which key immediately.
+const txWatchdogMargin = 30 * time.Second
+
+// txWatchdog sizes the client-side TX safety timeout for a mode's slot length.
+// The clock starts at lease grant, but for windowed modes the daemon then counts
+// off to the next slot boundary (up to one slot) before keying and transmits a
+// burst that nearly fills a slot — so the worst case from grant to completion is
+// ~2 slots. A fixed 30 s watchdog aborted JT65/JT9 (60 s slot) and WSPR (120 s)
+// mid count-off, so they never keyed. Streaming modes (slotSecs == 0) key at once
+// and keep the bare margin.
+func txWatchdog(slotSecs float64) time.Duration {
+	if slotSecs <= 0 {
+		return txWatchdogMargin
+	}
+	return time.Duration(2*slotSecs*float64(time.Second)) + txWatchdogMargin
+}
+
 // commands that drive the FSM transitions:
 func acquireLeaseCmd(c client.ModemClient, ch uint32) tea.Cmd {
 	return func() tea.Msg {
