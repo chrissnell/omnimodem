@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -23,8 +24,9 @@ import (
 // It lets a test drive the whole pick -> persist -> snapshot -> reopen loop.
 type daemonFake struct {
 	*client.Fake
-	mu    sync.Mutex
-	chans map[uint32]*fakeChan
+	mu     sync.Mutex
+	chans  map[uint32]*fakeChan
+	pttErr error // if set, ConfigurePtt persists the device but returns this error
 }
 
 type fakeChan struct {
@@ -71,8 +73,10 @@ func (d *daemonFake) ConfigurePtt(_ context.Context, r *pb.ConfigurePttRequest) 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	c := d.ch(r.GetChannel())
+	// Persist the device choice BEFORE (possibly) reporting a driver failure —
+	// mirrors the daemon's configure_ptt, which commits then opens the driver.
 	c.pttDev, c.pttMethod = r.GetDeviceId(), r.GetMethod()
-	return nil
+	return d.pttErr
 }
 
 func (d *daemonFake) GetState(context.Context) (*pb.ModemState, error) {
@@ -148,4 +152,43 @@ func TestConfigReopenReflectsAllSavedDevices(t *testing.T) {
 	}
 	t.Run("deliberate", func(t *testing.T) { run(t, false) })
 	t.Run("rapid", func(t *testing.T) { run(t, true) })
+}
+
+// A device-based PTT method persists the device but the daemon returns an error
+// (its driver can't open without a serial node). The client must still refresh
+// from the snapshot on error, so reopening Configure shows the saved PTT device
+// rather than "(none)" — the "PTT device still not persisted" report.
+func TestConfigReopenShowsPttDevicePersistedDespiteDriverError(t *testing.T) {
+	d := newDaemonFake()
+	m := New(d, "x")
+	m.connected = true
+	m.push(newChannelsView(m))
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a"}
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{
+		devItem("usb:rx", "Mic", true, false),
+		devItem("usb:tx", "Spk", false, true),
+		devItem("usb:ptt", "Rig", true, true),
+	})
+	m.push(v)
+
+	// RX/TX save cleanly.
+	v.rxID = "usb:rx"
+	drive(m, v.maybePersist())
+	v.txID = "usb:tx"
+	drive(m, v.maybePersist())
+
+	// The PTT save persists the device but errors (driver open fails).
+	d.pttErr = errors.New("configure ptt: device gone")
+	v.pttID = "usb:ptt"
+	drive(m, v.maybePersist())
+	_, escCmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	drive(m, escCmd)
+
+	// Reopen: the persisted PTT device must be visible even though its save errored.
+	re := newConfigView(m)
+	if re.pttID != "usb:ptt" {
+		t.Fatalf("PTT device must show on reopen despite the driver error, got %q (m.live ptt=%q)", re.pttID, m.live[0].pttDeviceID)
+	}
 }
