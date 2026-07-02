@@ -112,9 +112,31 @@ func newConfigView(m *Model) *configView {
 		v.pttID = cl.pttDeviceID
 		v.methodIdx = methodIdxOf(cl.pttMethod)
 	} else {
-		v.name.SetValue("vfo-a")
+		v.name.SetValue(defaultChannelName(m))
 	}
 	return v
+}
+
+// defaultChannelName picks the first "VFO-<letter>" not already taken by another
+// channel, so a freshly added channel doesn't default to a name that's already in
+// use (e.g. a second channel becomes VFO-B, not another VFO-A). Comparison is
+// case-insensitive so a legacy lowercase "vfo-a" still claims the A slot; the
+// returned name is upper-cased by convention.
+func defaultChannelName(m *Model) string {
+	used := make(map[string]bool, len(m.live))
+	for _, cl := range m.live {
+		if cl.name != "" {
+			used[strings.ToUpper(cl.name)] = true
+		}
+	}
+	for c := 'A'; c <= 'Z'; c++ {
+		if name := "VFO-" + string(c); !used[name] {
+			return name
+		}
+	}
+	// 26 VFO letters exhausted: fall back to a channel-scoped name that's still
+	// unique across ids.
+	return fmt.Sprintf("VFO-%d", m.sel)
 }
 
 // modeIdxByLabel returns the index of a mode label in `modes`, or 0 when the

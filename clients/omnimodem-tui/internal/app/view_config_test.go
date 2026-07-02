@@ -142,6 +142,29 @@ func TestConfigPreloadsPersistedConfig(t *testing.T) {
 	}
 }
 
+// A fresh channel's default name must be all-caps and not collide with an
+// existing channel: with a legacy lowercase "vfo-a" already present, the next
+// default is "VFO-B".
+func TestConfigDefaultNameAvoidsCollision(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{name: "vfo-a"}
+	m.sel = 1 // adding a new channel
+	v := newConfigView(m)
+	if v.name.Value() != "VFO-B" {
+		t.Fatalf("default name must skip the taken A slot and be all-caps; got %q", v.name.Value())
+	}
+}
+
+// With no channels yet, the first default is VFO-A (all-caps).
+func TestConfigDefaultNameFirstIsVfoA(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	if v.name.Value() != "VFO-A" {
+		t.Fatalf("first channel default must be VFO-A; got %q", v.name.Value())
+	}
+}
+
 func TestConfigApplyGatedWithoutRxDevice(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	v := newConfigView(m)
