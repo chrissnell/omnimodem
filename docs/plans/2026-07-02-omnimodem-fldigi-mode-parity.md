@@ -15,6 +15,7 @@ against its upstream DSP as the reference guide, and gating each with the existi
 **Reference source:**
 - fldigi is checked out at `omnimodem/fldigi/` (`git@github.com:w1hkj/fldigi.git`); per-mode source under `fldigi/src/<family>/`.
 - WSJT-X is checked out at `omnimodem/wsjtx/` (`git@github.com:WSJTX/wsjtx.git`); the DSP is Fortran under `wsjtx/lib/`, the mode enum is `wsjtx/models/Modes.hpp`.
+- JS8Call is checked out at `omnimodem/js8call/` (`git@github.com:js8call/js8call.git`); JS8-specific source at the repo root (`JS8*.cpp`, `jsc.*`, `varicode.*`) and DSP under `js8call/lib/js8/`.
 
 ---
 
@@ -108,7 +109,10 @@ existing windowed infrastructure.
 - **Echo** (moon-echo measurement) and **FreqCal** (frequency calibration) — tools, not QSO/data modes. Same out-of-scope call as fldigi's WWV/FMT.
 
 ### Adjacent: JS8
-- **JS8** (JS8Call) is WSJT-X-*derived* but lives in a **separate repo** (`js8call`, not currently a workspace resource), so it is not "WSJT-X parity" per se. It reuses our FT8 core (8-FSK + Costas + LDPC + 77-bit) and adds its own varicode + directed/keyboard protocol + speed variants. Tracked as its own optional phase; needs the JS8Call source added to the workspace to reference it the same way.
+- **JS8** (JS8Call) is WSJT-X-*derived* — it reuses the FT8-class core (Costas sync + LDPC + 77-bit) but is its own app. Now checked out at `omnimodem/js8call/` (`git@github.com:js8call/js8call.git`), so it references the same way the others do. Reference source:
+  - **Submodes** (`js8call/JS8Submode.*`, `lib/js8/`): JS8 ships four speeds — **Normal (A, 15 s)**, **Fast (B, 10 s)**, **Turbo (C, 6 s)**, **Slow (E, 30 s)** — each with its own decoder module (`lib/js8a_decode.f90`, `js8b_decode.f90`, `js8c_decode.f90`, `js8e_decode.f90`) and Costas/frame parameters.
+  - **Keyboard text codec** (`js8call/jsc.cpp/.h`, `jsc_list.cpp`, `jsc_map.cpp`, `varicode.cpp/.h`): JS8's JSC compressed character set — the analogue of a varicode, this is the bulk of the encode/decode work beyond the shared FT8 DSP.
+  - **Directed protocol**: heartbeat/CQ, directed calls, relay/store-forward, ACK/SNR exchanges (message handling in `js8call/varicode.cpp` + `mainwindow.cpp`).
 
 ## 3. Cross-cutting parity work (not modes, but needed for real fldigi interop)
 
@@ -167,7 +171,7 @@ path, not fldigi blocks), so these run **in parallel** and can be interleaved by
 | **W2 — MSK144** | MSK144 | MSK/OQPSK waveform | **Med–High** (the VHF meteor-scatter mode) | Med |
 | **W3 — Q65** | Q65 (submodes A–E) | QRA65 soft decoder | **Med** (EME/troposcatter) | Med–High (net-new FEC) |
 | **W4 — JT4** | JT4 (submodes A–G) | none (Fano + 4-FSK) | **Low** (legacy EME) | Low |
-| **W5 — JS8** *(optional)* | JS8 normal/fast/turbo/slow | JS8 varicode + directed protocol | **Med** | Med (needs JS8Call repo in workspace) |
+| **W5 — JS8** | JS8 Normal/Fast/Turbo/Slow (A/B/C/E) | JSC text codec + directed protocol | **Med** | Med (reuses FT8 core; `js8call/lib/js8/`, `jsc.*`) |
 
 **Definition of done for a mode (unchanged, design §"Conformance"):** its KAT vectors pass,
 cross-decode with the reference binary (fldigi **or** WSJT-X) works **both** directions, and its
@@ -183,5 +187,4 @@ sub-protocols and WEFAX. The long tail (Phase 14, W4) and the utility tools (§2
 2. **8PSK + OFDM data modes** — full parity, or defer to the long tail? (Recommended: long tail.)
 3. **RSID transmit** — detect-only, or also transmit the ID burst? (Recommended: detect first, TX later.)
 4. **Image sub-protocols** (MFSK/THOR/IFKP picture TX/RX) — parity target, or text-only for those modes first?
-5. **JS8** — in scope as W5 (needs the JS8Call repo added to the workspace), or a separate follow-on?
-6. **Start point** — confirm Phase 7 (PSK family) and/or WSJT-X W1 (FST4/FST4W) as the first executable plan(s).
+5. **Start point** — confirm Phase 7 (PSK family) and/or WSJT-X W1 (FST4/FST4W) as the first executable plan(s). *(JS8/W5 is now in scope — JS8Call repo added.)*
