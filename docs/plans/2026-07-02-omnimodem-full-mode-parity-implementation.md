@@ -56,16 +56,20 @@ Every mode in every phase is ported with this same task sequence (the phase plan
 - [ ] **T3 — Port the FEC + interleave** (reuse existing `fec::*` where the code family already exists; transcribe generator/parity tables otherwise). KAT: encoder output == golden vector, **bit-exact** (bit-domain stage). Commit.
 - [ ] **T4 — Port the modulator** (symbol/tone *indices* → `frontend::modulate`/NCO, pulse shaping). KAT: symbol/tone-index sequence **bit-exact** vs golden vector; modulated audio within the committed **FP tolerance** (never asserted bit-exact — see Doctrine §3). Commit.
 - [ ] **T5 — Port the demodulator** (front end → sync → soft demap → FEC decode → unpack). Loopback round-trip at high SNR passes; where extractable, soft-metric KAT vs reference within tolerance. Commit.
-- [ ] **T6 — Register the mode** (`modes/mod.rs` `pub mod`, `ModeConfig` variant + `parse`, `registry.rs` arms). Registry unit test. Commit.
+- [ ] **T6 — Register the mode in the daemon** (`modes/mod.rs` `pub mod`, `ModeConfig` variant + `parse`, `registry.rs` arms; a params proto message in `proto/*.proto` if the mode has tunable params). Registry unit test. Commit.
 - [ ] **T7 — Conformance gates.** Add the `#[ignore]` bidirectional cross-decode test + the `ber.rs` decode-rate sweep with a committed threshold. Run the AWGN/Watterson sweep; record the curve. Commit.
+- [ ] **T8 — Wire the mode into the TUI** (mandatory — a mode is not "done" until it is selectable and usable in `clients/omnimodem-tui`). Add a `modeInfo` row to `internal/app/modes.go` (label + interaction `shape` + editable `params`), extend `modeParamsFor` with the mode's proto-oneof arm, regenerate the Go proto (`clients/omnimodem-tui/gen.sh`) if T6 added a params message, and add/extend the Go test (`modes`/`view_operate` tests). For a mode whose interaction differs from the existing `chat`/`ft8` shapes (image/fax → new `image` shape; a directed-protocol mode like FSQ/JS8 → its own shape), add that shape's view. `go test ./...` green. Commit.
+- [ ] **T9 — Close the phase with a PR** (see "Per-phase PR" below): ensure the whole workspace builds and `cargo test` + TUI `go test ./...` are green, then open the PR for the phase branch.
 
-Submode grids (Olivia/Contestia/MFSK/THOR/DominoEX/PSK-rate/Q65/JS8/…) are **parametric**: port the family once (T1–T7 on one representative submode), then a table-driven test enumerates every submode's parameters against the reference's parameter table. One task per family, not per submode.
+Submode grids (Olivia/Contestia/MFSK/THOR/DominoEX/PSK-rate/Q65/JS8/…) are **parametric**: port the family once (T1–T8 on one representative submode), then a table-driven test enumerates every submode's parameters against the reference's parameter table, and the TUI exposes the submode selector. One task per family, not per submode.
+
+**Definition of done for a mode now includes T8:** bit-exact/tolerance KAT parity, bidirectional cross-decode, committed BER curve, **and** the mode is selectable + operable in the TUI with its params. A daemon-only mode that the TUI can't drive is not done.
 
 ---
 
 ## Phase P0 — Porting & verification harness (shared prerequisite, do first) — ✅ landed
 
-**Status:** implemented on branch `feature/mode-parity-p0-harness` (P0.1 + P0.2 done, verified: `cargo test -p omnimodem-dsp --lib` = 236 passed incl. the new Image test). P0.3 doc note is folded into the vectors README.
+**Status:** implemented on branch `feature/mode-parity-p0-harness` (P0.1 + P0.2 done, verified: `cargo test -p omnimodem-dsp --lib` = 236 passed incl. the new Image test). P0.3 doc note is folded into the vectors README. **TUI:** no change required — P0 adds no *selectable mode*, only the DSP `Image` payload type and an interim opaque encoding; the TUI mode registry and proto are untouched (the `image` view + typed proto arrive with the first facsimile mode, Phase 10). **PR:** ready on the P0 branch, blocked only by sandbox push access (see "Per-phase PR").
 
 **Goal:** the tooling every later phase depends on: the image/raster payload the picture/fax modes need, and the reference-vector extraction convention. This is the one phase written to full bite-sized granularity here; it unblocks all others.
 
@@ -152,7 +156,7 @@ git commit -m "docs(test): reference-vector extraction convention for mode ports
 
 ## fldigi track — reference `fldigi/src/`
 
-Each phase below instantiates the **per-mode port task template** (T1–T7) for its modes. File structure is uniform: `Create: crates/dsp/src/modes/<mode>.rs`, `Modify: crates/dsp/src/modes/mod.rs`, `crates/omnimodemd/src/mode/{mod.rs,registry.rs}`, `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs,vectors/}`. New building blocks are listed per phase and each is KAT-gated in isolation **before** any mode uses it.
+Each phase below instantiates the **per-mode port task template** (T1–T9) for its modes. File structure is uniform: `Create: crates/dsp/src/modes/<mode>.rs`, `Modify: crates/dsp/src/modes/mod.rs`, `crates/omnimodemd/src/mode/{mod.rs,registry.rs}`, `proto/*.proto` (params message, if any), `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs,vectors/}`, **and the TUI: `clients/omnimodem-tui/internal/app/modes.go` (+ `internal/pb` regen, + a new view under `internal/app/` for any non-`chat`/`ft8` shape)**. New building blocks are listed per phase and each is KAT-gated in isolation **before** any mode uses it.
 
 ### Phase 7 — PSK family
 - **Reference:** `fldigi/src/psk/{psk.cxx,pskvaricode.cxx,pskcoeff.cxx,pskeval.cxx}`.
@@ -173,6 +177,7 @@ Each phase below instantiates the **per-mode port task template** (T1–T7) for 
 - **Reference:** `fldigi/src/feld/{feld.cxx,feldfonts.cxx,Feld*-14.cxx}`.
 - **New block:** `modes/hell.rs` + `framing/hellfont.rs` (port the bitmap fonts verbatim). Uses `FramePayload::Image` from P0.
 - **Modes:** Feld Hell, Slow Hell, Hell X5/X9, FSK-Hell 245/105, Hell 80. Output is a glyph raster; the "golden vector" is the column/pixel stream for a known text.
+- **TUI (T8) + wire format:** this phase introduces the **`image` interaction shape** in the TUI (a scrolling raster view) and the **structured gRPC `Image` message** (deferred from P0) — designed here against Hell's continuous column stream and reused by WEFAX (Phase 12) and the picture sub-protocols (Phase 15). The daemon's `frame_bytes` interim encoding is replaced by the typed message in the same change.
 
 ### Phase 11 — MT63
 - **Reference:** `fldigi/src/mt63/{mt63.cxx,mt63base.cxx,dsp.cxx}`.
@@ -256,6 +261,23 @@ P0 first (✅ landed). Then the two tracks run in parallel. First executable pha
 - **Placeholder scan:** P0 is implemented and verified. Mode phases are specified at port-task granularity with real reference files + the uniform T1–T7 template; the literal ported code per mode is produced at execution start from the cited reference (it cannot be authored without reading that reference in depth, and inventing it would violate the porting doctrine — Doctrine §6). This matches how Phases 4–5 were executed (one detailed plan per phase).
 - **Type consistency:** `FramePayload::Image { width, gray }` is defined once in P0.1 and referenced by Phases 10, 12, 15. The `ModeConfig` enum + `registry.rs` arms extend the existing pattern from `mode/registry.rs`.
 
+## Per-phase PR (delivery unit)
+
+**Each phase ships as its own PR** (owner requirement). Workflow:
+
+1. One branch per phase: `feature/omnimodem-phaseN-<name>` (e.g. `feature/omnimodem-phase7-psk-family`), branched from the integration base.
+2. All phase tasks (T1–T8 for every mode) land on that branch as small commits.
+3. Phase exit gate before the PR: full workspace `cargo build` + `cargo test` green, TUI `go test ./...` green, all mode KAT/cross-decode/BER gates met, and **every new mode selectable in the TUI**.
+4. Open the PR with `gh pr create`, titled `Phase N — <modes>`, body summarizing modes ported, reference commits used, new building blocks, and the conformance evidence (KAT + BER results). Request review.
+5. Merge only after review; the next phase branches from the merged base.
+
+P0 is the first such branch (`feature/mode-parity-p0-harness`) and should be PR'd the same way.
+
+> **Environment note:** pushing/PR-ing is currently **blocked in this sandbox** — the platform repocache rejects pushes ("unable to create temporary object directory") and direct GitHub is walled off by the gitconfig rewrite. Phase branches are prepared and committed locally, ready to PR; opening the PRs needs push access provisioned by the platform. The plan treats "open the PR" as the mandatory closing step of every phase regardless.
+
 ## Execution handoff
 
-Per phase, generate the bite-sized executable plan (`docs/plans/YYYY-MM-DD-omnimodem-phaseN-<name>.md`) from the cited references, then implement via subagent-driven-development (fresh subagent per port task, two-stage review) or executing-plans. **Next:** generate the Phase 7 and W1 detailed plans (parallel), then execute.
+Per phase, generate the bite-sized executable plan (`docs/plans/YYYY-MM-DD-omnimodem-phaseN-<name>.md`) from the cited references, then implement via subagent-driven-development (fresh subagent per port task, two-stage review) or executing-plans. **Next:** generate the Phase 7 and W1 detailed plans (parallel), then execute — each closing with its own PR.
+
+### Pre-existing TUI gap to true up
+The TUI `modes.go` list currently offers only `psk31/rtty/cw/afsk1200/ft8` — the already-shipped `olivia/ft4/jt65/jt9/wspr` are **missing** from the operate screen. This is the exact daemon-vs-TUI drift T8 exists to prevent. Fold a one-time true-up (add those five existing modes to the TUI) into the first fldigi/WSJT-X phase PRs, or a small standalone PR before Phase 7.
