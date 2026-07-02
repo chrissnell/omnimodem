@@ -40,9 +40,19 @@ const (
 	fTx
 	fPtt
 	fMethod
-	fApply
-	fLast = fApply
+	fLast = fMethod
 )
+
+// cfgSig is the persistable slice of the form. It drives change detection so
+// auto-apply fires only when a field actually changed, not on mere navigation.
+type cfgSig struct {
+	name      string
+	modeIdx   int
+	rxID      string
+	txID      string
+	pttID     string
+	methodIdx int
+}
 
 type configView struct {
 	m         *Model
@@ -58,7 +68,8 @@ type configView struct {
 	pttID     string
 	methodIdx int
 	focus     cfgFocus
-	picking   bool // a device-picker modal is open over the form
+	picking   bool   // a device-picker modal is open over the form
+	saved     cfgSig // last state persisted to the daemon (for change detection)
 }
 
 func newDevList(title string) list.Model {
@@ -114,6 +125,9 @@ func newConfigView(m *Model) *configView {
 	} else {
 		v.name.SetValue("vfo-a")
 	}
+	// Seed the change-detection baseline with the preloaded values so opening
+	// the form doesn't spuriously re-persist what's already saved.
+	v.saved = v.sig()
 	return v
 }
 
@@ -162,6 +176,35 @@ func (v *configView) setDevices(devs []*pb.DeviceInfo) {
 }
 
 func (v *configView) canApply() bool { return v.rxID != "" }
+
+// sig snapshots the persistable form fields for change detection.
+func (v *configView) sig() cfgSig {
+	return cfgSig{
+		name:      v.name.Value(),
+		modeIdx:   v.modeIdx,
+		rxID:      v.rxID,
+		txID:      v.txID,
+		pttID:     v.pttID,
+		methodIdx: v.methodIdx,
+	}
+}
+
+// maybePersist auto-applies the form when a field has changed since the last
+// save. It is the replacement for the old Apply button: callers invoke it after
+// any mutating action (cycling a selector, choosing a device, leaving the name
+// field). Persisting the whole channel on each change re-drives the daemon's
+// channel→audio→ptt rebind, so a mode switch takes effect on the live workers
+// and every device choice (RX, TX, PTT) is saved together. It is a no-op when
+// nothing changed, when no RX device is chosen yet (audio can't bind without a
+// capture device), or when the name is empty (the daemon rejects it).
+func (v *configView) maybePersist() tea.Cmd {
+	cur := v.sig()
+	if cur == v.saved || !v.canApply() || v.name.Value() == "" {
+		return nil
+	}
+	v.saved = cur
+	return v.apply()
+}
 
 // --- bind pipeline: ConfigureChannel → ConfigureAudio → ConfigurePtt ---
 
@@ -231,7 +274,8 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		}
 		return v, v.afterAudio()
 	case pttBoundMsg:
-		v.m.pop() // bind complete
+		// Auto-apply keeps the form open; refresh live state so the channel
+		// list underneath (and any later reopen) reflects what was just saved.
 		return v, snapshotCmd(v.m.c)
 	case tea.KeyMsg:
 		// A device-picker modal is open: it captures all keys. Enter records the
@@ -252,7 +296,7 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			case "enter", " ":
 				v.choose()
 				v.picking = false
-				return v, nil
+				return v, v.maybePersist() // auto-apply the device choice
 			}
 			var cmd tea.Cmd
 			*lst, cmd = lst.Update(msg)
@@ -261,20 +305,24 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		// Form navigation (no modal open).
 		switch msg.String() {
 		case "esc":
-			v.m.pop() // cancel configuration, back to Channels
-			return v, nil
+			// Changes already auto-applied; flush any pending name edit before
+			// leaving, then back to Channels.
+			cmd := v.maybePersist()
+			v.m.pop()
+			return v, cmd
 		case "tab", "down":
 			if v.focus < fLast {
 				v.focus++
 			}
 			v.syncFocus()
-			return v, nil
+			// Commit-on-blur: a name edit persists when focus moves off it.
+			return v, v.maybePersist()
 		case "shift+tab", "up":
 			if v.focus > fName {
 				v.focus--
 			}
 			v.syncFocus()
-			return v, nil
+			return v, v.maybePersist()
 		}
 		// Text fields take every other key (so values may hold 'a', spaces, etc.);
 		// ←/→ move the cursor. Call/Grid keep the operator station identity in sync.
@@ -294,19 +342,17 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			v.m.myGrid = strings.ToUpper(strings.TrimSpace(v.grid.Value()))
 			return v, cmd
 		}
-		// Selector/device/apply fields: cycle, open the picker, or apply.
+		// Selector/device fields: cycle a selector or open the device picker.
+		// Changes auto-apply — there is no explicit Apply key.
 		switch msg.String() {
 		case "left":
 			v.cycle(-1)
+			return v, v.maybePersist()
 		case "right":
 			v.cycle(+1)
+			return v, v.maybePersist()
 		case "enter", " ":
 			return v.commit()
-		case "a":
-			if v.canApply() {
-				return v, v.apply()
-			}
-			v.m.toast = ui.NewToast("pick an RX device first", ui.SeverityWarn)
 		}
 		return v, nil
 	}
@@ -352,16 +398,11 @@ func (v *configView) cycle(d int) {
 }
 
 // commit reacts to Enter on the focused field: open the device picker on a
-// device field, apply on the Apply field. Mode/method use ←/→, not Enter.
+// device field. Mode/method use ←/→, not Enter; other fields ignore Enter.
 func (v *configView) commit() (View, tea.Cmd) {
 	switch v.focus {
 	case fRx, fTx, fPtt:
 		v.picking = true
-	case fApply:
-		if v.canApply() {
-			return v, v.apply()
-		}
-		v.m.toast = ui.NewToast("pick an RX device first", ui.SeverityWarn)
 	}
 	return v, nil
 }
@@ -415,12 +456,12 @@ func (v *configView) Render(w, h int) string {
 	b.WriteString(field(fPtt, "PTT Device", chosen(v.pttID)) + "\n")
 	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n\n")
 
-	b.WriteString(v.applyButton() + "\n")
+	b.WriteString(v.saveHint() + "\n")
 
 	// The device picker is a modal: it appears only while a device field is being
 	// chosen, and disappears once a device is selected (or the pick is cancelled).
 	if !v.picking {
-		b.WriteString("\n" + ui.Dim.Render("‹↑/↓› field · ‹←/→› cycle · ‹enter› pick/apply · ‹a› apply · ‹esc› cancel"))
+		b.WriteString("\n" + ui.Dim.Render("‹↑/↓› field · ‹←/→› cycle · ‹enter› pick device · ‹esc› done"))
 		return b.String()
 	}
 	lst, label := v.activeList()
@@ -460,23 +501,19 @@ func (v *configView) Hints() []ui.Hint {
 		}
 	}
 	return []ui.Hint{
-		{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "pick/apply"},
-		{Key: "a", Action: "apply"}, {Key: "esc", Action: "cancel"},
+		{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "pick"},
+		{Key: "esc", Action: "done"},
 	}
 }
 
-// applyButton renders a DOS-dialog-style Apply button: a yellow [ Apply ] that
-// becomes a white-on-dark-blue highlighted button when focused, and dims with a
-// hint until an RX device is chosen.
-func (v *configView) applyButton() string {
+// saveHint replaces the old Apply button: fields auto-apply on change, so this
+// just states the auto-save behaviour — or, until an RX device is chosen (the
+// prerequisite for binding audio), tells the operator nothing will save yet.
+func (v *configView) saveHint() string {
 	if !v.canApply() {
-		return "  " + ui.Dim.Render("[ Apply ]  pick an RX device first")
+		return "  " + ui.Dim.Render("Pick an RX device to save this channel")
 	}
-	style := lipgloss.NewStyle().Foreground(ui.ColorTitle).Bold(true)
-	if v.focus == fApply {
-		style = lipgloss.NewStyle().Foreground(ui.ColorFg).Background(ui.ColorSel).Bold(true)
-	}
-	return "  " + style.Render("[ Apply ]")
+	return "  " + ui.Dim.Render("Changes save automatically")
 }
 
 func methodLabel(m pb.PttMethod) string {

@@ -187,6 +187,89 @@ func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
 	}
 }
 
+// Auto-apply: cycling the mode with an RX device chosen must persist the change
+// (a full channel→audio→ptt rebind), so a mode switch takes effect immediately.
+func TestConfigAutoAppliesOnModeChange(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig() // baseline as if this rx were already saved
+	v.focus = fMode
+
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd != nil {
+		cmd() // ConfigureChannel
+	}
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("mode change must auto-apply ConfigureChannel, got %d calls", len(f.ChannelCalls))
+	}
+}
+
+// Auto-apply must not fire on navigation alone (no field changed) — that would
+// needlessly rebind the daemon's workers on every keypress.
+func TestConfigNoApplyOnPlainNavigation(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyDown}); cmd != nil {
+		cmd()
+	}
+	if len(f.ChannelCalls) != 0 {
+		t.Fatalf("navigation must not auto-apply, got %d ConfigureChannel calls", len(f.ChannelCalls))
+	}
+}
+
+// Auto-apply is gated on an RX device: with none chosen, changing a field saves
+// nothing (audio can't bind without a capture device).
+func TestConfigNoApplyWithoutRxDevice(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.focus = fMode
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd != nil {
+		cmd()
+	}
+	if len(f.ChannelCalls) != 0 {
+		t.Fatalf("no RX device: field change must not persist, got %d calls", len(f.ChannelCalls))
+	}
+}
+
+// Choosing a PTT device auto-applies, and the choice reaches ConfigurePtt —
+// the "PTT device isn't saved" report.
+func TestConfigPttDeviceAutoAppliesAndPersists(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+
+	// Open the PTT picker and choose the (only) device.
+	v.focus = fPtt
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open picker
+	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose → auto-apply
+	if v.pttID != "usb:1:2:" {
+		t.Fatalf("ptt device must be recorded, got %q", v.pttID)
+	}
+	// Drive the returned pipeline to completion: channel → audio → ptt.
+	for cmd != nil {
+		msg := cmd()
+		_, cmd = v.Update(msg)
+	}
+	if len(f.PttCalls) != 1 || f.PttCalls[0].GetDeviceId() != "usb:1:2:" {
+		t.Fatalf("ConfigurePtt must carry the chosen device, got %+v", f.PttCalls)
+	}
+}
+
 func TestConfigBindChainsThroughPtt(t *testing.T) {
 	f := &client.Fake{}
 	m := New(f, "x")
