@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -8,6 +9,24 @@ import (
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// drainCmd runs a command and feeds every resulting message back into the view,
+// unwrapping tea.Batch, until the chain goes quiet. Lets a test drive the whole
+// channel→audio→ptt auto-apply pipeline (and its coalescing re-check) to rest.
+func drainCmd(v *configView, cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, c := range msg {
+			drainCmd(v, c)
+		}
+	default:
+		_, next := v.Update(msg)
+		drainCmd(v, next)
+	}
+}
 
 func devItem(id, label string, capt, play bool) *pb.DeviceInfo {
 	return &pb.DeviceInfo{DeviceId: id, Label: label, HasCapture: capt, HasPlayback: play}
@@ -184,6 +203,171 @@ func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
 	v.Update(audioCfgMsg{resp: &pb.ConfigureAudioResponse{ActualSampleRate: 48000, ActualTxSampleRate: 48000}})
 	if m.toast != nil {
 		t.Fatalf("a bound TX device must not warn, got %q", m.toast.Line())
+	}
+}
+
+// Auto-apply: cycling the mode with an RX device chosen must persist the change
+// (a full channel→audio→ptt rebind), so a mode switch takes effect immediately.
+func TestConfigAutoAppliesOnModeChange(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig() // baseline as if this rx were already saved
+	v.focus = fMode
+
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd != nil {
+		cmd() // ConfigureChannel
+	}
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("mode change must auto-apply ConfigureChannel, got %d calls", len(f.ChannelCalls))
+	}
+}
+
+// Auto-apply must not fire on navigation alone (no field changed) — that would
+// needlessly rebind the daemon's workers on every keypress.
+func TestConfigNoApplyOnPlainNavigation(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyDown}); cmd != nil {
+		cmd()
+	}
+	if len(f.ChannelCalls) != 0 {
+		t.Fatalf("navigation must not auto-apply, got %d ConfigureChannel calls", len(f.ChannelCalls))
+	}
+}
+
+// Auto-apply is gated on an RX device: with none chosen, changing a field saves
+// nothing (audio can't bind without a capture device).
+func TestConfigNoApplyWithoutRxDevice(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.focus = fMode
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd != nil {
+		cmd()
+	}
+	if len(f.ChannelCalls) != 0 {
+		t.Fatalf("no RX device: field change must not persist, got %d calls", len(f.ChannelCalls))
+	}
+}
+
+// Choosing a PTT device auto-applies, and the choice reaches ConfigurePtt —
+// the "PTT device isn't saved" report.
+func TestConfigPttDeviceAutoAppliesAndPersists(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+
+	// Open the PTT picker and choose the (only) device.
+	v.focus = fPtt
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open picker
+	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose → auto-apply
+	if v.pttID != "usb:1:2:" {
+		t.Fatalf("ptt device must be recorded, got %q", v.pttID)
+	}
+	// Drive the returned pipeline to completion: channel → audio → ptt.
+	for cmd != nil {
+		msg := cmd()
+		_, cmd = v.Update(msg)
+	}
+	if len(f.PttCalls) != 1 || f.PttCalls[0].GetDeviceId() != "usb:1:2:" {
+		t.Fatalf("ConfigurePtt must carry the chosen device, got %+v", f.PttCalls)
+	}
+}
+
+// A failed auto-apply must not advance the "saved" baseline: the operator sees
+// the error toast, and the next change (even to the same value) retries the save
+// rather than the form silently believing it persisted.
+func TestConfigFailedApplyRetriesOnNextChange(t *testing.T) {
+	f := &client.Fake{Err: errors.New("daemon down")}
+	m := New(f, "x")
+	m.connected = true
+	m.push(newChannelsView(m))
+	m.sel = 0
+	m.live[0] = &chanLive{}
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+	v.focus = fMode
+	m.push(v)
+
+	// Change mode → starts a pipeline; its first RPC fails.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if cmd == nil {
+		t.Fatal("mode change should start a save")
+	}
+	m.Update(cmd()) // rpcErrMsg → routed to view → clears the in-flight guard
+	if v.applying {
+		t.Fatal("a failed apply must clear the in-flight guard")
+	}
+	if got := len(f.ChannelCalls); got != 1 {
+		t.Fatalf("want 1 ConfigureChannel attempt, got %d", got)
+	}
+
+	// Recover and change again: saved was never advanced, so this must retry.
+	f.Err = nil
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if cmd == nil {
+		t.Fatal("a change after failure must retry the save")
+	}
+	cmd()
+	if got := len(f.ChannelCalls); got != 2 {
+		t.Fatalf("retry must issue another ConfigureChannel, got %d", got)
+	}
+}
+
+// Auto-apply serializes: a change made while a pipeline is in flight must not
+// launch a second concurrent pipeline (that could race two ConfigureChannel
+// RPCs out of order). The in-flight pipeline finishes, then a single coalesced
+// follow-up persists the latest state.
+func TestConfigSerializesConcurrentApplies(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+	v.focus = fMode
+
+	// First change starts a pipeline.
+	_, cmd1 := v.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if cmd1 == nil || !v.applying {
+		t.Fatal("first change should start an in-flight pipeline")
+	}
+
+	// Second change while in flight must NOT start another pipeline...
+	if _, cmd2 := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd2 != nil {
+		t.Fatal("no second pipeline may start while one is in flight")
+	}
+	latestMode := v.modeLabel()
+
+	// ...only the first pipeline's ConfigureChannel has gone out so far.
+	drainCmd(v, cmd1)
+	if len(f.ChannelCalls) != 2 {
+		t.Fatalf("want exactly 2 serialized ConfigureChannel calls (in-flight + coalesced), got %d", len(f.ChannelCalls))
+	}
+	// The coalesced follow-up persisted the latest mode, and the baseline caught up.
+	if last := f.ChannelCalls[len(f.ChannelCalls)-1].GetMode(); last != latestMode {
+		t.Fatalf("coalesced save must carry the latest mode %q, got %q", latestMode, last)
+	}
+	if v.applying || v.saved != v.sig() {
+		t.Fatalf("after draining, no pipeline should be in flight and saved should match current state")
 	}
 }
 

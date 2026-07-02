@@ -59,25 +59,36 @@ impl Supervisor {
         })
     }
 
-    /// Apply a channel configuration: persist it, then update live state. The
-    /// dedicated `configure_audio`/`configure_ptt` set the real bindings; a new
-    /// channel starts on the placeholder device with no PTT.
+    /// Apply a channel's identity and mode, then persist. For an existing
+    /// channel this touches only `name`/`mode` and keeps its audio and PTT
+    /// bindings intact — reconfiguring (e.g. switching modes) must not silently
+    /// drop the operator's RX/TX/PTT device choices. A brand-new channel starts
+    /// on the placeholder device with no PTT; `configure_audio`/`configure_ptt`
+    /// set the real bindings.
     pub fn configure_channel(
         &mut self,
         id: ChannelId,
         name: String,
         mode: String,
     ) -> Result<(), crate::persist::StoreError> {
-        let cfg = ChannelConfig {
-            id,
-            name,
-            mode,
-            device_id: DeviceId::placeholder(),
-            sample_rate: MAX_SAMPLE_RATE,
-            fanout: 1,
-            tx_device_id: DeviceId::placeholder(),
-            tx_sample_rate: 0,
-            ptt: None,
+        let cfg = match self.channels.get(&id) {
+            Some(state) => {
+                let mut cfg = state.config.clone();
+                cfg.name = name;
+                cfg.mode = mode;
+                cfg
+            }
+            None => ChannelConfig {
+                id,
+                name,
+                mode,
+                device_id: DeviceId::placeholder(),
+                sample_rate: MAX_SAMPLE_RATE,
+                fanout: 1,
+                tx_device_id: DeviceId::placeholder(),
+                tx_sample_rate: 0,
+                ptt: None,
+            },
         };
         self.store.upsert_channel(&cfg)?;
         self.channels
@@ -196,6 +207,45 @@ mod tests {
         let snap = sup.snapshot();
         assert_eq!(snap.channels.len(), 1);
         assert_eq!(snap.channels[0].name, "second");
+    }
+
+    #[test]
+    fn reconfigure_preserves_audio_and_ptt_bindings() {
+        // A mode/name change must not drop the operator's RX/TX/PTT device
+        // choices — only identity and mode may change.
+        let mut sup = supervisor();
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into())
+            .unwrap();
+        sup.configure_audio(
+            ChannelId(0),
+            DeviceId::AlsaCard { card_name: "Mic".into() },
+            48_000,
+            1,
+            DeviceId::AlsaCard { card_name: "Speaker".into() },
+            0,
+        )
+        .unwrap();
+        sup.configure_ptt(
+            ChannelId(0),
+            PttConfig {
+                device_id: DeviceId::AlsaCard { card_name: "Rig".into() },
+                method: crate::ptt::registry::PttMethod::None,
+                invert: false,
+            },
+        )
+        .unwrap();
+
+        // Reconfigure name + mode; bindings must survive.
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "rtty".into())
+            .unwrap();
+
+        let snap = sup.snapshot();
+        assert_eq!(snap.channels[0].mode, "rtty");
+        assert_eq!(snap.channels[0].device_id, DeviceId::AlsaCard { card_name: "Mic".into() });
+        assert_eq!(snap.channels[0].tx_device_id, DeviceId::AlsaCard { card_name: "Speaker".into() });
+        assert_eq!(snap.channels[0].sample_rate, 48_000);
+        let ptt = snap.channels[0].ptt.as_ref().expect("ptt binding must survive");
+        assert_eq!(ptt.device_id, DeviceId::AlsaCard { card_name: "Rig".into() });
     }
 
     #[test]

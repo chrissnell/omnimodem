@@ -32,17 +32,17 @@ func TestChannelsOOpensOperateView(t *testing.T) {
 	}
 }
 
-// And a config bind that pops (pttBoundMsg) must not panic or leave the popped
-// view installed.
-func TestConfigPopOnBindComplete(t *testing.T) {
+// Auto-apply persists in place: a completed bind (pttBoundMsg) must keep the
+// Configure form open so the operator can keep editing, not pop back.
+func TestConfigStaysOpenOnBindComplete(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	m.connected = true
 	m.push(newChannelsView(m))
 	m.sel = 0
 	m.live[0] = &chanLive{}
 	m.push(newConfigView(m))
-	m.Update(pttBoundMsg{}) // config view pops itself
-	if _, ok := m.top().(*channelsView); !ok {
-		t.Fatalf("after bind-complete pop, top should be Channels; got %T (stack=%d)", m.top(), len(m.stack))
+	m.Update(pttBoundMsg{})
+	if _, ok := m.top().(*configView); !ok {
+		t.Fatalf("bind-complete must keep Configure open; got %T (stack=%d)", m.top(), len(m.stack))
 	}
 }
