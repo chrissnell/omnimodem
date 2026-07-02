@@ -113,12 +113,15 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
     proto::ModemState { channels }
 }
 
-/// The PTT device id to report: empty for the deviceless methods (their id is an
-/// internal placeholder), otherwise the canonical device id.
+/// The PTT device id to report. Hide only the internal placeholder that truly
+/// deviceless configs carry; a real device the operator picked must be reported
+/// back so the UI can preload it on reopen — even when the method is VOX/None
+/// (the TUI lets a device be chosen independently of the method, and a hidden
+/// choice reads as "not saved").
 fn ptt_device_for_proto(p: &PttConfig) -> String {
-    match p.method {
-        PttMethod::None | PttMethod::Vox => String::new(),
-        _ => p.device_id.to_canonical_string(),
+    match &p.device_id {
+        DeviceId::Placeholder { .. } => String::new(),
+        d => d.to_canonical_string(),
     }
 }
 
@@ -334,6 +337,26 @@ mod tests {
         let ci = &snapshot_to_proto(&snap).channels[0];
         assert_eq!(ci.tx_device_id, "", "TX mirroring RX must report empty");
         assert_eq!(ci.ptt_device_id, "", "deviceless PTT must report empty");
+        assert_eq!(ci.ptt_method, proto::PttMethod::Vox as i32);
+    }
+
+    #[test]
+    fn snapshot_reports_real_ptt_device_even_with_vox_method() {
+        // The operator picked a real PTT device but left the method at the
+        // default (VOX). The device must still be reported so the UI preloads it
+        // on reopen — hiding it read as "my PTT choice wasn't saved".
+        let rx = DeviceId::AlsaCard { card_name: "Mic".into() };
+        let ptt = PttConfig {
+            device_id: DeviceId::Serial { by_id: "usb-FTDI-if00".into() },
+            method: PttMethod::Vox,
+            invert: false,
+        };
+        let snap = ModemSnapshot {
+            channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
+            running: vec![true],
+        };
+        let ci = &snapshot_to_proto(&snap).channels[0];
+        assert_eq!(ci.ptt_device_id, "serial:usb-FTDI-if00");
         assert_eq!(ci.ptt_method, proto::PttMethod::Vox as i32);
     }
 }
