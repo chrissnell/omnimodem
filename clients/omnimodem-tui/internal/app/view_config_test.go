@@ -170,7 +170,7 @@ func TestConfigApplyGatedWithoutRxDevice(t *testing.T) {
 }
 
 // The reported bug: ConfigureAudio went out with an empty device_id. With a
-// selected RX device, it must carry that id.
+// selected RX device, the one-shot save must carry that id.
 func TestConfigSelectedRxReachesConfigureAudio(t *testing.T) {
 	f := &client.Fake{}
 	m := New(f, "x")
@@ -181,10 +181,30 @@ func TestConfigSelectedRxReachesConfigureAudio(t *testing.T) {
 	if !v.canApply() {
 		t.Fatal("apply should be allowed once RX device is set")
 	}
-	v.apply()()        // ConfigureChannel → channelBoundMsg
-	v.afterChannel()() // ConfigureAudio
+	v.persistAll()() // ConfigureChannel → ConfigureAudio → ConfigurePtt, one shot
 	if len(f.AudioCalls) != 1 || f.AudioCalls[0].GetDeviceId() != "usb:1:2:" {
 		t.Fatalf("ConfigureAudio must carry the selected device_id, got %+v", f.AudioCalls)
+	}
+}
+
+// persistAll runs the full save in one command: one ConfigureChannel, one
+// ConfigureAudio, one ConfigurePtt — so leaving mid-save can't drop a stage.
+func TestConfigPersistAllIssuesAllThreeRPCs(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:rx", "Mic", true, false), devItem("usb:tx", "Spk", false, true)})
+	v.rxID, v.txID, v.pttID = "usb:rx", "usb:tx", "usb:tx"
+	if _, ok := v.persistAll()().(saveDoneMsg); !ok {
+		t.Fatal("persistAll must complete with a saveDoneMsg")
+	}
+	if len(f.ChannelCalls) != 1 || len(f.AudioCalls) != 1 || len(f.PttCalls) != 1 {
+		t.Fatalf("want one of each RPC, got ch=%d audio=%d ptt=%d",
+			len(f.ChannelCalls), len(f.AudioCalls), len(f.PttCalls))
+	}
+	if f.AudioCalls[0].GetTxDeviceId() != "usb:tx" || f.PttCalls[0].GetDeviceId() != "usb:tx" {
+		t.Fatalf("TX/PTT device choices must reach their RPCs: audio=%+v ptt=%+v", f.AudioCalls[0], f.PttCalls[0])
 	}
 }
 
@@ -193,14 +213,14 @@ func TestConfigSelectedRxReachesConfigureAudio(t *testing.T) {
 func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
 	m := New(&client.Fake{}, "x")
 	v := newConfigView(m)
-	v.Update(audioCfgMsg{resp: &pb.ConfigureAudioResponse{ActualSampleRate: 48000, ActualTxSampleRate: 0}})
+	v.Update(saveDoneMsg{warnRxOnly: true})
 	if m.toast == nil || !strings.Contains(m.toast.Line(), "RX-only") {
 		t.Fatalf("RX-only bind must surface a transmit-silent warning, toast=%v", m.toast)
 	}
 
-	// A real TX rate must not warn.
+	// A bound TX device must not warn.
 	m.toast = nil
-	v.Update(audioCfgMsg{resp: &pb.ConfigureAudioResponse{ActualSampleRate: 48000, ActualTxSampleRate: 48000}})
+	v.Update(saveDoneMsg{warnRxOnly: false})
 	if m.toast != nil {
 		t.Fatalf("a bound TX device must not warn, got %q", m.toast.Line())
 	}
@@ -371,23 +391,78 @@ func TestConfigSerializesConcurrentApplies(t *testing.T) {
 	}
 }
 
-func TestConfigBindChainsThroughPtt(t *testing.T) {
+// drive runs a command through the MODEL (so routeToView + pop behave as at
+// runtime), following every resulting message and its follow-ups to rest.
+func drive(m *Model, cmd tea.Cmd) {
+	for cmd != nil {
+		msg := cmd()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				drive(m, c)
+			}
+			return
+		}
+		_, cmd = m.Update(msg)
+	}
+}
+
+// The reported bug: choose RX, TX, and PTT in quick succession then leave with
+// <esc>, and only RX persisted. The old save was split across view-routed
+// messages, so popping the view mid-save dropped ConfigureAudio/ConfigurePtt;
+// devices picked while a save was in flight were also never flushed. esc must
+// now hold the view open until the whole save drains, persisting all three.
+func TestConfigEscPersistsAllChosenDevices(t *testing.T) {
 	f := &client.Fake{}
 	m := New(f, "x")
+	m.connected = true
+	m.push(newChannelsView(m))
+	m.sel = 0
+	m.live[0] = &chanLive{}
 	v := newConfigView(m)
-	v.rxID = "usb:1:2:"
-	// channel → audio
-	if _, cmd := v.Update(channelBoundMsg{}); cmd != nil {
-		cmd()
+	v.setDevices([]*pb.DeviceInfo{
+		devItem("usb:rx", "Mic", true, false),
+		devItem("usb:tx", "Spk", false, true),
+		devItem("usb:ptt", "Rig", true, true),
+	})
+	m.push(v)
+
+	// Pick RX — starts a save. Hold its command undrained (still "in flight").
+	v.rxID = "usb:rx"
+	rxSave := v.maybePersist()
+	if rxSave == nil || !v.applying {
+		t.Fatal("choosing RX should start a save")
 	}
-	if len(f.AudioCalls) != 1 {
-		t.Fatalf("channelBound should trigger ConfigureAudio, got %d", len(f.AudioCalls))
+	// Pick TX and PTT while that save is in flight: no second pipeline may start;
+	// the choices stay pending.
+	v.txID = "usb:tx"
+	if v.maybePersist() != nil {
+		t.Fatal("TX pick while a save is in flight must not start a second pipeline")
 	}
-	// audio → ptt
-	if _, cmd := v.Update(audioCfgMsg{resp: &pb.ConfigureAudioResponse{}}); cmd != nil {
-		cmd()
+	v.pttID = "usb:ptt"
+	if v.maybePersist() != nil {
+		t.Fatal("PTT pick while a save is in flight must not start a second pipeline")
 	}
-	if len(f.PttCalls) != 1 {
-		t.Fatalf("audioCfg should trigger ConfigurePtt, got %d", len(f.PttCalls))
+
+	// esc now: the save is still in flight with TX/PTT pending. The view must NOT
+	// pop yet and must not launch a racing save.
+	if _, escCmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc}); escCmd != nil {
+		t.Fatal("esc must not act while a save is in flight; the completion handler drives it")
+	}
+	if _, ok := m.top().(*configView); !ok {
+		t.Fatalf("view must stay open until the in-flight save drains; top=%T", m.top())
+	}
+
+	// Let the in-flight RX save complete; its coalesced follow-up persists the
+	// pending TX and PTT, then the view pops.
+	drive(m, rxSave)
+
+	if _, ok := m.top().(*channelsView); !ok {
+		t.Fatalf("view must pop once fully saved; top=%T", m.top())
+	}
+	if n := len(f.AudioCalls); n == 0 || f.AudioCalls[n-1].GetTxDeviceId() != "usb:tx" {
+		t.Fatalf("TX device must be persisted; audio calls=%+v", f.AudioCalls)
+	}
+	if n := len(f.PttCalls); n == 0 || f.PttCalls[n-1].GetDeviceId() != "usb:ptt" {
+		t.Fatalf("PTT device must be persisted; ptt calls=%+v", f.PttCalls)
 	}
 }

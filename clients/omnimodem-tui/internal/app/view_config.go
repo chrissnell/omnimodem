@@ -72,6 +72,7 @@ type configView struct {
 	saved     cfgSig // last state CONFIRMED persisted to the daemon
 	applying  bool   // a save pipeline is in flight (serializes auto-apply)
 	inflight  cfgSig // the sig the in-flight pipeline is persisting
+	closing   bool   // esc pressed; pop once the save fully drains
 }
 
 func newDevList(title string) list.Model {
@@ -218,55 +219,50 @@ func (v *configView) maybePersist() tea.Cmd {
 	// persisted.
 	v.applying = true
 	v.inflight = cur
-	return v.apply()
+	return v.persistAll()
 }
 
-// --- bind pipeline: ConfigureChannel → ConfigureAudio → ConfigurePtt ---
-
-func (v *configView) apply() tea.Cmd {
-	req := &pb.ConfigureChannelRequest{
-		Channel:    v.m.sel,
+// persistAll runs the whole ConfigureChannel → ConfigureAudio → ConfigurePtt
+// save as ONE self-contained command: all field values are captured up front
+// and the three RPCs run sequentially in a single goroutine, returning one
+// saveDoneMsg. Keeping the pipeline in one command (rather than chained across
+// view-routed messages) means the save no longer depends on the config view
+// staying on the view stack — so leaving with <esc> mid-save still persists TX
+// and PTT, not just RX. The captured values also match v.inflight exactly, so
+// the confirmed-save baseline is deterministic.
+//
+// Caller guarantees (via maybePersist) a chosen RX device and a non-empty name,
+// which are the daemon's preconditions for ConfigureChannel/ConfigureAudio.
+func (v *configView) persistAll() tea.Cmd {
+	ch := v.m.sel
+	c := v.m.c
+	chReq := &pb.ConfigureChannelRequest{
+		Channel:    ch,
 		Name:       v.name.Value(),
 		Mode:       v.modeLabel(),
 		ModeParams: modeParamsFor(v.modeLabel(), nil),
 	}
-	c := v.m.c
+	audioReq := &pb.ConfigureAudioRequest{
+		Channel: ch, DeviceId: v.rxID, SampleRate: 48000, TxDeviceId: v.txID,
+	}
+	pttReq := &pb.ConfigurePttRequest{Channel: ch, DeviceId: v.pttID, Method: v.method()}
 	return func() tea.Msg {
 		ctx, cancel := rpcCtx()
 		defer cancel()
-		if err := c.ConfigureChannel(ctx, req); err != nil {
-			return rpcErrMsg{fmt.Errorf("configure channel: %w", err)}
+		if err := c.ConfigureChannel(ctx, chReq); err != nil {
+			return saveDoneMsg{err: fmt.Errorf("configure channel: %w", err)}
 		}
-		return channelBoundMsg{}
-	}
-}
-
-func (v *configView) afterChannel() tea.Cmd {
-	req := &pb.ConfigureAudioRequest{
-		Channel: v.m.sel, DeviceId: v.rxID, SampleRate: 48000, TxDeviceId: v.txID,
-	}
-	c := v.m.c
-	return func() tea.Msg {
-		ctx, cancel := rpcCtx()
-		defer cancel()
-		resp, err := c.ConfigureAudio(ctx, req)
+		resp, err := c.ConfigureAudio(ctx, audioReq)
 		if err != nil {
-			return rpcErrMsg{fmt.Errorf("configure audio: %w", err)}
+			return saveDoneMsg{err: fmt.Errorf("configure audio: %w", err)}
 		}
-		return audioCfgMsg{resp}
-	}
-}
-
-func (v *configView) afterAudio() tea.Cmd {
-	req := &pb.ConfigurePttRequest{Channel: v.m.sel, DeviceId: v.pttID, Method: v.method()}
-	c := v.m.c
-	return func() tea.Msg {
-		ctx, cancel := rpcCtx()
-		defer cancel()
-		if err := c.ConfigurePtt(ctx, req); err != nil {
-			return rpcErrMsg{fmt.Errorf("configure ptt: %w", err)}
+		if err := c.ConfigurePtt(ctx, pttReq); err != nil {
+			return saveDoneMsg{err: fmt.Errorf("configure ptt: %w", err)}
 		}
-		return pttBoundMsg{}
+		// tx_rate == 0 means the daemon bound the channel RX-only: the TX device
+		// had no usable playback. Transmit stays silent until a real output
+		// device is picked — surface that rather than failing quietly.
+		return saveDoneMsg{warnRxOnly: resp.GetActualTxSampleRate() == 0}
 	}
 }
 
@@ -275,34 +271,39 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 	case devicesMsg:
 		v.setDevices(msg.devices)
 		return v, nil
-	case channelBoundMsg:
-		return v, v.afterChannel()
-	case audioCfgMsg:
-		// tx_rate == 0 means the daemon bound the channel RX-only: the TX device
-		// had no usable playback (an input-only device, or TX left defaulting to
-		// the capture device). Transmit will be silent until a real output device
-		// is picked for TX — surface that instead of letting it fail quietly.
-		if msg.resp.GetActualTxSampleRate() == 0 {
+	case saveDoneMsg:
+		v.applying = false
+		if msg.err != nil {
+			// The save failed. Show the error and do NOT advance v.saved, so the
+			// change is retried on the next edit; don't auto-retry here (avoid
+			// spinning on a hard failure). If the user already asked to leave,
+			// honor that — we tried, and the toast explains what happened.
+			v.m.toast = ui.NewToast(msg.err.Error(), ui.SeverityError)
+			if v.closing {
+				v.m.pop()
+			}
+			return v, nil
+		}
+		// Confirmed: advance the baseline to exactly what this save persisted.
+		v.saved = v.inflight
+		if msg.warnRxOnly {
 			v.m.toast = ui.NewToast(
 				"Bound RX-only — no usable TX device; transmit is silent. Pick an output device for TX.",
 				ui.SeverityWarn)
 		}
-		return v, v.afterAudio()
-	case pttBoundMsg:
-		// The full pipeline confirmed: this is the only place v.saved advances,
-		// and only to the state the pipeline actually persisted. Auto-apply keeps
-		// the form open; refresh live state so the channel list underneath (and
-		// any later reopen) reflects what was just saved, then coalesce any change
-		// that arrived while the pipeline was in flight.
-		v.applying = false
-		v.saved = v.inflight
-		return v, tea.Batch(snapshotCmd(v.m.c), v.maybePersist())
-	case rpcErrMsg:
-		// A bind RPC failed (the model shows the toast). Clear the in-flight
-		// guard WITHOUT advancing v.saved so the change is retried on the next
-		// edit; do not auto-retry here, to avoid spinning on a hard failure.
-		v.applying = false
-		return v, nil
+		// Coalesce any change that arrived while this save was in flight (e.g.
+		// TX/PTT picked during an earlier RX save). Serializing this way keeps
+		// the RPCs ordered and lets a pending change ride out even after esc.
+		if cmd := v.maybePersist(); cmd != nil {
+			return v, cmd
+		}
+		// Fully drained. If the user pressed esc mid-save, leave now.
+		if v.closing {
+			v.m.pop()
+			return v, nil
+		}
+		// Refresh live state so the channel list underneath reflects the save.
+		return v, snapshotCmd(v.m.c)
 	case tea.KeyMsg:
 		// A device-picker modal is open: it captures all keys. Enter records the
 		// highlighted device and closes the modal; esc cancels and closes. While
@@ -331,16 +332,23 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		// Form navigation (no modal open).
 		switch msg.String() {
 		case "esc":
-			// Changes already auto-applied; flush a pending name edit before
-			// leaving, then back to Channels. After pop the follow-on chain
-			// messages route to Channels and are dropped, so only ConfigureChannel
-			// runs here — which is exactly enough for a name change (Mode/Method
-			// persist on ←/→ and devices on choose, so Name is the only field that
-			// can reach esc unsaved, and it needs no audio/ptt rebind). If a future
-			// field defers its save to blur/esc, flush it before pop instead.
-			cmd := v.maybePersist()
+			// Leave, but not before every change is durably saved. Mark closing
+			// and let the save drain: if there's an unsaved change and nothing is
+			// in flight, maybePersist starts the final save and the saveDoneMsg
+			// handler pops when done. If a save is already in flight (possibly with
+			// TX/PTT picked while it ran), stay until it completes and coalesces
+			// the rest — then it pops. Only when there's nothing to save and
+			// nothing in flight do we pop immediately. This is what makes a quick
+			// "pick devices, hit esc" persist all of RX, TX, and PTT.
+			v.closing = true
+			if cmd := v.maybePersist(); cmd != nil {
+				return v, cmd
+			}
+			if v.applying {
+				return v, nil
+			}
 			v.m.pop()
-			return v, cmd
+			return v, nil
 		case "tab", "down":
 			if v.focus < fLast {
 				v.focus++
