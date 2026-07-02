@@ -68,6 +68,12 @@ func (v *channelsView) Update(msg tea.Msg) (View, tea.Cmd) {
 				v.m.cancel()
 			}
 			return v, tea.Quit
+		case "n":
+			// Add a channel: target the lowest free id and open Configure on it.
+			// The daemon creates the channel when the bind is applied.
+			v.m.sel = v.nextFreeChannel()
+			v.m.push(newConfigView(v.m))
+			return v, devicesCmd(v.m.c)
 		case "c":
 			v.m.sel = v.selectedChannel()
 			v.m.push(newConfigView(v.m))
@@ -83,6 +89,16 @@ func (v *channelsView) Update(msg tea.Msg) (View, tea.Cmd) {
 	return v, cmd
 }
 
+// nextFreeChannel returns the lowest channel id not currently present, so a new
+// channel fills gaps left by earlier ones (ch0, ch1, ch2 …).
+func (v *channelsView) nextFreeChannel() uint32 {
+	for ch := uint32(0); ; ch++ {
+		if _, ok := v.m.live[ch]; !ok {
+			return ch
+		}
+	}
+}
+
 func (v *channelsView) selectedChannel() uint32 {
 	var ch uint32
 	if r := v.t.SelectedRow(); len(r) > 0 {
@@ -95,7 +111,7 @@ func (v *channelsView) Render(w, h int) string {
 	v.t.SetWidth(w)
 	v.t.SetHeight(h)
 	if len(v.t.Rows()) == 0 {
-		return "No channels yet. Press <c> to configure ch0."
+		return "No channels yet. Press <n> to add a channel."
 	}
 	return v.t.View()
 }
@@ -105,6 +121,7 @@ func (v *channelsView) Title() string { return fmt.Sprintf("Channels (%d)", len(
 func (v *channelsView) Hints() []ui.Hint {
 	return []ui.Hint{
 		{Key: "enter/o", Action: "operate"},
+		{Key: "n", Action: "add"},
 		{Key: "c", Action: "configure"},
 		{Key: "q", Action: "quit"},
 	}
