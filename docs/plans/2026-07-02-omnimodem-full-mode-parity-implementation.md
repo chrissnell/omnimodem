@@ -63,16 +63,20 @@ Submode grids (Olivia/Contestia/MFSK/THOR/DominoEX/PSK-rate/Q65/JS8/…) are **p
 
 ---
 
-## Phase P0 — Porting & verification harness (shared prerequisite, do first)
+## Phase P0 — Porting & verification harness (shared prerequisite, do first) — ✅ landed
 
-**Goal:** the tooling every later phase depends on: a reference-vector extraction convention, the image/raster payload the picture/fax modes need, and a documented cross-decode runner. This is the one phase written to full bite-sized granularity here; it unblocks all others.
+**Status:** implemented on branch `feature/mode-parity-p0-harness` (P0.1 + P0.2 done, verified: `cargo test -p omnimodem-dsp --lib` = 236 passed incl. the new Image test). P0.3 doc note is folded into the vectors README.
+
+**Goal:** the tooling every later phase depends on: the image/raster payload the picture/fax modes need, and the reference-vector extraction convention. This is the one phase written to full bite-sized granularity here; it unblocks all others.
 
 **Files:**
-- Create: `crates/dsp/tests/vectors/README.md` (provenance/extraction convention)
-- Create: `scratch/refvectors/` extraction recipes (per-family shell/Fortran/C++ driver programs that dump reference intermediates; scratch per CLAUDE.md)
-- Modify: `crates/dsp/src/types.rs` (add `FramePayload::Image`)
-- Modify: `crates/omnimodemd/src/grpc/convert.rs` + `proto/*.proto` (thread Image through the RX event)
-- Test: `crates/dsp/src/types.rs` inline tests; `crates/dsp/tests/roundtrip.rs`
+- Create: `crates/dsp/tests/vectors/README.md` (provenance/extraction convention) — ✅
+- Create: `scratch/refvectors/` extraction driver programs that dump reference intermediates (scratch per CLAUDE.md) — per-family, authored at each phase's T1
+- Modify: `crates/dsp/src/types.rs` (add `FramePayload::Image`) — ✅
+- Modify: `crates/omnimodemd/src/core/rx_worker.rs` (`frame_bytes` Image arm) — ✅
+- Test: `crates/dsp/src/types.rs` inline tests — ✅
+
+**gRPC surfacing — deliberately deferred to Phase 10 (YAGNI).** There are zero `Image` producers until the first facsimile mode (Hell, Phase 10), and the raster semantics differ by mode (Hell emits a continuous column stream; WEFAX a full IOC-scaled frame). Adding a structured proto `Image` message now would be speculative surface with no producer. Instead `frame_bytes` flattens `Image` losslessly onto the existing opaque `RxFrame.data` (2-byte big-endian `width` prefix + row-major gray), and the structured proto message is designed alongside Phase 10 when the semantics are known.
 
 ### Task P0.1 — Image/raster payload
 
@@ -114,13 +118,13 @@ Expected: FAIL — no `Image` variant.
 
 - [ ] **Step 4: Run tests, verify pass**
 
-Run: `cargo test -p omnimodem-dsp types::tests`
-Expected: PASS. Then `cargo build -p omnimodemd` — fix the non-exhaustive `match` in `grpc/convert.rs` (map Image → a new proto `image` message; add the field to the RX-frame proto).
+Run: `cargo test -p omnimodem-dsp --lib types::tests`
+Expected: PASS. Then satisfy the two other exhaustive matches the new variant touches: `payload_kind` in `crates/dsp/src/modes/afsk1200.rs` (add `Image { .. } => "image"`) and `frame_bytes` in `crates/omnimodemd/src/core/rx_worker.rs` (width-prefixed encoding, see gRPC note above). `tx_worker`/`wavtool` need no change (they construct payloads or use a wildcard).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/dsp/src/types.rs crates/omnimodemd/src/grpc/convert.rs proto/
+git add crates/dsp/src/types.rs crates/dsp/src/modes/afsk1200.rs crates/omnimodemd/src/core/rx_worker.rs
 git commit -m "feat(dsp): add Image raster FramePayload for facsimile/fax modes"
 ```
 
@@ -158,7 +162,7 @@ Each phase below instantiates the **per-mode port task template** (T1–T7) for 
 ### Phase 8 — MFSK + Contestia
 - **Reference:** `fldigi/src/mfsk/{mfsk.cxx,mfskvaricode.cxx,interleave.cxx}`; `fldigi/src/contestia/contestia.cxx`.
 - **New block:** `framing/mfsk_varicode.rs` (port `mfskvaricode.cxx`). Contestia reuses `fec::fht` (32-Walsh) parametrically, like `olivia`.
-- **Modes:** MFSK family (MFSK8/16/32/4/11/22/31/64/128/64L/128L, parametric) · Contestia submode grid (parametric). Picture sub-protocol (`mfsk-pic.cxx`) deferred to the image-scope decision.
+- **Modes:** MFSK family (MFSK8/16/32/4/11/22/31/64/128/64L/128L, parametric) · Contestia submode grid (parametric). Text first; the MFSK picture sub-protocol (`mfsk-pic.cxx`) is Phase 15.
 
 ### Phase 9 — IFK: DominoEX + THOR
 - **Reference:** `fldigi/src/dominoex/{dominoex.cxx,dominovar.cxx}`; `fldigi/src/thor/{thor.cxx,thorvaricode.cxx}`.
@@ -180,12 +184,23 @@ Each phase below instantiates the **per-mode port task template** (T1–T7) for 
 - **New blocks:** `fec/ccir476.rs` (CCIR-476 / SITOR FEC-B, 4-of-7, time-diversity) for NAVTEX; `modes/wefax.rs` (FM demod + IOC 576/288 phasing) emitting `FramePayload::Image`.
 - **Modes:** NAVTEX, SITOR-B, WEFAX-576, WEFAX-288.
 
-### Phase 13 — RSID + FSQ + IFKP
-- **Reference:** `fldigi/src/rsid/`; `fldigi/src/fsq/{fsq.cxx,fsq_varicode.cxx}`; `fldigi/src/ifkp/{ifkp.cxx,ifkp_varicode.cxx}`.
-- **New blocks:** `frontend/rsid.rs` (RSID encode + detect for auto mode-ID — cross-cutting; detect-first per scope decision); FSQ directed protocol layer. IFKP reuses the Phase-9 IFK core.
-- **Modes:** RSID (auto-ID) · FSQ · IFKP.
+### Phase 13 — RSID (detect **and** transmit)
+- **Reference:** `fldigi/src/rsid/{rsid.cxx,rsid_defs.cxx}`.
+- **New block:** `frontend/rsid.rs` — RSID (Reed-Solomon Identifier) **both directions** per the scope decision: an RX detector that reports the identified mode + audio offset (feeding daemon auto-switch), and a TX encoder that emits the RSID burst ahead of a transmission. Its own phase because it is cross-cutting (touches every mode's mode-ID table and the daemon's mode-switch path), not a single on-air text mode.
+- **Deliverables:** RSID encode + detect KAT against `rsid_defs.cxx`'s ID table; daemon hook to (a) announce the active mode's RSID on TX when enabled, (b) surface a detected RSID as a control event. Sequence after the first MFSK-family modes exist (Phase 8) so there is something to identify/switch to.
 
-### Phase 14 — Long tail
+### Phase 14 — FSQ + IFKP (text)
+- **Reference:** `fldigi/src/fsq/{fsq.cxx,fsq_varicode.cxx}`; `fldigi/src/ifkp/{ifkp.cxx,ifkp_varicode.cxx}`.
+- **New block:** FSQ directed/selective-call protocol layer (FSQCALL: triggers, directed messages, heard-list). IFKP reuses the Phase-9 IFK core + its own varicode.
+- **Modes:** FSQ · IFKP (text first; their picture sub-protocols are Phase 15).
+
+### Phase 15 — Picture / image sub-protocols
+- **Reference:** `fldigi/src/mfsk/mfsk-pic.cxx`, `fldigi/src/thor/thor-pic.cxx`, `fldigi/src/ifkp/ifkp-pic.cxx`, `fldigi/src/fsq/fsq-pic.cxx`.
+- **Depends on:** the text modes from Phases 8/9/14 and P0's `FramePayload::Image` — plus the structured gRPC `Image` message (designed in Phase 10 for Hell/WEFAX, reused here).
+- **Modes:** the in-band picture TX/RX for MFSK, THOR, IFKP, FSQ. Added as its own phase per the scope decision ("add images as a later phase"), so the text modes ship first.
+- **SSTV:** answered below — **not** an fldigi/WSJT-X mode, so it is out of the current parity scope. It can be added here as an extra image mode **if** an open-source SSTV reference is added to the workspace (QSSTV / slowrx / pySSTV — none is a workspace repo today). Flagged for a decision, not assumed in scope.
+
+### Phase 16 — Long tail
 - **Reference:** `fldigi/src/throb/throb.cxx`; 8PSK + OFDM data modes in `fldigi/src/psk/`.
 - **Modes:** Throb1/2/4, ThrobX1/2/4 · 8PSK125–1200F · OFDM-500F/750F/2000F/2000/3500 (reuse the Phase-11 OFDM core). Lowest priority.
 
@@ -222,23 +237,25 @@ Independent of the fldigi track (reuses the FT8 windowed path — STFT → Costa
 
 ---
 
-## Scope decisions folded in (from the roadmap §6)
+## Scope decisions (resolved by the issue owner 2026-07-02)
 
-- **Utility modes excluded** per this comment: SSB/WWV/ANALYSIS/FMT/DTMF (fldigi) and Echo/FreqCal (WSJT-X) are **not** in this plan.
-- **8PSK + OFDM data modes** → Phase 14 (long tail), reusing the Phase-11 OFDM core. *(Confirm.)*
-- **RSID** → detect-first in Phase 13; TX ID burst is a follow-on. *(Confirm.)*
-- **Picture sub-protocols** (MFSK/THOR/IFKP images) → gated on P0's `Image` payload; port text-first, add pictures as a per-phase follow-on unless flagged as required. *(Confirm.)*
+- **Utility modes excluded:** SSB/WWV/ANALYSIS/FMT/DTMF (fldigi) and Echo/FreqCal (WSJT-X) are **not** in this plan.
+- **8PSK + OFDM data modes** → Phase 16 (long tail), reusing the Phase-11 OFDM core. ✅ confirmed.
+- **RSID** → **both** detect and transmit, promoted to its own **Phase 13**. ✅ (owner wanted both.)
+- **Picture sub-protocols** (MFSK/THOR/IFKP/FSQ images) → their own **Phase 15**; the text modes ship first. ✅ (owner: "add images as a later phase").
+- **SSTV** → confirmed **not** present in fldigi or WSJT-X (grep of `fldigi/src` + `wsjtx/lib` finds no SSTV modem). Out of current parity scope; can be folded into Phase 15 only if an OSS SSTV reference repo (QSSTV/slowrx/pySSTV) is added to the workspace. **Open — awaiting owner.**
+- **JS8** → in scope as Phase W5; `js8call` repo is checked out and cited. ✅.
 
 ## Sequencing & parallelism
 
-P0 first (unblocks everything). Then the two tracks run in parallel. Recommended first executable phase plans: **Phase 7 (PSK)** on the fldigi side and **W1 (FST4/FST4W)** on the WSJT-X side. Within the fldigi track, Phase 10 (Image + Hell) must follow P0; Phase 11 (OFDM core) precedes Phase 14's OFDM data modes; Phase 9's IFK core precedes IFKP in Phase 13. Everything else is independent.
+P0 first (✅ landed). Then the two tracks run in parallel. First executable phase plans: **Phase 7 (PSK)** on the fldigi side and **W1 (FST4/FST4W)** on the WSJT-X side. Ordering constraints within the fldigi track: Phase 10 (Image + Hell) follows P0; Phase 11 (OFDM core) precedes Phase 16's OFDM data modes; Phase 9's IFK core precedes IFKP (Phase 14) and the IFKP/THOR picture work (Phase 15); Phase 13 (RSID) follows Phase 8 so there is a mode to identify; Phase 15 follows the text modes it adds pictures to. Everything else is independent.
 
 ## Self-review
 
-- **Spec coverage:** every non-utility family in the roadmap §2/§2b maps to a phase here (PSK→7, MFSK/Contestia→8, DominoEX/THOR→9, Hell→10, MT63→11, NAVTEX/SITOR/WEFAX→12, RSID/FSQ/IFKP→13, Throb/8PSK/OFDM→14; FST4/FST4W→W1, MSK144→W2, Q65→W3, JT4→W4, JS8→W5). Cross-cutting Image payload + RSID are covered (P0, Phase 13).
-- **Placeholder scan:** P0 is fully concrete (real files/APIs). Mode phases are specified at port-task granularity with real reference files + the uniform T1–T7 template; the literal ported code per mode is produced at execution start from the cited reference (it cannot be authored without reading that reference in depth, and inventing it would violate the porting doctrine). This matches how Phases 4–5 were executed (one detailed plan per phase).
-- **Type consistency:** `FramePayload::Image { width, gray }` is defined once in P0.1 and referenced by Phases 10 and 12. The `ModeConfig` enum + `registry.rs` arms extend the existing pattern from `mode/registry.rs`.
+- **Spec coverage:** every non-utility family in the roadmap §2/§2b maps to a phase (PSK→7, MFSK/Contestia→8, DominoEX/THOR→9, Hell→10, MT63→11, NAVTEX/SITOR/WEFAX→12, RSID→13, FSQ/IFKP→14, picture sub-protocols→15, Throb/8PSK/OFDM→16; FST4/FST4W→W1, MSK144→W2, Q65→W3, JT4→W4, JS8→W5). Cross-cutting Image payload → P0 (✅); RSID → Phase 13.
+- **Placeholder scan:** P0 is implemented and verified. Mode phases are specified at port-task granularity with real reference files + the uniform T1–T7 template; the literal ported code per mode is produced at execution start from the cited reference (it cannot be authored without reading that reference in depth, and inventing it would violate the porting doctrine — Doctrine §6). This matches how Phases 4–5 were executed (one detailed plan per phase).
+- **Type consistency:** `FramePayload::Image { width, gray }` is defined once in P0.1 and referenced by Phases 10, 12, 15. The `ModeConfig` enum + `registry.rs` arms extend the existing pattern from `mode/registry.rs`.
 
 ## Execution handoff
 
-Per phase, generate the bite-sized executable plan (`docs/plans/YYYY-MM-DD-omnimodem-phaseN-<name>.md`) from the cited references, then implement via subagent-driven-development (fresh subagent per port task, two-stage review) or executing-plans. Start with P0, then Phase 7 and W1 in parallel.
+Per phase, generate the bite-sized executable plan (`docs/plans/YYYY-MM-DD-omnimodem-phaseN-<name>.md`) from the cited references, then implement via subagent-driven-development (fresh subagent per port task, two-stage review) or executing-plans. **Next:** generate the Phase 7 and W1 detailed plans (parallel), then execute.
