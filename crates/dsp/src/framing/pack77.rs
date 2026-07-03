@@ -154,6 +154,100 @@ pub fn pack77_standard(msg: &str) -> Option<[u8; 77]> {
     Some(out)
 }
 
+/// Unpack a 28-bit callsign field back to its string (inverse of [`pack28`]).
+/// Returns `None` for the hashed-call range (recovering it needs the runtime
+/// hash table). ref: packjt77.f90 `unpack28`.
+pub fn unpack28(n28: u32) -> Option<String> {
+    if n28 < NTOKENS {
+        return Some(match n28 {
+            0 => "DE".to_string(),
+            1 => "QRZ".to_string(),
+            2 => "CQ".to_string(),
+            n if n < 3 + 1000 => format!("CQ {:03}", n - 3), // CQ nnn (freq offset)
+            n => {
+                // CQ + up to 4 letters (base-27), right-justified.
+                let mut m = n - 3 - 1000;
+                let mut chars = [b' '; 4];
+                for c in chars.iter_mut().rev() {
+                    *c = A4[(m % 27) as usize];
+                    m /= 27;
+                }
+                format!("CQ {}", String::from_utf8_lossy(&chars).trim())
+            }
+        });
+    }
+    if n28 < NTOKENS + MAX22 {
+        return None; // hashed nonstandard call — needs the hash table
+    }
+    let mut n = n28 - NTOKENS - MAX22;
+    let i6 = (n % 27) as usize;
+    n /= 27;
+    let i5 = (n % 27) as usize;
+    n /= 27;
+    let i4 = (n % 27) as usize;
+    n /= 27;
+    let i3 = (n % 10) as usize;
+    n /= 10;
+    let i2 = (n % 36) as usize;
+    n /= 36;
+    let i1 = (n % 37) as usize;
+    let call = [A1[i1], A2[i2], A3[i3], A4[i4], A4[i5], A4[i6]];
+    Some(String::from_utf8_lossy(&call).trim().to_string())
+}
+
+fn bits_to_u32(bits: &[u8]) -> u32 {
+    bits.iter().fold(0u32, |a, &b| (a << 1) | b as u32)
+}
+
+/// Unpack a 77-bit standard Type-1 message back to its string, or `None` if it
+/// is not a Type-1 message this port supports (i3 != 1, or a hashed call).
+/// ref: packjt77.f90 `unpack77` (i3=1 branch).
+pub fn unpack77_standard(bits: &[u8; 77]) -> Option<String> {
+    if bits_to_u32(&bits[74..77]) != 1 {
+        return None; // only i3 = 1 (standard) here
+    }
+    let n28a = bits_to_u32(&bits[0..28]);
+    let n28b = bits_to_u32(&bits[29..57]);
+    let ir = bits[58];
+    let igrid4 = bits_to_u32(&bits[59..74]) as i32;
+    let call1 = unpack28(n28a)?;
+    let call2 = unpack28(n28b)?;
+
+    if igrid4 < MAXGRID4 {
+        // Maidenhead grid; a leading "R" is a separate word.
+        let i = igrid4;
+        let grid = [
+            b'A' + (i / 1800) as u8,
+            b'A' + ((i % 1800) / 100) as u8,
+            b'0' + ((i % 100) / 10) as u8,
+            b'0' + (i % 10) as u8,
+        ];
+        let grid = String::from_utf8_lossy(&grid).to_string();
+        let r = if ir == 1 { "R " } else { "" };
+        return Some(format!("{call1} {call2} {r}{grid}"));
+    }
+    let irpt = igrid4 - MAXGRID4;
+    let tail = match irpt {
+        1 => return Some(format!("{call1} {call2}")), // two calls, no grid
+        2 => "RRR".to_string(),
+        3 => "RR73".to_string(),
+        4 => "73".to_string(),
+        _ => {
+            let mut r = irpt - 35;
+            if (51..=70).contains(&r) {
+                r -= 101; // reverse the pack-side -50..-31 wrap
+            }
+            let rp = if ir == 1 { "R" } else { "" };
+            if r >= 0 {
+                format!("{rp}+{r:02}")
+            } else {
+                format!("{rp}-{:02}", -r)
+            }
+        }
+    };
+    Some(format!("{call1} {call2} {tail}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +275,38 @@ mod tests {
         for (msg, want) in cases {
             let got = pack77_standard(msg).unwrap_or_else(|| panic!("failed to pack {msg:?}"));
             assert_eq!(got, bits(want), "pack77 mismatch for {msg:?}");
+        }
+    }
+
+    #[test]
+    fn unpack77_matches_wsjtx_reference() {
+        // (77-bit golden vector, canonical message) from unpack77 via
+        // scratch/refvectors/build_unpack77.sh.
+        let cases = [
+            ("00000000000000000000000000100000010011011110111100011010100010100001100110001", "CQ K1ABC FN42"),
+            ("00001100001010010011101110000000010011011110111100011010100111111010101000001", "W9XYZ K1ABC -11"),
+            ("00001001101111011110001101010000011000010100100111011100001111111010101010001", "K1ABC W9XYZ R-09"),
+            ("00001001101111011110001101010000011000010100100111011100000111111001110101001", "K1ABC W9XYZ RR73"),
+            ("00000000000000000000000000100000010111111111010101101000100111111010010001001", "CQ W1AW"),
+        ];
+        for (b, want) in cases {
+            assert_eq!(unpack77_standard(&bits(b)).as_deref(), Some(want), "unpack {b}");
+        }
+    }
+
+    #[test]
+    fn pack_unpack_round_trips() {
+        for msg in [
+            "CQ K1ABC FN42",
+            "K1ABC W9XYZ EN37",
+            "W9XYZ K1ABC -11",
+            "K1ABC W9XYZ R-09",
+            "W9XYZ K1ABC RRR",
+            "K1ABC W9XYZ RR73",
+            "CQ W1AW",
+        ] {
+            let packed = pack77_standard(msg).unwrap();
+            assert_eq!(unpack77_standard(&packed).as_deref(), Some(msg), "round-trip {msg}");
         }
     }
 
