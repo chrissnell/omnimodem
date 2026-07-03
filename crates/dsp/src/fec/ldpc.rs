@@ -65,6 +65,27 @@ impl Ldpc {
         Ldpc { n, k, gen, check_vars }
     }
 
+    /// Build a code whose systematic generator comes from a dense parity matrix
+    /// `p` (`m` rows of `k` bits, `codeword = [message | p·message]`) but whose
+    /// **decode** Tanner graph is the supplied *sparse* `check_vars` (0-origin
+    /// codeword-variable indices per check). Real LDPC codes ship a low-density
+    /// `H` that differs from the dense `[p | I]`; min-sum BP only converges on
+    /// the sparse form, so encode (from `p`) and decode (from `check_vars`) come
+    /// from separate reference tables that describe the same code. A KAT asserts
+    /// `parity_errors(encode(msg)) == 0`, i.e. the two tables agree.
+    pub fn from_systematic_sparse(k: usize, p: &[Vec<u8>], check_vars: Vec<Vec<usize>>) -> Self {
+        let m = p.len();
+        let n = k + m;
+        let mut gen = vec![vec![0u8; n]; k];
+        for (i, row) in gen.iter_mut().enumerate() {
+            row[i] = 1;
+            for (c, prow) in p.iter().enumerate() {
+                row[k + c] = prow[i] & 1;
+            }
+        }
+        Ldpc { n, k, gen, check_vars }
+    }
+
     /// The FT8/FT4 `(174, 91)` LDPC code, using the real WSJT-X / `ft8_lib`
     /// tables (see module docs and [`super::ft8_tables`]).
     ///
