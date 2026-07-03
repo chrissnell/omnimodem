@@ -11,6 +11,7 @@
 //! follow-on plan slots in cleanly.
 pub mod osc;
 pub mod fir;
+pub mod multicarrier;
 pub mod nco;
 pub mod resample;
 pub mod spectrum;
