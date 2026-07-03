@@ -46,6 +46,82 @@ pub fn fst4_tones_from_msgbits(msgbits: &[u8; 101]) -> [u8; FST4_NN] {
     t
 }
 
+/// Error function (Abramowitz & Stegun 7.1.26, |err| < 1.5e-7), f64 internally.
+fn erf(x: f32) -> f32 {
+    let x = x as f64;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let y = 1.0
+        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t
+            * (-x * x).exp();
+    (sign * y) as f32
+}
+
+/// FST4/WSJT-X GFSK frequency-deviation pulse (BT product `b`).
+/// ref: wsjtx/lib/ft2/gfsk_pulse.f90.
+fn gfsk_pulse(b: f32, t: f32) -> f32 {
+    let c = std::f32::consts::PI * (2.0f32 / 2.0f32.ln()).sqrt();
+    0.5 * (erf(c * b * (t + 0.5)) - erf(c * b * (t - 0.5)))
+}
+
+/// Generate the FST4 4-GFSK audio for a tone sequence. Ports gen_fst4wave.f90:
+/// a BT=2.0 Gaussian frequency pulse 3 symbols wide (overlap-added), phase
+/// integration through a 65536-entry sine table, base frequency `f0`, and a
+/// quarter-symbol raised-cosine ramp up/down. FP-tolerance vs the reference.
+/// `nsps` = samples/symbol (720..134400 by T/R period); `hmod` = mod index.
+/// ref: wsjtx/lib/fst4/gen_fst4wave.f90.
+pub fn fst4_gen_wave(itone: &[u8], nsps: usize, fsample: f32, hmod: u32, f0: f32) -> Vec<f32> {
+    const NTAB: usize = 65536;
+    let twopi = 2.0 * std::f32::consts::PI;
+    let nsym = itone.len();
+    let nwave = (nsym + 2) * nsps;
+    let dt = 1.0 / fsample;
+    let tsym = nsps as f32 / fsample;
+
+    let mut pulse = vec![0.0f32; 3 * nsps];
+    for (i, pp) in pulse.iter_mut().enumerate() {
+        let tt = ((i + 1) as f32 - 1.5 * nsps as f32) / nsps as f32;
+        *pp = gfsk_pulse(2.0, tt);
+    }
+
+    let mut dphi = vec![0.0f32; (nsym + 2) * nsps];
+    let dphi_peak = twopi * hmod as f32 / nsps as f32;
+    for (j, &tone) in itone.iter().enumerate() {
+        let ib = j * nsps;
+        for k in 0..3 * nsps {
+            dphi[ib + k] += dphi_peak * pulse[k] * tone as f32;
+        }
+    }
+    let shift = twopi * (f0 - 1.5 * hmod as f32 / tsym) * dt;
+    for d in dphi.iter_mut() {
+        *d += shift;
+    }
+
+    let mut wave = vec![0.0f32; nwave];
+    let mut phi = 0.0f32;
+    for k in 0..nsym * nsps {
+        let idx = ((phi * NTAB as f32 / twopi) as i64 as usize) & (NTAB - 1);
+        wave[k] = (idx as f32 * twopi / NTAB as f32).sin();
+        phi += dphi[nsps + k];
+        if phi > twopi {
+            phi -= twopi;
+        }
+    }
+
+    let q = nsps / 4;
+    for (i, w) in wave.iter_mut().take(q).enumerate() {
+        *w *= (1.0 - (twopi * i as f32 / (nsps as f32 / 2.0)).cos()) / 2.0;
+    }
+    let k1 = (nsym - 1) * nsps + 3 * nsps / 4;
+    for i in 0..=q {
+        wave[k1 + i] *= (1.0 + (twopi * i as f32 / (nsps as f32 / 2.0)).cos()) / 2.0;
+    }
+    wave
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +140,35 @@ mod tests {
         let want: Vec<u8> = REF_TONES.bytes().map(|c| c - b'0').collect();
         assert_eq!(want.len(), FST4_NN, "reference must be 160 tones");
         assert_eq!(tones.to_vec(), want, "FST4 tone sequence differs from genfst4");
+    }
+
+    /// Golden GFSK wave from the UNMODIFIED gen_fst4wave (nsym=4, nsps=16,
+    /// itone=0,1,2,3). ref: scratch/refvectors/build_fst4_wave.sh.
+    const REF_WAVE: [f32; 96] = [
+    0.00000000, 0.02857032, 0.19134173, 0.47420889, 0.70710677, 0.83146966, 0.92387950, 0.98076659,
+    1.00000000, 0.98080397, 0.92391616, 0.83146954, 0.70710677, 0.55485255, 0.37105003, 0.11574722,
+    -0.27317473, -0.71593177, -0.98095328, -0.92387944, -0.55565000, -0.00009567, 0.55549055, 0.92384285,
+    0.98080397, 0.70717454, 0.19518432, -0.38259488, -0.83146977, -0.99999964, -0.82442641, -0.30730224,
+    0.45559573, 0.98315811, 0.70649642, -0.19509049, -0.92384297, -0.83152270, -0.00009567, 0.83141637,
+    0.92391616, 0.19518432, -0.70703912, -0.98080397, -0.38268343, 0.55628753, 0.99992114, 0.48704773,
+    -0.62050855, -0.91900045, 0.19593655, 1.00000000, 0.19518432, -0.92384297, -0.55565000, 0.70703900,
+    0.83152288, -0.38259488, -0.98080397, -0.00009567, 0.98074788, 0.32890743, -0.40494755, -0.12529999,
+    0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000,
+    0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000,
+    0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000,
+    0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000, 0.00000000,
+    ];
+
+    #[test]
+    fn fst4_gfsk_wave_matches_wsjtx_reference() {
+        let wave = fst4_gen_wave(&[0, 1, 2, 3], 16, 12000.0, 1, 1500.0);
+        assert_eq!(wave.len(), 96);
+        let maxerr = wave
+            .iter()
+            .zip(REF_WAVE.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(maxerr < 1e-3, "GFSK wave max abs error {maxerr} exceeds tolerance");
     }
 
     #[test]
