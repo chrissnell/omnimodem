@@ -270,6 +270,40 @@ mod tests {
     }
 
     #[test]
+    fn fst4_decodes_under_awgn() {
+        use crate::fec::ldpc_fst4::fst4_240_101_code;
+        use crate::testutil::{add_awgn, Rng};
+        let mut msgbits = [0u8; 101];
+        for (i, b) in msgbits.iter_mut().enumerate() {
+            *b = u8::from((i * 3 + 1) % 5 < 2);
+        }
+        let nsps = 720; // TR = 15 s
+        let fsample = 12000.0;
+        let hmod = 1;
+        let baud = fsample / nsps as f32;
+        let f0 = 1500.0 + 1.5 * hmod as f32 * baud;
+        let tones = fst4_tones_from_msgbits(&msgbits);
+        let wave = fst4_gen_wave(&tones, nsps, fsample, hmod, f0);
+        let code = fst4_240_101_code();
+        // The windowed mode integrates nsps=720 samples/symbol, so it tolerates
+        // deep noise: sigma=4.0 is noise 4x the signal amplitude per sample.
+        let trials = 30;
+        let mut ok = 0;
+        for trial in 0..trials as u64 {
+            let mut w = wave.clone();
+            let mut rng = Rng::new(0xF574_0000 + trial);
+            add_awgn(&mut w, 4.0, &mut rng);
+            let llrs = fst4_demod_soft(&w, nsps, fsample, hmod, f0);
+            let (hard, errs) = code.decode_minsum(&llrs, 80);
+            if errs == 0 && hard[..101] == msgbits[..] {
+                ok += 1;
+            }
+        }
+        let rate = ok as f32 / trials as f32;
+        assert!(rate >= 0.9, "FST4 AWGN decode rate {rate} below 0.9");
+    }
+
+    #[test]
     fn fst4_sync_words_land_in_the_frame() {
         let tones = fst4_tones_from_msgbits(&[0u8; 101]);
         assert_eq!(&tones[0..8], &FST4_SYNC1);
