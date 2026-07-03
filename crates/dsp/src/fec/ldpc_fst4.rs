@@ -153,6 +153,7 @@ const G_240_101: [&str; 139] = [
 /// Build the (240,101) generator matrix from the hex table, exactly as
 /// `encode240_101.f90`: each hex char contributes 4 bits MSB-first, except the
 /// 26th char contributes only 1 bit (101 columns total). ref: encode240_101.f90.
+#[allow(clippy::needless_range_loop)] // hex-nibble index mirrors the Fortran fill
 fn gen_240_101() -> [[u8; 101]; 139] {
     let mut gen = [[0u8; 101]; 139];
     for (i, row) in G_240_101.iter().enumerate() {
@@ -363,6 +364,7 @@ const G_240_74: [&str; 166] = [
 /// Build the (240,74) generator matrix from the hex table, exactly as
 /// `encode240_74.f90`: 4 bits MSB-first per hex char, except the 19th char
 /// contributes 2 bits (74 columns total). ref: encode240_74.f90.
+#[allow(clippy::needless_range_loop)] // hex-nibble index mirrors the Fortran fill
 fn gen_240_74() -> [[u8; 74]; 166] {
     let mut gen = [[0u8; 74]; 166];
     for (i, row) in G_240_74.iter().enumerate() {

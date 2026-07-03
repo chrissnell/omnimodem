@@ -261,6 +261,9 @@ const FST4_RVEC: [u8; 77] = [
 /// 0x100065b polynomial). To generate, pass a length-`len` array whose last 24
 /// bits are zero; to check, pass message+CRC and expect 0. ref: get_crc24.f90.
 pub fn fst4_crc24(mc: &[u8], len: usize) -> u32 {
+    if len < 25 || mc.len() < len {
+        return 0; // guard: the division needs at least the 25-bit remainder
+    }
     let mut r = [0u8; 25];
     r.copy_from_slice(&mc[0..25]);
     for i in 0..=(len - 25) {
@@ -356,6 +359,10 @@ impl Modulator for Fst4Mod {
 
 /// FST4 windowed (block) receiver: searches an audio band for the sync pattern,
 /// then soft-demaps + LDPC-decodes + unpacks the standard message.
+///
+/// This does a **frequency** search only; it assumes the frame is sample-aligned
+/// to the start of the window (as the daemon's slot clock arranges). A time /
+/// timing-offset search (as WSJT-X does) is future work for off-grid capture.
 pub struct Fst4Demod {
     tr_s: u32,
     f_lo: f32,
@@ -372,11 +379,29 @@ impl Fst4Demod {
     }
 
     /// Sum of sync-tone magnitudes for a candidate tone-0 frequency `base`.
+    /// Correlates only the 40 sync symbols (not the full frame) against their
+    /// expected tone — the search runs this per frequency candidate.
     fn sync_score(&self, wave: &[f32], nsps: usize, base: f32) -> f32 {
-        let mags = fst4_symbol_tone_mags(wave, nsps, FST4_RATE as f32, FST4_HMOD, fst4_f0(base, nsps));
-        (0..FST4_NN)
-            .filter_map(|s| fst4_sync_tone(s).map(|t| mags[s][t as usize]))
-            .sum()
+        use crate::types::Cplx;
+        let f0 = fst4_f0(base, nsps);
+        let baud = FST4_RATE as f32 / nsps as f32;
+        let freqs = fst4_tone_freqs(f0, FST4_HMOD, baud);
+        let twopi = 2.0 * std::f32::consts::PI;
+        let mut score = 0.0f32;
+        for s in 0..FST4_NN {
+            let Some(t) = fst4_sync_tone(s) else { continue };
+            let ft = freqs[t as usize];
+            let base_n = s * nsps;
+            let rot = Cplx::from_polar(1.0, -twopi * ft / FST4_RATE as f32);
+            let mut ph = Cplx::from_polar(1.0, -twopi * ft * base_n as f32 / FST4_RATE as f32);
+            let mut acc = Cplx::new(0.0, 0.0);
+            for k in 0..nsps {
+                acc += ph * wave[base_n + k];
+                ph *= rot;
+            }
+            score += acc.norm();
+        }
+        score
     }
 }
 
