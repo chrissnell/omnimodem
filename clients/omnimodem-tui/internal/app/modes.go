@@ -30,6 +30,7 @@ var modes = []modeInfo{
 	{"ft4", "sequencer", 7.5, nil},
 	{"jt65", "sequencer", 60, nil},
 	{"jt9", "sequencer", 60, nil},
+	{"fst4", "sequencer", 15, nil}, // LF/MF weak-signal QSO; default 15 s T/R
 	{"wspr", "beacon", 120, nil},
 }
 
