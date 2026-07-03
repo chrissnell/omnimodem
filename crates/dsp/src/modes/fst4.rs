@@ -189,6 +189,62 @@ pub fn fst4_demod_soft(wave: &[f32], nsps: usize, fsample: f32, hmod: u32, f0: f
     llrs
 }
 
+
+/// FST4 24-bit CRC generator polynomial 0x100065b, as the 25-bit array the
+/// reference divides by. ref: wsjtx/lib/fst4/get_crc24.f90 (`data p`).
+const FST4_CRC24_P: [u8; 25] = [
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1,
+];
+
+/// The 77-bit `rvec` pseudo-random scramble XORed into the FST4 payload before
+/// the CRC. ref: wsjtx/lib/fst4/genfst4.f90 (`data rvec`).
+const FST4_RVEC: [u8; 77] = [
+    0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0,
+    1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+    1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1,
+];
+
+/// FST4 24-bit CRC over the first `len` bits of `mc` (bit-serial division by the
+/// 0x100065b polynomial). To generate, pass a length-`len` array whose last 24
+/// bits are zero; to check, pass message+CRC and expect 0. ref: get_crc24.f90.
+pub fn fst4_crc24(mc: &[u8], len: usize) -> u32 {
+    let mut r = [0u8; 25];
+    r.copy_from_slice(&mc[0..25]);
+    for i in 0..=(len - 25) {
+        r[24] = mc[i + 24]; // mc(i+25), 1-origin
+        if r[0] == 1 {
+            for (rk, pk) in r.iter_mut().zip(FST4_CRC24_P.iter()) {
+                *rk ^= *pk;
+            }
+        }
+        let first = r[0]; // cshift(r, 1): rotate left
+        for k in 0..24 {
+            r[k] = r[k + 1];
+        }
+        r[24] = first;
+    }
+    let mut crc = 0u32; // r(1:24), MSB first
+    for &b in r.iter().take(24) {
+        crc = (crc << 1) | b as u32;
+    }
+    crc
+}
+
+/// Assemble the 101 FST4 LDPC message bits from a 77-bit packed payload:
+/// XOR the `rvec` scramble into the payload, then append its 24-bit CRC.
+/// ref: genfst4.f90 (main path: `msgbits(1:77)=payload+rvec`, CRC-24 in 78:101).
+pub fn fst4_msgbits_from_payload(payload: &[u8; 77]) -> [u8; 101] {
+    let mut mc = [0u8; 101];
+    for i in 0..77 {
+        mc[i] = (payload[i] ^ FST4_RVEC[i]) & 1;
+    }
+    let crc = fst4_crc24(&mc, 101); // last 24 bits still zero here
+    for i in 0..24 {
+        mc[77 + i] = ((crc >> (23 - i)) & 1) as u8;
+    }
+    mc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +292,31 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(maxerr < 1e-3, "GFSK wave max abs error {maxerr} exceeds tolerance");
+    }
+
+    #[test]
+    fn fst4_crc24_matches_wsjtx_reference() {
+        // Fixed pattern: first 77 bits = 1,1,0,0 repeating; last 24 zero.
+        let mut mc = [0u8; 101];
+        for (i, b) in mc.iter_mut().take(77).enumerate() {
+            *b = u8::from(i % 4 < 2);
+        }
+        assert_eq!(fst4_crc24(&mc, 101), 7_450_690, "CRC-24 differs from get_crc24");
+    }
+
+    #[test]
+    fn fst4_msgbits_crc_is_self_consistent() {
+        // A payload -> msgbits(101) whose appended CRC checks to zero, and whose
+        // scramble is involutive (rvec twice returns the payload).
+        let mut payload = [0u8; 77];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = u8::from((i * 5 + 3) % 7 < 3);
+        }
+        let mc = fst4_msgbits_from_payload(&payload);
+        assert_eq!(fst4_crc24(&mc, 101), 0, "assembled CRC must self-check to 0");
+        for i in 0..77 {
+            assert_eq!(mc[i] ^ FST4_RVEC[i], payload[i], "rvec must be recoverable");
+        }
     }
 
     #[test]
