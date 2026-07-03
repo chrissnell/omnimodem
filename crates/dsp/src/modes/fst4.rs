@@ -245,6 +245,17 @@ pub fn fst4_msgbits_from_payload(payload: &[u8; 77]) -> [u8; 101] {
     mc
 }
 
+/// Recover the 77-bit payload from decoded 101 message bits: strip the CRC and
+/// undo the `rvec` scramble. Inverse of the payload step in
+/// [`fst4_msgbits_from_payload`]. ref: genfst4.f90 (msgbits(1:77)=payload+rvec).
+pub fn fst4_payload_from_msgbits(msgbits: &[u8; 101]) -> [u8; 77] {
+    let mut payload = [0u8; 77];
+    for (i, p) in payload.iter_mut().enumerate() {
+        *p = (msgbits[i] ^ FST4_RVEC[i]) & 1;
+    }
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +327,37 @@ mod tests {
         assert_eq!(fst4_crc24(&mc, 101), 0, "assembled CRC must self-check to 0");
         for i in 0..77 {
             assert_eq!(mc[i] ^ FST4_RVEC[i], payload[i], "rvec must be recoverable");
+        }
+    }
+
+    #[test]
+    fn fst4_text_to_air_to_text_loopback() {
+        use crate::fec::ldpc_fst4::fst4_240_101_code;
+        use crate::framing::pack77::{pack77_standard, unpack77_standard};
+        let nsps = 720;
+        let fsample = 12000.0;
+        let hmod = 1;
+        let baud = fsample / nsps as f32;
+        let f0 = 1500.0 + 1.5 * hmod as f32 * baud;
+        let code = fst4_240_101_code();
+        for msg in ["CQ K1ABC FN42", "K1ABC W9XYZ RR73", "W9XYZ K1ABC -11"] {
+            // TX: message -> 77-bit payload -> msgbits -> tones -> wave.
+            let payload = pack77_standard(msg).unwrap();
+            let msgbits = fst4_msgbits_from_payload(&payload);
+            let tones = fst4_tones_from_msgbits(&msgbits);
+            let wave = fst4_gen_wave(&tones, nsps, fsample, hmod, f0);
+            // RX: wave -> soft demap -> LDPC decode -> payload -> message.
+            let llrs = fst4_demod_soft(&wave, nsps, fsample, hmod, f0);
+            let (hard, errs) = code.decode_minsum(&llrs, 80);
+            assert_eq!(errs, 0, "{msg}: LDPC parity unsatisfied");
+            let mut rx_bits = [0u8; 101];
+            rx_bits.copy_from_slice(&hard[..101]);
+            let rx_payload = fst4_payload_from_msgbits(&rx_bits);
+            assert_eq!(
+                unpack77_standard(&rx_payload).as_deref(),
+                Some(msg),
+                "text round-trip failed for {msg}"
+            );
         }
     }
 
