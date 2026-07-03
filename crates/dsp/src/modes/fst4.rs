@@ -3,7 +3,10 @@
 //! (message bits → 160 4-GFSK tone indices); the windowed block demod + GFSK
 //! waveform build on it. ref: wsjtx/lib/fst4/genfst4.f90, fst4_params.f90.
 
-use crate::fec::ldpc_fst4::encode_240_101;
+use crate::fec::ldpc_fst4::{encode_240_101, fst4_240_101_code};
+use crate::framing::pack77::{pack77_standard, unpack77_standard};
+use crate::mode::{BlockDemodulator, DemodShape, Duplex, ModError, ModeCaps, Modulator};
+use crate::types::{Frame, FrameMeta, FramePayload, Sample};
 
 /// Total tone/symbol count: 40 sync + 120 data. ref: fst4_params.f90 (NN).
 pub const FST4_NN: usize = 160;
@@ -142,24 +145,74 @@ fn fst4_symbol_tone_mags(wave: &[f32], nsps: usize, fsample: f32, hmod: u32, f0:
     let baud = fsample / nsps as f32;
     let freqs = fst4_tone_freqs(f0, hmod, baud);
     let twopi = 2.0 * std::f32::consts::PI;
+    // Per-tone down-conversion via an incremental phasor (one complex multiply
+    // per sample instead of a transcendental), rebased each symbol.
+    let rot: Vec<Cplx> = freqs.iter().map(|&ft| Cplx::from_polar(1.0, -twopi * ft / fsample)).collect();
     let mut out = Vec::with_capacity(FST4_NN);
     for s in 0..FST4_NN {
+        let base = s * nsps;
         let mut mags = [0.0f32; 4];
         for (t, &ft) in freqs.iter().enumerate() {
-            let w = twopi * ft / fsample;
+            let mut ph = Cplx::from_polar(1.0, -twopi * ft * base as f32 / fsample);
             let mut acc = Cplx::new(0.0, 0.0);
             for k in 0..nsps {
-                let n = s * nsps + k;
+                let n = base + k;
                 if n >= wave.len() {
                     break;
                 }
-                acc += Cplx::new(0.0, -(w * n as f32)).exp() * wave[n];
+                acc += ph * wave[n];
+                ph *= rot[t];
             }
             mags[t] = acc.norm();
         }
         out.push(mags);
     }
     out
+}
+
+/// FST4 native audio rate (Hz). ref: fst4sim.f90 (fsample = 12000).
+pub const FST4_RATE: u32 = 12_000;
+/// FST4 modulation index. ref: fst4sim.f90 (hmod = 1).
+pub const FST4_HMOD: u32 = 1;
+
+/// Samples per symbol for a T/R period (seconds). ref: fst4sim.f90 nsps table.
+pub fn fst4_nsps(tr_s: u32) -> Option<usize> {
+    Some(match tr_s {
+        15 => 720,
+        30 => 1680,
+        60 => 3888,
+        120 => 8200,
+        300 => 21504,
+        900 => 66560,
+        1800 => 134400,
+        _ => return None,
+    })
+}
+
+/// The internal `f0` for a tone-0 (lowest-tone) audio frequency `base_hz`: the
+/// four tones then sit at `base_hz + hmod*baud*t`. ref: gen_fst4wave layout.
+fn fst4_f0(base_hz: f32, nsps: usize) -> f32 {
+    let baud = FST4_RATE as f32 / nsps as f32;
+    base_hz + 1.5 * FST4_HMOD as f32 * baud
+}
+
+/// The expected sync-word tone at frame symbol position `sym`, or `None` for a
+/// data position. Frame: `s8 d30 s8 d30 s8 d30 s8 d30 s8` with alternating
+/// sync words. ref: genfst4.f90 (i4tone sync placement).
+fn fst4_sync_tone(sym: usize) -> Option<u8> {
+    let syncs: [(std::ops::Range<usize>, &[u8; 8]); 5] = [
+        (0..8, &FST4_SYNC1),
+        (38..46, &FST4_SYNC2),
+        (76..84, &FST4_SYNC1),
+        (114..122, &FST4_SYNC2),
+        (152..160, &FST4_SYNC1),
+    ];
+    for (r, sw) in syncs {
+        if r.contains(&sym) {
+            return Some(sw[sym - r.start]);
+        }
+    }
+    None
 }
 
 /// Soft-decode the FST4 audio to 240 codeword-bit LLRs (`L = ln P(0)/P(1)`,
@@ -256,6 +309,126 @@ pub fn fst4_payload_from_msgbits(msgbits: &[u8; 101]) -> [u8; 77] {
     payload
 }
 
+fn fst4_caps(tr_s: u32, tx: bool) -> ModeCaps {
+    ModeCaps {
+        native_rate: FST4_RATE,
+        bandwidth_hz: 4.0 * FST4_RATE as f32 / fst4_nsps(tr_s).unwrap_or(720) as f32,
+        tx,
+        duplex: Duplex::Half,
+        shape: DemodShape::Windowed { window_s: tr_s as f32, period_s: tr_s as f32 },
+    }
+}
+
+/// FST4 windowed transmitter: a standard-message text payload → 4-GFSK audio.
+pub struct Fst4Mod {
+    tr_s: u32,
+    base_hz: f32,
+}
+
+impl Fst4Mod {
+    /// Build for a T/R period (seconds); tone 0 lands at `base_hz` (default 1500).
+    pub fn new(tr_s: u32) -> Self {
+        Fst4Mod { tr_s, base_hz: 1500.0 }
+    }
+    pub fn with_base(tr_s: u32, base_hz: f32) -> Self {
+        Fst4Mod { tr_s, base_hz }
+    }
+}
+
+impl Modulator for Fst4Mod {
+    fn caps(&self) -> ModeCaps {
+        fst4_caps(self.tr_s, true)
+    }
+
+    fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
+        let msg = match &frame.payload {
+            FramePayload::Text(t) => t.clone(),
+            _ => return Err(ModError::UnsupportedPayload("fst4 needs text")),
+        };
+        let nsps = fst4_nsps(self.tr_s).ok_or(ModError::Encode(format!("bad T/R {}", self.tr_s)))?;
+        let payload = pack77_standard(&msg)
+            .ok_or_else(|| ModError::Encode(format!("unsupported fst4 message: {msg:?}")))?;
+        let msgbits = fst4_msgbits_from_payload(&payload);
+        let tones = fst4_tones_from_msgbits(&msgbits);
+        Ok(fst4_gen_wave(&tones, nsps, FST4_RATE as f32, FST4_HMOD, fst4_f0(self.base_hz, nsps)))
+    }
+}
+
+/// FST4 windowed (block) receiver: searches an audio band for the sync pattern,
+/// then soft-demaps + LDPC-decodes + unpacks the standard message.
+pub struct Fst4Demod {
+    tr_s: u32,
+    f_lo: f32,
+    f_hi: f32,
+}
+
+impl Fst4Demod {
+    pub fn new(tr_s: u32) -> Self {
+        Fst4Demod { tr_s, f_lo: 200.0, f_hi: 2800.0 }
+    }
+    /// Restrict the tone-0 search band (Hz). Narrower = faster.
+    pub fn with_band(tr_s: u32, f_lo: f32, f_hi: f32) -> Self {
+        Fst4Demod { tr_s, f_lo, f_hi }
+    }
+
+    /// Sum of sync-tone magnitudes for a candidate tone-0 frequency `base`.
+    fn sync_score(&self, wave: &[f32], nsps: usize, base: f32) -> f32 {
+        let mags = fst4_symbol_tone_mags(wave, nsps, FST4_RATE as f32, FST4_HMOD, fst4_f0(base, nsps));
+        (0..FST4_NN)
+            .filter_map(|s| fst4_sync_tone(s).map(|t| mags[s][t as usize]))
+            .sum()
+    }
+}
+
+impl BlockDemodulator for Fst4Demod {
+    fn caps(&self) -> ModeCaps {
+        fst4_caps(self.tr_s, false)
+    }
+
+    fn decode_window(&mut self, window: &[Sample], window_start_ns: u64) -> Vec<Frame> {
+        let Some(nsps) = fst4_nsps(self.tr_s) else {
+            return Vec::new();
+        };
+        if window.len() < FST4_NN * nsps {
+            return Vec::new();
+        }
+        let baud = FST4_RATE as f32 / nsps as f32;
+        // Coarse tone-0 search over the band at ~quarter-baud steps (the sync
+        // words are Costas-like, so the true frequency peaks sharply).
+        let step = (baud / 4.0).max(1.0);
+        let mut best = (f32::MIN, self.f_lo);
+        let mut base = self.f_lo;
+        while base <= self.f_hi {
+            let score = self.sync_score(window, nsps, base);
+            if score > best.0 {
+                best = (score, base);
+            }
+            base += step;
+        }
+        let f0 = fst4_f0(best.1, nsps);
+        let llrs = fst4_demod_soft(window, nsps, FST4_RATE as f32, FST4_HMOD, f0);
+        let (hard, errs) = fst4_240_101_code().decode_minsum(&llrs, 80);
+        if errs != 0 {
+            return Vec::new();
+        }
+        let mut bits = [0u8; 101];
+        bits.copy_from_slice(&hard[..101]);
+        let payload = fst4_payload_from_msgbits(&bits);
+        match unpack77_standard(&payload) {
+            Some(text) => vec![Frame {
+                payload: FramePayload::Text(text),
+                meta: FrameMeta {
+                    freq_offset_hz: Some(best.1),
+                    crc_ok: true,
+                    sample_offset: window_start_ns,
+                    ..Default::default()
+                },
+            }],
+            None => Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +501,32 @@ mod tests {
         for i in 0..77 {
             assert_eq!(mc[i] ^ FST4_RVEC[i], payload[i], "rvec must be recoverable");
         }
+    }
+
+    #[test]
+    fn fst4_mode_traits_loopback_with_freq_search() {
+        // Modulate a message at a non-default tone-0 frequency, then let the
+        // BlockDemodulator find it by sync search and decode it back.
+        let mut m = Fst4Mod::with_base(15, 1200.0);
+        let wave = m
+            .modulate(&Frame::text("CQ K1ABC FN42"))
+            .expect("modulate");
+        // Search a band that brackets 1200 Hz (narrow to keep the test quick).
+        let mut d = Fst4Demod::with_band(15, 1140.0, 1260.0);
+        let frames = d.decode_window(&wave, 0);
+        assert_eq!(frames.len(), 1, "expected one decode");
+        match &frames[0].payload {
+            FramePayload::Text(t) => assert_eq!(t, "CQ K1ABC FN42"),
+            other => panic!("unexpected payload {other:?}"),
+        }
+        // The recovered tone-0 frequency should be within a baud of 1200 Hz.
+        assert!((frames[0].meta.freq_offset_hz.unwrap() - 1200.0).abs() < 17.0);
+    }
+
+    #[test]
+    fn fst4_mod_rejects_unsupported_message() {
+        let mut m = Fst4Mod::new(15);
+        assert!(m.modulate(&Frame::text("this is free text not a call")).is_err());
     }
 
     #[test]
