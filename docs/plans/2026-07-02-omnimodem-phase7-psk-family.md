@@ -75,6 +75,8 @@
 
 # Task 0 — The `multicarrier` building block (KAT-gated in isolation first)
 
+> **✅ Done (commit 3781d3e), both KATs green.** **Deviation from the draft below:** the draft `modulate_symbols` blended `prev→cur` across each symbol (fldigi `tx_shape`) and `demodulate` integrate-and-dumped — that averages a phase reversal to ~0 and is not invertible, so the round-trip KAT failed. The landed block holds each symbol's phasor **constant** over its `sps` samples (cleanly invertible); fldigi's raised-cosine TX pulse shaping is deferred to the **mode assemblies** (Tasks 1–4), where the cross-decode gate enforces its fidelity. The `tx_shape`/`prev` code in the draft is superseded.
+
 **Rationale:** the `nX_PSK*R` grid needs N parallel carriers; fldigi builds this into the modem loop, but per the doctrine we isolate it as a reusable block and KAT it standalone **before** any mode depends on it, so a multi-carrier decode failure localizes to the block, not the mode.
 
 **Files:**
