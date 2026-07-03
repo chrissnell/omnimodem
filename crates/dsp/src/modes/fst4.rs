@@ -122,6 +122,73 @@ pub fn fst4_gen_wave(itone: &[u8], nsps: usize, fsample: f32, hmod: u32, f0: f32
     wave
 }
 
+/// The four FST4 tone frequencies (Hz) for the given base `f0`, mod index and
+/// baud. Tone `t` (0..3) sits at `f0 + hmod*baud*(t - 1.5)`. ref: gen_fst4wave
+/// frequency layout (dphi_peak + the `-1.5*hmod/tsym` base shift).
+fn fst4_tone_freqs(f0: f32, hmod: u32, baud: f32) -> [f32; 4] {
+    let mut f = [0.0f32; 4];
+    for (t, ft) in f.iter_mut().enumerate() {
+        *ft = f0 + hmod as f32 * baud * (t as f32 - 1.5);
+    }
+    f
+}
+
+/// Non-coherent per-symbol tone magnitudes: for each of `FST4_NN` symbols,
+/// correlate its `nsps`-sample window against the four tone frequencies and
+/// return `|correlation|`. This is the front end for both hard-tone recovery
+/// and soft-LLR demapping.
+fn fst4_symbol_tone_mags(wave: &[f32], nsps: usize, fsample: f32, hmod: u32, f0: f32) -> Vec<[f32; 4]> {
+    use crate::types::Cplx;
+    let baud = fsample / nsps as f32;
+    let freqs = fst4_tone_freqs(f0, hmod, baud);
+    let twopi = 2.0 * std::f32::consts::PI;
+    let mut out = Vec::with_capacity(FST4_NN);
+    for s in 0..FST4_NN {
+        let mut mags = [0.0f32; 4];
+        for (t, &ft) in freqs.iter().enumerate() {
+            let w = twopi * ft / fsample;
+            let mut acc = Cplx::new(0.0, 0.0);
+            for k in 0..nsps {
+                let n = s * nsps + k;
+                if n >= wave.len() {
+                    break;
+                }
+                acc += Cplx::new(0.0, -(w * n as f32)).exp() * wave[n];
+            }
+            mags[t] = acc.norm();
+        }
+        out.push(mags);
+    }
+    out
+}
+
+/// Soft-decode the FST4 audio to 240 codeword-bit LLRs (`L = ln P(0)/P(1)`,
+/// positive ⇒ bit 0) ready for [`crate::fec::ldpc_fst4::fst4_240_101_code`].
+/// Skips the five sync words, un-Gray-maps each data tone into its (MSB, LSB)
+/// bit-pair LLRs via a max-log metric over the four tone magnitudes.
+/// ref: genfst4.f90 (Gray map) inverted; frame `s8 d30 s8 d30 s8 d30 s8 d30 s8`.
+pub fn fst4_demod_soft(wave: &[f32], nsps: usize, fsample: f32, hmod: u32, f0: f32) -> Vec<f32> {
+    let mags = fst4_symbol_tone_mags(wave, nsps, fsample, hmod, f0);
+    // The 120 data-symbol positions, in codeword order (sync words removed).
+    // Frame: s8 d30 s8 d30 s8 d30 s8 d30 s8.
+    let data_ranges = [8usize..38, 46..76, 84..114, 122..152];
+    let mut llrs = vec![0.0f32; 2 * FST4_ND];
+    let mut di = 0usize;
+    for r in data_ranges {
+        for sym in r {
+            let m = &mags[sym];
+            // Gray: tone0=(msb0,lsb0) tone1=(msb0,lsb1) tone2=(msb1,lsb1) tone3=(msb1,lsb0).
+            // MSB=0 → {0,1}, MSB=1 → {2,3};  LSB=0 → {0,3}, LSB=1 → {1,2}.
+            let msb = m[0].max(m[1]) - m[2].max(m[3]);
+            let lsb = m[0].max(m[3]) - m[1].max(m[2]);
+            llrs[2 * di] = msb; // codeword bit 2i   (MSB)
+            llrs[2 * di + 1] = lsb; // codeword bit 2i+1 (LSB)
+            di += 1;
+        }
+    }
+    llrs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +236,37 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(maxerr < 1e-3, "GFSK wave max abs error {maxerr} exceeds tolerance");
+    }
+
+    #[test]
+    fn fst4_full_loopback_recovers_message() {
+        use crate::fec::ldpc_fst4::fst4_240_101_code;
+        // A representative 101-bit message (payload+CRC bit domain).
+        let mut msgbits = [0u8; 101];
+        for (i, b) in msgbits.iter_mut().enumerate() {
+            *b = u8::from((i * 3 + 1) % 5 < 2);
+        }
+        let nsps = 720; // TR = 15 s
+        let fsample = 12000.0;
+        let hmod = 1;
+        let baud = fsample / nsps as f32;
+        let f0 = 1500.0 + 1.5 * hmod as f32 * baud; // center the 4-tone cluster near 1500 Hz
+
+        let tones = fst4_tones_from_msgbits(&msgbits);
+        let wave = fst4_gen_wave(&tones, nsps, fsample, hmod, f0);
+
+        // Front end recovers every transmitted tone (hard) at high SNR.
+        let mags = fst4_symbol_tone_mags(&wave, nsps, fsample, hmod, f0);
+        for (s, m) in mags.iter().enumerate() {
+            let hard = (0..4).max_by(|&a, &b| m[a].partial_cmp(&m[b]).unwrap()).unwrap() as u8;
+            assert_eq!(hard, tones[s], "tone {s} misdetected");
+        }
+
+        // Soft demap + LDPC decode recovers the message bit-for-bit.
+        let llrs = fst4_demod_soft(&wave, nsps, fsample, hmod, f0);
+        let (hard, errs) = fst4_240_101_code().decode_minsum(&llrs, 50);
+        assert_eq!(errs, 0, "LDPC left unsatisfied checks after loopback");
+        assert_eq!(&hard[..101], &msgbits[..], "loopback did not recover the message");
     }
 
     #[test]
