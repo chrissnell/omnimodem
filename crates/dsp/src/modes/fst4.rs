@@ -475,7 +475,10 @@ mod tests {
     }
 
     /// Golden GFSK wave from the UNMODIFIED gen_fst4wave (nsym=4, nsps=16,
-    /// itone=0,1,2,3). ref: scratch/refvectors/build_fst4_wave.sh.
+    /// itone=0,1,2,3). ref: scratch/refvectors/build_fst4_wave.sh. The literals
+    /// are the reference's 8-decimal output verbatim (extra digits beyond f32
+    /// precision are harmless — the KAT compares within 1e-3).
+    #[allow(clippy::excessive_precision)]
     const REF_WAVE: [f32; 96] = [
     0.00000000, 0.02857032, 0.19134173, 0.47420889, 0.70710677, 0.83146966, 0.92387950, 0.98076659,
     1.00000000, 0.98080397, 0.92391616, 0.83146954, 0.70710677, 0.55485255, 0.37105003, 0.11574722,
