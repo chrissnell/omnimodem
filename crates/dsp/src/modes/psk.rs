@@ -25,6 +25,7 @@ use crate::framing::varicode::{
 };
 use crate::frontend::fir::{design_lowpass, Fir};
 use crate::frontend::modulate::DiffPsk;
+use crate::frontend::multicarrier::MultiCarrier;
 use crate::frontend::nco::DownConverter;
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
 use crate::sync::costas::CostasLoop;
@@ -58,6 +59,14 @@ pub enum PskVariant {
     Psk250R,
     Psk500R,
     Psk1000R,
+    // Multi-carrier robust `nX_PSK63R` grid: the PSK-R core over N frequency-
+    // offset carriers. Only the even-carrier counts are ported so far — the
+    // odd-carrier modes need fldigi's alternating pair-phase handling (the "even
+    // ⇒ known bit-order" branch of rx_pskr). ref: psk.cxx:688-724.
+    Psk63Rc4,
+    Psk63Rc10,
+    Psk63Rc20,
+    Psk63Rc32,
 }
 
 /// Resolved per-variant parameters. ref: psk.cxx:382-687.
@@ -73,39 +82,47 @@ pub struct PskParams {
     pub robust: bool,
     /// Diagonal-interleaver depth (`2×2×idepth`); 0 = no interleaver (PSK63F).
     pub idepth: usize,
+    /// Number of frequency-offset carriers (1 = single-carrier).
+    pub carriers: usize,
 }
 
 impl PskVariant {
-    /// ref: psk.cxx:382-687 (symbollen/dcdbits/_qpsk/_pskr/idepth switch).
+    /// ref: psk.cxx:382-724 (symbollen/dcdbits/_qpsk/_pskr/idepth/numcarriers).
     pub fn params(self) -> PskParams {
         use PskVariant::*;
-        let p = |symbollen, dcdbits, qpsk, robust, idepth| PskParams {
+        let p = |symbollen, dcdbits, qpsk, robust, idepth, carriers| PskParams {
             symbollen,
             dcdbits,
             qpsk,
             robust,
             idepth,
+            carriers,
         };
         match self {
-            Psk31 => p(256, 32, false, false, 0),
-            Psk63 => p(128, 64, false, false, 0),
-            Psk125 => p(64, 128, false, false, 0),
-            Psk250 => p(32, 256, false, false, 0),
-            Psk500 => p(16, 512, false, false, 0),
-            Psk1000 => p(8, 128, false, false, 0),
+            Psk31 => p(256, 32, false, false, 0, 1),
+            Psk63 => p(128, 64, false, false, 0, 1),
+            Psk125 => p(64, 128, false, false, 0, 1),
+            Psk250 => p(32, 256, false, false, 0, 1),
+            Psk500 => p(16, 512, false, false, 0, 1),
+            Psk1000 => p(8, 128, false, false, 0, 1),
             // QPSK: same symbol rates, 2 bits/symbol, K=5 FEC. ref: psk.cxx:414-444.
-            Qpsk31 => p(256, 32, true, false, 0),
-            Qpsk63 => p(128, 64, true, false, 0),
-            Qpsk125 => p(64, 128, true, false, 0),
-            Qpsk250 => p(32, 256, true, false, 0),
-            Qpsk500 => p(16, 512, true, false, 0),
+            Qpsk31 => p(256, 32, true, false, 0, 1),
+            Qpsk63 => p(128, 64, true, false, 0, 1),
+            Qpsk125 => p(64, 128, true, false, 0, 1),
+            Qpsk250 => p(32, 256, true, false, 0, 1),
+            Qpsk500 => p(16, 512, true, false, 0, 1),
             // BPSK63 + FEC (no interleaver). ref: psk.cxx:448-451.
-            Psk63F => p(128, 64, false, true, 0),
+            Psk63F => p(128, 64, false, true, 0, 1),
             // PSK-R robust: K=7 FEC + 2×2×idepth interleaver. ref: psk.cxx:658-685.
-            Psk125R => p(64, 128, false, true, 40),
-            Psk250R => p(32, 256, false, true, 80),
-            Psk500R => p(16, 512, false, true, 160),
-            Psk1000R => p(8, 512, false, true, 160),
+            Psk125R => p(64, 128, false, true, 40, 1),
+            Psk250R => p(32, 256, false, true, 80, 1),
+            Psk500R => p(16, 512, false, true, 160, 1),
+            Psk1000R => p(8, 512, false, true, 160, 1),
+            // Multi-carrier nX_PSK63R (symbollen 128). ref: psk.cxx:688-724.
+            Psk63Rc4 => p(128, 128, false, true, 80, 4),
+            Psk63Rc10 => p(128, 512, false, true, 160, 10),
+            Psk63Rc20 => p(128, 512, false, true, 160, 20),
+            Psk63Rc32 => p(128, 512, false, true, 160, 32),
         }
     }
 
@@ -128,6 +145,11 @@ impl PskVariant {
     /// Diagonal-interleaver depth (0 = none). ref: psk.cxx:658-685.
     pub fn idepth(self) -> usize {
         self.params().idepth
+    }
+
+    /// Number of frequency-offset carriers (1 = single-carrier).
+    pub fn carriers(self) -> usize {
+        self.params().carriers
     }
 
     /// The convolutional code for the FEC-bearing modes: K=5 (POLY 0x17/0x19)
@@ -163,6 +185,10 @@ impl PskVariant {
             "psk250r" => Psk250R,
             "psk500r" => Psk500R,
             "psk1000r" => Psk1000R,
+            "psk63rc4" => Psk63Rc4,
+            "psk63rc10" => Psk63Rc10,
+            "psk63rc20" => Psk63Rc20,
+            "psk63rc32" => Psk63Rc32,
             _ => return None,
         })
     }
@@ -186,6 +212,10 @@ impl PskVariant {
             Psk250R => "psk250r",
             Psk500R => "psk500r",
             Psk1000R => "psk1000r",
+            Psk63Rc4 => "psk63rc4",
+            Psk63Rc10 => "psk63rc10",
+            Psk63Rc20 => "psk63rc20",
+            Psk63Rc32 => "psk63rc32",
         }
     }
 }
@@ -303,6 +333,33 @@ impl PskMod {
         rev.extend(std::iter::repeat_n(1u32, 2 * (pp.idepth + 2 * ROBUST_TRACEBACK)));
         rev
     }
+
+    /// Multi-carrier robust audio: the single-carrier robust reversal stream is
+    /// distributed round-robin across `carriers` frequency-offset carriers
+    /// (symbol `i` → carrier `i % N`, as fldigi's `tx_symbol` fills carriers in
+    /// turn before `tx_carriers` emits them; ref psk.cxx:2310-2318), each carrier
+    /// differentially BPSK-modulated at its own frequency and summed (÷N). The
+    /// carrier layout matches `MultiCarrier` (spacing 1.4·sc_bw).
+    fn robust_multicarrier_audio(&self, text: &str) -> Vec<Sample> {
+        let pp = self.v.params();
+        let n = pp.carriers;
+        let sps = pp.symbollen;
+        let mut stream = self.robust_rev_stream(text);
+        while !stream.len().is_multiple_of(n) {
+            stream.push(1); // pad with reversals so every carrier gets equal count
+        }
+        let per = stream.len() / n;
+        let mc = MultiCarrier::new(PSK_RATE as f32, self.center_hz, sps, n);
+        let mut out = vec![0.0f32; per * sps];
+        for c in 0..n {
+            let sub: Vec<u32> = (0..per).map(|k| stream[k * n + c]).collect();
+            let audio = DiffPsk::new(PSK_RATE as f32, mc.carrier_hz(c), sps, 1).modulate(&sub);
+            for (o, &s) in out.iter_mut().zip(audio.iter()) {
+                *o += s / n as f32;
+            }
+        }
+        out
+    }
 }
 
 impl Modulator for PskMod {
@@ -322,7 +379,9 @@ impl Modulator for PskMod {
             _ => return Err(ModError::UnsupportedPayload("psk needs text")),
         };
         let sps = self.v.samples_per_symbol();
-        if self.v.is_qpsk() {
+        if self.v.carriers() > 1 {
+            Ok(self.robust_multicarrier_audio(text))
+        } else if self.v.is_qpsk() {
             let rot = self.qpsk_rot_stream(text);
             let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, sps, 2);
             Ok(psk.modulate(&rot))
@@ -375,6 +434,9 @@ pub struct PskDemod {
     // Robust (`+F`/PSK-R) only: the streaming two-phase K=7 decoder. `None`
     // otherwise.
     robust: Option<RobustRx>,
+    // Multi-carrier robust (nX) only: the N-carrier front-end + combiner. When
+    // set, `feed` delegates to it entirely.
+    mc: Option<MultiCarrierRx>,
 }
 
 /// Viterbi traceback depth for the K=5 QPSK stream (~6× constraint length).
@@ -467,6 +529,108 @@ impl RobustRx {
     }
 }
 
+/// Multi-carrier robust receiver: one down-converter + matched filter +
+/// differential detector per frequency-offset carrier, sharing a symbol clock
+/// and feeding one combined soft-bit stream (round-robin in carrier order, the
+/// inverse of the TX distribution) into a single `RobustRx`. Non-coherent (like
+/// QPSK, no Costas), which suits the many-carrier grid. ref: psk.cxx:2008-2013
+/// (rx carrier freqs), 1216-1290 (rx_pskr combine).
+struct MultiCarrierRx {
+    sps: usize,
+    n: usize,
+    down: Vec<DownConverter>,
+    lpf_i: Vec<Fir>,
+    lpf_q: Vec<Fir>,
+    acc: Vec<Cplx>,
+    prev: Vec<Cplx>,
+    have_prev: Vec<bool>,
+    tm: TransitionMinimizer,
+    since_dump: usize,
+    sample_index: u64,
+    robust: RobustRx,
+    label: &'static str,
+}
+
+impl MultiCarrierRx {
+    fn new(v: PskVariant, center_hz: f32) -> Self {
+        let pp = v.params();
+        let rate = PSK_RATE as f32;
+        let n = pp.carriers;
+        let mc = MultiCarrier::new(rate, center_hz, pp.symbollen, n);
+        // Per-carrier matched filter: carriers sit 1.4·baud apart, so the cutoff
+        // must stay well below that (unlike the single-carrier squelch LPF) or the
+        // adjacent carrier leaks in and swamps the differential decode. 0.6·baud
+        // passes the symbol's main lobe while rejecting the neighbour.
+        let cutoff = (v.baud() * 0.6).max(60.0);
+        let taps = design_lowpass(SQUELCH_TAPS, cutoff, rate);
+        MultiCarrierRx {
+            sps: pp.symbollen,
+            n,
+            down: (0..n).map(|c| DownConverter::new(mc.carrier_hz(c), rate)).collect(),
+            lpf_i: (0..n).map(|_| Fir::new(taps.clone())).collect(),
+            lpf_q: (0..n).map(|_| Fir::new(taps.clone())).collect(),
+            acc: vec![Cplx::new(0.0, 0.0); n],
+            prev: vec![Cplx::new(0.0, 0.0); n],
+            have_prev: vec![false; n],
+            tm: TransitionMinimizer::new(pp.symbollen),
+            since_dump: 0,
+            sample_index: 0,
+            robust: RobustRx::new(&v.conv_code().unwrap(), pp.idepth),
+            label: v.label(),
+        }
+    }
+
+    fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
+        let mut out = Vec::new();
+        for &x in samples {
+            self.sample_index += 1;
+            let mut f0 = Cplx::new(0.0, 0.0);
+            for c in 0..self.n {
+                let bb = self.down[c].push(x);
+                let f = Cplx::new(self.lpf_i[c].push(bb.re), self.lpf_q[c].push(bb.im));
+                self.acc[c] += f;
+                if c == 0 {
+                    f0 = f;
+                }
+            }
+            self.since_dump += 1;
+            self.tm.feed(f0.norm());
+            let boundary = self.tm.transition_phase() as u64;
+            let at_boundary = self.sample_index % self.sps as u64 == boundary
+                && self.since_dump + 1 >= self.sps;
+            if at_boundary || self.since_dump >= self.sps + 2 {
+                self.since_dump = 0;
+                // Combine carriers round-robin: at this symbol instant each carrier
+                // carries the next symbol of the interleaved stream, in carrier
+                // order — the inverse of the TX round-robin.
+                for c in 0..self.n {
+                    let sym = self.acc[c];
+                    self.acc[c] = Cplx::new(0.0, 0.0);
+                    if self.have_prev[c] {
+                        let dot = sym.re * self.prev[c].re + sym.im * self.prev[c].im;
+                        let norm = (self.prev[c].norm() * sym.norm()).max(1e-9);
+                        self.robust.push_symbol(-QPSK_LLR * (dot / norm));
+                    }
+                    self.prev[c] = sym;
+                    self.have_prev[c] = true;
+                }
+                if let Some(text) = self.robust.drain() {
+                    out.push(Frame {
+                        payload: FramePayload::Text(text),
+                        meta: FrameMeta {
+                            crc_ok: true,
+                            sample_offset: self.sample_index,
+                            decoder: Some(self.label.into()),
+                            ..Default::default()
+                        },
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Costas loop bandwidth (normalized to sample rate) for a given symbol length.
 /// PSK31 (256 samples/symbol) uses a wide 0.06 loop that acquires in a few
 /// symbols and then holds. At the short symbol lengths (down to 8 samples) that
@@ -519,7 +683,9 @@ impl PskDemod {
             qpsk_dec: v
                 .is_qpsk()
                 .then(|| v.conv_code().unwrap().streaming_decoder(QPSK_TRACEBACK)),
-            robust: v.is_robust().then(|| RobustRx::new(&v.conv_code().unwrap(), v.idepth())),
+            robust: (v.is_robust() && v.carriers() == 1)
+                .then(|| RobustRx::new(&v.conv_code().unwrap(), v.idepth())),
+            mc: (v.carriers() > 1).then(|| MultiCarrierRx::new(v, center_hz)),
         }
     }
 
@@ -638,6 +804,9 @@ impl Demodulator for PskDemod {
     }
 
     fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
+        if let Some(mc) = self.mc.as_mut() {
+            return mc.feed(samples);
+        }
         for &x in samples {
             self.sample_index += 1;
             let bb = self.nco.push(x);
@@ -878,6 +1047,35 @@ mod tests {
         let audio = PskMod::new(PskVariant::Psk63F, 1500.0).modulate(&Frame::text(msg)).unwrap();
         let text = recovered_text(&PskDemod::new(PskVariant::Psk63F, 1500.0).feed(&audio));
         assert!(text.contains(&msg[..msg.len() - 1]), "psk63f recovered {text:?}");
+    }
+
+    #[test]
+    fn nx_psk63r_carrier_table_matches_fldigi() {
+        // ref: psk.cxx:688-724.
+        assert_eq!(PskVariant::Psk63Rc4.carriers(), 4);
+        assert_eq!(PskVariant::Psk63Rc10.carriers(), 10);
+        assert_eq!(PskVariant::Psk63Rc32.carriers(), 32);
+        assert_eq!(PskVariant::Psk63Rc4.idepth(), 80);
+        for v in [PskVariant::Psk63Rc4, PskVariant::Psk63Rc10] {
+            assert!(v.is_robust() && v.samples_per_symbol() == 128);
+        }
+    }
+
+    #[test]
+    fn nx_psk63r_grid_loopback() {
+        // The multi-carrier robust grid: the PSK-R core distributed round-robin
+        // over N frequency-offset carriers. MFSK drops the final char.
+        let msg = "CQ DE K1ABC";
+        for v in [
+            PskVariant::Psk63Rc4,
+            PskVariant::Psk63Rc10,
+            PskVariant::Psk63Rc20,
+            PskVariant::Psk63Rc32,
+        ] {
+            let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
+            assert!(text.contains(&msg[..msg.len() - 1]), "{v:?} recovered {text:?}");
+        }
     }
 
     #[test]

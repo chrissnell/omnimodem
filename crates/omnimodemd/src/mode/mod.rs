@@ -204,6 +204,10 @@ mod tests {
             ("psk250r", 1500.0),
             ("psk500r", 1500.0),
             ("psk1000r", 1500.0),
+            ("psk63rc4", 1500.0),
+            ("psk63rc10", 1500.0),
+            ("psk63rc20", 1500.0),
+            ("psk63rc32", 1500.0),
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
@@ -219,7 +223,7 @@ mod tests {
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         // Unknown PSK submodes (the multi-carrier nX grid lands later) are
         // rejected, not silently accepted.
-        assert_eq!(ModeConfig::parse("psk63rc4"), None);
+        assert_eq!(ModeConfig::parse("psk63rc5"), None);
     }
 
     #[test]
