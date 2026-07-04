@@ -67,6 +67,14 @@ pub enum PskVariant {
     Psk63Rc10,
     Psk63Rc20,
     Psk63Rc32,
+    Psk125Rc4,
+    Psk125Rc10,
+    Psk125Rc12,
+    Psk125Rc16,
+    Psk250Rc2,
+    Psk250Rc6,
+    Psk500Rc2,
+    Psk500Rc4,
 }
 
 /// Resolved per-variant parameters. ref: psk.cxx:382-687.
@@ -123,6 +131,17 @@ impl PskVariant {
             Psk63Rc10 => p(128, 512, false, true, 160, 10),
             Psk63Rc20 => p(128, 512, false, true, 160, 20),
             Psk63Rc32 => p(128, 512, false, true, 160, 32),
+            // Multi-carrier nX_PSK125R (symbollen 64). ref: psk.cxx:731-778.
+            Psk125Rc4 => p(64, 512, false, true, 80, 4),
+            Psk125Rc10 => p(64, 512, false, true, 160, 10),
+            Psk125Rc12 => p(64, 512, false, true, 160, 12),
+            Psk125Rc16 => p(64, 512, false, true, 160, 16),
+            // Multi-carrier nX_PSK250R (symbollen 32). ref: psk.cxx:782-825.
+            Psk250Rc2 => p(32, 512, false, true, 160, 2),
+            Psk250Rc6 => p(32, 1024, false, true, 160, 6),
+            // Multi-carrier nX_PSK500R (symbollen 16). ref: psk.cxx:828-861.
+            Psk500Rc2 => p(16, 1024, false, true, 160, 2),
+            Psk500Rc4 => p(16, 1024, false, true, 160, 4),
         }
     }
 
@@ -189,6 +208,14 @@ impl PskVariant {
             "psk63rc10" => Psk63Rc10,
             "psk63rc20" => Psk63Rc20,
             "psk63rc32" => Psk63Rc32,
+            "psk125rc4" => Psk125Rc4,
+            "psk125rc10" => Psk125Rc10,
+            "psk125rc12" => Psk125Rc12,
+            "psk125rc16" => Psk125Rc16,
+            "psk250rc2" => Psk250Rc2,
+            "psk250rc6" => Psk250Rc6,
+            "psk500rc2" => Psk500Rc2,
+            "psk500rc4" => Psk500Rc4,
             _ => return None,
         })
     }
@@ -216,6 +243,14 @@ impl PskVariant {
             Psk63Rc10 => "psk63rc10",
             Psk63Rc20 => "psk63rc20",
             Psk63Rc32 => "psk63rc32",
+            Psk125Rc4 => "psk125rc4",
+            Psk125Rc10 => "psk125rc10",
+            Psk125Rc12 => "psk125rc12",
+            Psk125Rc16 => "psk125rc16",
+            Psk250Rc2 => "psk250rc2",
+            Psk250Rc6 => "psk250rc6",
+            Psk500Rc2 => "psk500rc2",
+            Psk500Rc4 => "psk500rc4",
         }
     }
 }
@@ -560,9 +595,12 @@ impl MultiCarrierRx {
         // Per-carrier matched filter: carriers sit 1.4·baud apart, so the cutoff
         // must stay well below that (unlike the single-carrier squelch LPF) or the
         // adjacent carrier leaks in and swamps the differential decode. 0.6·baud
-        // passes the symbol's main lobe while rejecting the neighbour.
+        // passes the symbol's main lobe while rejecting the neighbour. Its length
+        // is scaled to the symbol (≤ a few symbols) so it doesn't smear ISI at the
+        // short symbol lengths (down to 16 samples for the 500R carriers).
         let cutoff = (v.baud() * 0.6).max(60.0);
-        let taps = design_lowpass(SQUELCH_TAPS, cutoff, rate);
+        let ntaps = ((4 * pp.symbollen) | 1).min(SQUELCH_TAPS);
+        let taps = design_lowpass(ntaps, cutoff, rate);
         MultiCarrierRx {
             sps: pp.symbollen,
             n,
@@ -584,17 +622,19 @@ impl MultiCarrierRx {
         let mut out = Vec::new();
         for &x in samples {
             self.sample_index += 1;
-            let mut f0 = Cplx::new(0.0, 0.0);
+            let mut env = 0.0f32;
             for c in 0..self.n {
                 let bb = self.down[c].push(x);
                 let f = Cplx::new(self.lpf_i[c].push(bb.re), self.lpf_q[c].push(bb.im));
                 self.acc[c] += f;
-                if c == 0 {
-                    f0 = f;
-                }
+                env += f.norm();
             }
             self.since_dump += 1;
-            self.tm.feed(f0.norm());
+            // Symbol clock from the summed envelope of all carriers: every carrier
+            // reverses through the preamble, so their combined envelope nulls give
+            // a strong, robust boundary (one carrier alone can run steady and lose
+            // its nulls). All carriers share the clock.
+            self.tm.feed(env);
             let boundary = self.tm.transition_phase() as u64;
             let at_boundary = self.sample_index % self.sps as u64 == boundary
                 && self.since_dump + 1 >= self.sps;
@@ -1047,6 +1087,27 @@ mod tests {
         let audio = PskMod::new(PskVariant::Psk63F, 1500.0).modulate(&Frame::text(msg)).unwrap();
         let text = recovered_text(&PskDemod::new(PskVariant::Psk63F, 1500.0).feed(&audio));
         assert!(text.contains(&msg[..msg.len() - 1]), "psk63f recovered {text:?}");
+    }
+
+    #[test]
+    fn nx_rate_grid_loopback() {
+        // The multi-carrier robust core at the other base rates (125R/250R/500R),
+        // even carrier counts. MFSK drops the final char.
+        let msg = "CQ DE K1ABC";
+        for v in [
+            PskVariant::Psk125Rc4,
+            PskVariant::Psk125Rc10,
+            PskVariant::Psk125Rc12,
+            PskVariant::Psk125Rc16,
+            PskVariant::Psk250Rc2,
+            PskVariant::Psk250Rc6,
+            PskVariant::Psk500Rc2,
+            PskVariant::Psk500Rc4,
+        ] {
+            let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
+            assert!(text.contains(&msg[..msg.len() - 1]), "{v:?} recovered {text:?}");
+        }
     }
 
     #[test]

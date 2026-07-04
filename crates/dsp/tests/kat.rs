@@ -652,3 +652,39 @@ fn nx_psk63r_grid_loopback_and_awgn() {
         assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(want), "{v:?} AWGN");
     }
 }
+
+/// The multi-carrier robust grid at the 125R/250R/500R base rates (even carrier
+/// counts): the same MultiCarrierRx core at different symbol lengths, clean and
+/// under light AWGN. MFSK Varicode drops the final char.
+#[test]
+fn nx_rate_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::psk::{PskDemod, PskMod, PskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC";
+    let want = &msg[..msg.len() - 1];
+    for v in [
+        PskVariant::Psk125Rc4,
+        PskVariant::Psk125Rc16,
+        PskVariant::Psk250Rc6,
+        PskVariant::Psk500Rc4,
+    ] {
+        let clean = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert!(texts(&PskDemod::new(v, 1500.0).feed(&clean)).contains(want), "{v:?} clean");
+        let mut noisy = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x7700 + v.carriers() as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(want), "{v:?} AWGN");
+    }
+}
