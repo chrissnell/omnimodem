@@ -104,10 +104,12 @@ func TestSequencerModesAttachLadderWithOwnSlot(t *testing.T) {
 	}
 }
 
-// WSPR is a beacon: receive-only monitor, no QSO ladder, and keystrokes/enter
-// must never compose or key a transmission from the operate screen.
-func TestWSPRIsBeaconAndInert(t *testing.T) {
+// WSPR is a beacon: receive-only monitor with no QSO ladder or free-text
+// compose. Typing is ignored, but enter keys a single "CALL GRID DBM" beacon
+// (with a configured call/grid).
+func TestWSPRIsBeacon(t *testing.T) {
 	m := New(&client.Fake{}, "x")
+	m.myCall, m.myGrid = "K1ABC", "FN42"
 	m.live[0] = &chanLive{mode: "wspr"}
 	m.sel = 0
 	v := newOperateView(m)
@@ -119,12 +121,12 @@ func TestWSPRIsBeaconAndInert(t *testing.T) {
 	if v.compose != "" {
 		t.Fatalf("beacon must ignore typing, compose=%q", v.compose)
 	}
-	// Enter must not begin a transmission.
-	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
-		t.Fatal("beacon enter must not transmit")
+	// Enter keys the beacon.
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
+		t.Fatal("beacon enter should key a WSPR beacon")
 	}
-	if v.tx.active() {
-		t.Fatal("beacon must not key TX from the operate screen")
+	if v.tx.phase != txAcquiring {
+		t.Fatalf("beacon enter should start TX, phase=%v", v.tx.phase)
 	}
 }
 

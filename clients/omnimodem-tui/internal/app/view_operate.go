@@ -34,7 +34,7 @@ type operateView struct {
 	theirCall  string
 	rst        string
 	seq        *ft8Seq
-	beacon     bool    // receive-only beacon monitor (WSPR): no ladder, no compose
+	beacon     bool    // beacon monitor (WSPR): no ladder/compose; enter keys a beacon
 	modeLabel  string  // active mode label, for the surface header
 	slotSecs   float64 // T/R slot length for sequencer/beacon modes
 	qlog       qsoLog
@@ -142,7 +142,7 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, nil
 		case "enter":
 			if v.beacon {
-				return v, nil // beacon TX is scheduled, not keyed from here
+				return v, v.beaconSend() // WSPR: key one beacon (call/grid/power)
 			}
 			if v.seq != nil {
 				return v, v.ft8Send()
@@ -187,6 +187,32 @@ func (v *operateView) ft8Send() tea.Cmd {
 	}
 	v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '›', txt: msg})
 	v.rxOpen = false // a TX line closes any in-progress received line
+	v.tx.begin([]byte(msg))
+	return acquireLeaseCmd(v.m.c, v.m.sel)
+}
+
+// wsprBeaconPowerDBm is the default reported power for a hand-keyed WSPR beacon
+// (37 dBm ≈ 5 W). WSPR carries the operator's TX power in the message itself.
+const wsprBeaconPowerDBm = 37
+
+// beaconSend keys a single WSPR beacon ("CALL GRID DBM"). WSPR has no QSO ladder
+// or free-text compose — it only ever transmits the operator's call, 4-char grid,
+// and power — so the beacon surface transmits on demand rather than staying
+// receive-only (previously enter did nothing here, so WSPR made no sound at all).
+func (v *operateView) beaconSend() tea.Cmd {
+	if v.tx.active() {
+		return nil
+	}
+	grid := v.myGrid
+	if len(grid) > 4 {
+		grid = grid[:4] // WSPR type-1 messages carry a 4-char Maidenhead locator
+	}
+	if v.myCall == "" || len(grid) < 4 {
+		v.m.toast = ui.NewToast("Set your call and 4-char grid in Configure to beacon", ui.SeverityWarn)
+		return nil
+	}
+	msg := fmt.Sprintf("%s %s %d", v.myCall, grid, wsprBeaconPowerDBm)
+	v.transcript = append(v.transcript, transcriptLine{t: time.Now(), dir: '›', txt: msg})
 	v.tx.begin([]byte(msg))
 	return acquireLeaseCmd(v.m.c, v.m.sel)
 }
@@ -281,7 +307,7 @@ func (v *operateView) Render(w, h int) string {
 		return b.String()
 	}
 	if v.beacon {
-		// Receive-only spot monitor: show decoded spots; no compose/ladder.
+		// Spot monitor: show decoded spots; enter keys a beacon, no compose/ladder.
 		for _, l := range v.transcript {
 			b.WriteString(fmt.Sprintf("%s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
 		}
@@ -310,7 +336,9 @@ func (v *operateView) Title() string {
 
 func (v *operateView) Hints() []ui.Hint {
 	if v.beacon {
-		return []ui.Hint{{Key: "esc", Action: "back"}}
+		return []ui.Hint{
+			{Key: "enter", Action: "beacon"}, {Key: "ctrl+x", Action: "halt"}, {Key: "esc", Action: "back"},
+		}
 	}
 	if v.seq != nil {
 		return []ui.Hint{

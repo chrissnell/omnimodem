@@ -10,9 +10,10 @@ type modeParam struct {
 
 // modeInfo: the modes the operate screen offers, their interaction shape, and
 // their editable params. shape "chat" → ragchew surface; "sequencer" → the
-// structured-QSO auto-sequence ladder (FT8/FT4/JT65/JT9); "beacon" → the
-// receive-only spot monitor (WSPR). slotSecs is the T/R window length for the
-// windowed sequencer/beacon modes (0 for the streaming "chat" modes).
+// structured-QSO auto-sequence ladder (FT8/FT4/JT65/JT9); "beacon" → the spot
+// monitor (WSPR), which decodes spots and keys a single call/grid/power beacon on
+// enter. slotSecs is the T/R window length for the windowed sequencer/beacon modes
+// (0 for the streaming "chat" modes).
 type modeInfo struct {
 	label    string
 	shape    string // "chat" | "sequencer" | "beacon"

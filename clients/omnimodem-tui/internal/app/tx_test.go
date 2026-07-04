@@ -12,8 +12,8 @@ import (
 // daemon waits up to a full slot for the boundary, then transmits a ~47 s burst,
 // so the old fixed 30 s watchdog fired mid count-off and nothing ever went out.
 func TestTxWatchdogCoversSlotCountoff(t *testing.T) {
-	// wspr is a 120 s-slot mode; its beacon TX isn't keyed through the operate
-	// view today, so this only pins the pure sizing function for it.
+	// wspr is a 120 s-slot beacon; its enter-keyed beacon TX now runs through the
+	// operate view, so its watchdog must cover the 2-slot worst case like the rest.
 	for _, tc := range []struct {
 		name string
 		slot float64

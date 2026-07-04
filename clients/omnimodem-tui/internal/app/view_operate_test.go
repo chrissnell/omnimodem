@@ -77,6 +77,53 @@ func TestOperateSendTransmits(t *testing.T) {
 	}
 }
 
+// WSPR is a beacon mode with no ladder or compose; pressing enter must key a
+// single "CALL GRID DBM" beacon. Previously enter did nothing here, so WSPR
+// transmitted no audio at all.
+func TestWsprBeaconTransmits(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.myCall, m.myGrid = "K1ABC", "FN42ab" // 6-char grid: WSPR keeps the first 4
+	m.live[0] = &chanLive{mode: "wspr"}
+	m.sel = 0
+	v := newOperateView(m)
+	if !v.beacon {
+		t.Fatal("wspr should use the beacon surface")
+	}
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		cmd()
+	}
+	if v.tx.phase != txAcquiring {
+		t.Fatalf("enter should start a beacon TX, phase=%v", v.tx.phase)
+	}
+	if _, cmd := v.Update(leaseMsg{&pb.TxLeaseResponse{Granted: true}}); cmd != nil {
+		cmd()
+	}
+	if len(f.TransmitCalls) != 1 || string(f.TransmitCalls[0].GetPayload()) != "K1ABC FN42 37" {
+		t.Fatalf("beacon payload wrong: %+v", f.TransmitCalls)
+	}
+}
+
+// Without a configured call/grid a WSPR beacon can't be packed, so enter must
+// warn and not key rather than transmit an unpackable (silent) frame.
+func TestWsprBeaconNeedsCallAndGrid(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.myCall, m.myGrid = "", ""
+	m.live[0] = &chanLive{mode: "wspr"}
+	m.sel = 0
+	v := newOperateView(m)
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		cmd()
+	}
+	if v.tx.active() {
+		t.Fatal("beacon must not key without a call/grid")
+	}
+	if len(f.TransmitCalls) != 0 {
+		t.Fatalf("no transmit expected, got %+v", f.TransmitCalls)
+	}
+}
+
 // Received text (decoded by the daemon and delivered as RxFrame events) must
 // appear in the transcript; streaming modes accumulate onto one line.
 func TestOperateShowsReceivedText(t *testing.T) {

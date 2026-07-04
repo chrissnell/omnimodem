@@ -171,17 +171,21 @@ mod tests {
 
     #[test]
     fn loopback_decodes_message() {
-        let msg = "K1ABC W9XYZ EN37";
-        let mut tx = Jt65Mod::new();
-        let samples = tx.modulate(&Frame::text(msg)).unwrap();
-        let n = (JT65_RATE as f32 * JT65_WINDOW_S) as usize;
-        let mut window = samples.clone();
-        window.resize(n, 0.0);
-        let mut rx = Jt65Demod::new();
-        let decodes = rx.decode_window(&window, 0);
-        assert!(
-            decodes.iter().any(|f| matches!(&f.payload, FramePayload::Text(t) if t == msg)),
-            "no JT65 decode: {decodes:?}"
-        );
+        // "CQ …" is the ladder opener; before CQ was a valid call token it failed
+        // to encode and JT65 went silent when calling CQ.
+        for msg in ["K1ABC W9XYZ EN37", "CQ K1ABC FN42"] {
+            let mut tx = Jt65Mod::new();
+            let samples = tx.modulate(&Frame::text(msg)).unwrap();
+            assert!(samples.iter().any(|&s| s.abs() > 0.1), "{msg}: silent modulation");
+            let n = (JT65_RATE as f32 * JT65_WINDOW_S) as usize;
+            let mut window = samples.clone();
+            window.resize(n, 0.0);
+            let mut rx = Jt65Demod::new();
+            let decodes = rx.decode_window(&window, 0);
+            assert!(
+                decodes.iter().any(|f| matches!(&f.payload, FramePayload::Text(t) if t == msg)),
+                "no JT65 decode of {msg:?}: {decodes:?}"
+            );
+        }
     }
 }

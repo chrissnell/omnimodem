@@ -51,8 +51,8 @@ const txWatchdogMargin = 30 * time.Second
 // burst that nearly fills a slot — so the worst case from grant to completion is
 // ~2 slots. A fixed 30 s watchdog aborted the keyed windowed modes JT65/JT9 (60 s
 // slot) mid count-off, so they never keyed. Streaming modes (slotSecs == 0) key at
-// once and keep the bare margin. (WSPR is a 120 s-slot mode too, but its beacon TX
-// is not keyed through this view, so its watchdog value is never consulted today.)
+// once and keep the bare margin. (WSPR's 120 s beacon is now keyed from the operate
+// view too, so this sizes its watchdog to 2×120 s + margin.)
 func txWatchdog(slotSecs float64) time.Duration {
 	if slotSecs <= 0 {
 		return txWatchdogMargin
