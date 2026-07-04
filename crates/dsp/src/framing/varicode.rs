@@ -302,6 +302,18 @@ pub fn mfsk_encode(text: &str) -> Vec<u8> {
     out
 }
 
+/// Map one MFSK codeword value (the `shreg >> 1` at a framing boundary) to its
+/// byte, or `None` if it is not a valid codeword. For streaming decoders that
+/// run the `shreg` framing themselves (e.g. the PSK-R demodulator).
+pub fn mfsk_symbol_to_byte(sym: u32) -> Option<u8> {
+    (0..256)
+        .find(|&i| {
+            let cw = MFSK.code[i];
+            !cw.is_empty() && mfsk_codeval(cw) == sym
+        })
+        .map(|i| i as u8)
+}
+
 /// Decode a self-framed MFSK Varicode bitstream back to text, using fldigi's
 /// exact shift-register framing (`shreg=(shreg<<1)|bit; on (shreg&7)==1 decode
 /// shreg>>1, reset to 1`). A final codeword with no following boundary bit is
@@ -313,12 +325,9 @@ pub fn mfsk_decode(bits: &[u8]) -> String {
         shreg = (shreg << 1) | (bit as u32 & 1);
         if shreg & 7 == 1 {
             let sym = shreg >> 1;
-            if let Some(i) = (0..256).find(|&i| {
-                let cw = MFSK.code[i];
-                !cw.is_empty() && mfsk_codeval(cw) == sym
-            }) {
-                if i != 0 {
-                    out.push(i as u8 as char);
+            if let Some(b) = mfsk_symbol_to_byte(sym) {
+                if b != 0 {
+                    out.push(b as char);
                 }
             }
             shreg = 1;

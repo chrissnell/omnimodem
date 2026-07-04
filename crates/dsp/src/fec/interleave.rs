@@ -130,9 +130,103 @@ impl<T: Copy + Default> ConvDeinterleaver<T> {
     }
 }
 
+/// fldigi's MFSK/PSK-R diagonal (de)interleaver (`size = 2`): a cascade of
+/// `depth` 2×2 delay stages. Each `symbols` call feeds one pair through all
+/// stages in place; in the forward direction one bit of the pair passes through
+/// while the other is delayed by `depth` pairs, and the reverse direction swaps
+/// which is delayed, so a forward→reverse round-trip recovers the input delayed
+/// by `depth`. Generic over the cell type so TX runs it on bits (`u8`) and RX on
+/// soft LLRs (`f32`, `fill = 0.0` = erasure). ref: fldigi src/mfsk/interleave.cxx.
+pub struct DiagInterleaver<T: Copy> {
+    depth: usize,
+    fwd: bool,
+    table: Vec<T>, // depth * 2 * 2, indexed [k][i][j] = 4k + 2i + j
+}
+
+impl<T: Copy> DiagInterleaver<T> {
+    /// `fill` seeds the delay cells (fldigi: 0 for TX, PUNCTURE for RX). `fwd`
+    /// selects interleave (TX) vs de-interleave (RX).
+    pub fn new(depth: usize, fwd: bool, fill: T) -> Self {
+        DiagInterleaver { depth, fwd, table: vec![fill; depth * 4] }
+    }
+
+    /// Interleave (or de-interleave) one pair in place. ref: interleave::symbols.
+    pub fn symbols(&mut self, psyms: &mut [T; 2]) {
+        for k in 0..self.depth {
+            let base = k * 4;
+            // Shift each 2-cell row left, then insert the input into the last col.
+            self.table[base] = self.table[base + 1];
+            self.table[base + 2] = self.table[base + 3];
+            self.table[base + 1] = psyms[0];
+            self.table[base + 3] = psyms[1];
+            // Read out on the (forward) anti-diagonal / (reverse) main diagonal.
+            if self.fwd {
+                psyms[0] = self.table[base + 1]; // row 0, col 1-0
+                psyms[1] = self.table[base + 2]; // row 1, col 0
+            } else {
+                psyms[0] = self.table[base]; // row 0, col 0
+                psyms[1] = self.table[base + 3]; // row 1, col 1
+            }
+        }
+    }
+}
+
+impl DiagInterleaver<u8> {
+    /// Interleave the two low bits of `pbits` (bit1 = MSB, bit0 = LSB) in place,
+    /// matching fldigi `interleave::bits`. ref: interleave.cxx:78-88.
+    pub fn bits(&mut self, pbits: &mut u32) {
+        let mut syms = [((*pbits >> 1) & 1) as u8, (*pbits & 1) as u8];
+        self.symbols(&mut syms);
+        *pbits = ((syms[0] as u32) << 1) | syms[1] as u32;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bit-exact: `DiagInterleaver` forward output reproduces fldigi's
+    /// `interleave(2, 40, FWD).bits()` sequence byte-for-byte, and a
+    /// forward→reverse round-trip recovers the input delayed by `depth`.
+    /// Provenance: `tests/vectors/psk_interleave.json` (fldigi 4.1.23 @
+    /// 61b97f413, driver `scratch/refvectors/build_psk_interleave.sh`).
+    #[test]
+    fn diag_interleaver_matches_fldigi_vector() {
+        let raw = include_str!("../../tests/vectors/psk_interleave.json");
+        let line = raw.lines().find(|l| l.contains("\"fwd\"")).unwrap();
+        let field = |k: &str| {
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let parse = |s: String| -> Vec<u32> { s.split(' ').map(|x| x.parse().unwrap()).collect() };
+        let input = parse(field("\"in\":\""));
+        let want_fwd = parse(field("\"fwd\":\""));
+
+        let mut fwd = DiagInterleaver::new(40, true, 0u8);
+        let got: Vec<u32> = input
+            .iter()
+            .map(|&v| {
+                let mut b = v;
+                fwd.bits(&mut b);
+                b
+            })
+            .collect();
+        assert_eq!(got, want_fwd, "forward interleave differs from fldigi");
+
+        // Round-trip: forward then reverse recovers the input delayed by depth.
+        let mut f = DiagInterleaver::new(40, true, 0u8);
+        let mut r = DiagInterleaver::new(40, false, 0u8);
+        let out: Vec<u32> = input
+            .iter()
+            .map(|&v| {
+                let mut b = v;
+                f.bits(&mut b);
+                r.bits(&mut b);
+                b
+            })
+            .collect();
+        assert_eq!(&out[40..], &input[..input.len() - 40], "round-trip delay != depth");
+    }
 
     #[test]
     fn block_round_trips() {

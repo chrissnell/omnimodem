@@ -19,7 +19,10 @@
 //! waveform.
 
 use crate::fec::conv::{ConvCode, StreamingViterbi};
-use crate::framing::varicode::{decode as vari_decode, encode as vari_encode, PSK31};
+use crate::fec::interleave::DiagInterleaver;
+use crate::framing::varicode::{
+    decode as vari_decode, encode as vari_encode, mfsk_encode, mfsk_symbol_to_byte, PSK31,
+};
 use crate::frontend::fir::{design_lowpass, Fir};
 use crate::frontend::modulate::DiffPsk;
 use crate::frontend::nco::DownConverter;
@@ -48,9 +51,16 @@ pub enum PskVariant {
     Qpsk125,
     Qpsk250,
     Qpsk500,
+    // Robust (`+F`/PSK-R): K=7 FEC + MFSK Varicode. PSK63F has no interleaver;
+    // the PSK-R rates add the 2×2×idepth diagonal interleaver.
+    Psk63F,
+    Psk125R,
+    Psk250R,
+    Psk500R,
+    Psk1000R,
 }
 
-/// Resolved per-variant parameters. ref: psk.cxx:382-444.
+/// Resolved per-variant parameters. ref: psk.cxx:382-687.
 #[derive(Debug, Clone, Copy)]
 pub struct PskParams {
     /// Samples per symbol at `PSK_RATE`; baud = `PSK_RATE / symbollen`.
@@ -59,26 +69,43 @@ pub struct PskParams {
     pub dcdbits: usize,
     /// Differential QPSK (2 bits/symbol, K=5 convolutional FEC) vs plain BPSK.
     pub qpsk: bool,
+    /// Robust `+F`/PSK-R: K=7 FEC + MFSK Varicode, two BPSK symbols per code bit.
+    pub robust: bool,
+    /// Diagonal-interleaver depth (`2×2×idepth`); 0 = no interleaver (PSK63F).
+    pub idepth: usize,
 }
 
 impl PskVariant {
-    /// ref: psk.cxx:382-444 (symbollen/dcdbits/_qpsk switch).
+    /// ref: psk.cxx:382-687 (symbollen/dcdbits/_qpsk/_pskr/idepth switch).
     pub fn params(self) -> PskParams {
         use PskVariant::*;
-        let p = |symbollen, dcdbits, qpsk| PskParams { symbollen, dcdbits, qpsk };
+        let p = |symbollen, dcdbits, qpsk, robust, idepth| PskParams {
+            symbollen,
+            dcdbits,
+            qpsk,
+            robust,
+            idepth,
+        };
         match self {
-            Psk31 => p(256, 32, false),
-            Psk63 => p(128, 64, false),
-            Psk125 => p(64, 128, false),
-            Psk250 => p(32, 256, false),
-            Psk500 => p(16, 512, false),
-            Psk1000 => p(8, 128, false),
+            Psk31 => p(256, 32, false, false, 0),
+            Psk63 => p(128, 64, false, false, 0),
+            Psk125 => p(64, 128, false, false, 0),
+            Psk250 => p(32, 256, false, false, 0),
+            Psk500 => p(16, 512, false, false, 0),
+            Psk1000 => p(8, 128, false, false, 0),
             // QPSK: same symbol rates, 2 bits/symbol, K=5 FEC. ref: psk.cxx:414-444.
-            Qpsk31 => p(256, 32, true),
-            Qpsk63 => p(128, 64, true),
-            Qpsk125 => p(64, 128, true),
-            Qpsk250 => p(32, 256, true),
-            Qpsk500 => p(16, 512, true),
+            Qpsk31 => p(256, 32, true, false, 0),
+            Qpsk63 => p(128, 64, true, false, 0),
+            Qpsk125 => p(64, 128, true, false, 0),
+            Qpsk250 => p(32, 256, true, false, 0),
+            Qpsk500 => p(16, 512, true, false, 0),
+            // BPSK63 + FEC (no interleaver). ref: psk.cxx:448-451.
+            Psk63F => p(128, 64, false, true, 0),
+            // PSK-R robust: K=7 FEC + 2×2×idepth interleaver. ref: psk.cxx:658-685.
+            Psk125R => p(64, 128, false, true, 40),
+            Psk250R => p(32, 256, false, true, 80),
+            Psk500R => p(16, 512, false, true, 160),
+            Psk1000R => p(8, 512, false, true, 160),
         }
     }
 
@@ -94,11 +121,26 @@ impl PskVariant {
         self.params().qpsk
     }
 
-    /// The K=5 rate-1/2 convolutional code fldigi's QPSK modes use, or `None`
-    /// for the plain-BPSK rates. ref: psk.cxx:66-68 (K=5, POLY1=0x17, POLY2=0x19)
-    /// + psk.cxx:979-981 (`enc = new encoder(K, POLY1, POLY2)`).
+    pub fn is_robust(self) -> bool {
+        self.params().robust
+    }
+
+    /// Diagonal-interleaver depth (0 = none). ref: psk.cxx:658-685.
+    pub fn idepth(self) -> usize {
+        self.params().idepth
+    }
+
+    /// The convolutional code for the FEC-bearing modes: K=5 (POLY 0x17/0x19)
+    /// for QPSK, K=7 (POLY 0x6d/0x4f) for the robust `+F`/PSK-R modes, or `None`
+    /// for the plain-BPSK rates. ref: psk.cxx:66-74, 979-992.
     pub fn conv_code(self) -> Option<ConvCode> {
-        self.is_qpsk().then(|| ConvCode { k: 5, polys: vec![0x17, 0x19] })
+        if self.is_qpsk() {
+            Some(ConvCode { k: 5, polys: vec![0x17, 0x19] })
+        } else if self.is_robust() {
+            Some(ConvCode { k: 7, polys: vec![0x6d, 0x4f] })
+        } else {
+            None
+        }
     }
 
     /// Parse an omnimodem/fldigi mode label. Returns `None` for unknown labels.
@@ -116,6 +158,11 @@ impl PskVariant {
             "qpsk125" => Qpsk125,
             "qpsk250" => Qpsk250,
             "qpsk500" => Qpsk500,
+            "psk63f" => Psk63F,
+            "psk125r" => Psk125R,
+            "psk250r" => Psk250R,
+            "psk500r" => Psk500R,
+            "psk1000r" => Psk1000R,
             _ => return None,
         })
     }
@@ -134,6 +181,11 @@ impl PskVariant {
             Qpsk125 => "qpsk125",
             Qpsk250 => "qpsk250",
             Qpsk500 => "qpsk500",
+            Psk63F => "psk63f",
+            Psk125R => "psk125r",
+            Psk250R => "psk250r",
+            Psk500R => "psk500r",
+            Psk1000R => "psk1000r",
         }
     }
 }
@@ -211,6 +263,46 @@ impl PskMod {
         rot.extend(std::iter::repeat_n(2u32, pp.dcdbits.min(64))); // postamble
         rot
     }
+
+    /// The reversal stream for a robust (`+F`/PSK-R) BPSK frame, fed to `DiffPsk`
+    /// (bps=1): `dcdbits` preamble reversals, then the K=7-encoded MFSK-Varicode
+    /// payload — each code pair optionally run through the 2×2×idepth diagonal
+    /// interleaver (`Txinlv->bits`; ref psk.cxx:2337) and sent low-bit-first as two
+    /// BPSK symbols (poly1 then poly2; psk.cxx:2338-2341) — then a reversal
+    /// postamble. A code bit `1` is a steady carrier, `0` a reversal (DiffPsk value
+    /// `1 ^ b`), matching `tx_symbol`'s BPSK mapping. A zero-bit header pads the
+    /// FEC/interleaver so the receiver locks before the payload.
+    fn robust_rev_stream(&self, text: &str) -> Vec<u32> {
+        let pp = self.v.params();
+        let code = self.v.conv_code().expect("robust variant");
+        // Lock-in header covers the interleaver fill latency + FEC warm-up.
+        let mut vbits = vec![0u8; pp.idepth + 64];
+        vbits.extend(mfsk_encode(text));
+        let coded = code.encode(&vbits); // 2 code bits per varicode bit, tail-flushed
+        let mut inlv = DiagInterleaver::new(pp.idepth, true, 0u8);
+        let mut rev = vec![1u32; pp.dcdbits]; // preamble reversals
+        let mut push_pair = |rev: &mut Vec<u32>, mut bs: u32| {
+            if pp.idepth > 0 {
+                inlv.bits(&mut bs);
+            }
+            rev.push(1 ^ (bs & 1)); // bit0 first
+            rev.push(1 ^ ((bs >> 1) & 1)); // bit1 second
+        };
+        for pair in coded.chunks(2) {
+            // bit0 = poly1 (low), bit1 = poly2 (high) — fldigi's bitshreg layout.
+            push_pair(&mut rev, pair[0] as u32 | ((pair[1] as u32) << 1));
+        }
+        // Flush the TX interleaver: it delays each pair's second bit by `idepth`
+        // pairs, so the last `idepth` payload pairs are only fully sent after that
+        // many more pairs pass through — feed zero pairs (which also read out as
+        // reversals) so nothing is stranded in the interleaver. Then a raw
+        // reversal tail flushes the RX deinterleaver + Viterbi traceback.
+        for _ in 0..(pp.idepth + 2 * ROBUST_TRACEBACK) {
+            push_pair(&mut rev, 0);
+        }
+        rev.extend(std::iter::repeat_n(1u32, 2 * (pp.idepth + 2 * ROBUST_TRACEBACK)));
+        rev
+    }
 }
 
 impl Modulator for PskMod {
@@ -235,7 +327,11 @@ impl Modulator for PskMod {
             let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, sps, 2);
             Ok(psk.modulate(&rot))
         } else {
-            let rev = self.reversal_stream(text);
+            let rev = if self.v.is_robust() {
+                self.robust_rev_stream(text)
+            } else {
+                self.reversal_stream(text)
+            };
             let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, sps, 1);
             Ok(psk.modulate(&rev))
         }
@@ -276,12 +372,100 @@ pub struct PskDemod {
     // QPSK only: the continuous K=5 Viterbi decoding the differential symbol
     // stream into Varicode bits. `None` for the plain-BPSK rates.
     qpsk_dec: Option<StreamingViterbi>,
+    // Robust (`+F`/PSK-R) only: the streaming two-phase K=7 decoder. `None`
+    // otherwise.
+    robust: Option<RobustRx>,
 }
 
 /// Viterbi traceback depth for the K=5 QPSK stream (~6× constraint length).
 const QPSK_TRACEBACK: usize = 30;
 /// Strong hard-decision LLR magnitude (fldigi feeds 0/255 hard soft-symbols).
 const QPSK_LLR: f32 = 4.0;
+/// Viterbi traceback depth for the K=7 robust stream (~6× constraint length).
+const ROBUST_TRACEBACK: usize = 45;
+
+/// Streaming two-phase decoder for the robust (`+F`/PSK-R) modes. The two soft
+/// code bits of each pair arrive as consecutive BPSK symbols, but the pair phase
+/// is unknown on entry, so two continuous K=7 Viterbis run at both alignments
+/// (decoder A pairs symbols (0,1),(2,3),…; decoder B pairs (1,2),(3,4),…). Each
+/// frames its own output through the MFSK Varicode into an append-only string;
+/// `drain` emits the not-yet-returned tail of whichever stream has the higher
+/// path metric. Append-only per-stream text keeps the byte offsets valid (no
+/// mid-char slice) and bounds work to O(1) per symbol. ref: psk.cxx:1216-1290.
+struct RobustRx {
+    dec: [StreamingViterbi; 2],
+    // Per-phase reverse interleavers (0.0 = erasure fill); pass-through at idepth 0.
+    inlv: [DiagInterleaver<f32>; 2],
+    idepth: usize,
+    shreg: [u32; 2],
+    text: [String; 2],
+    emitted: [usize; 2],
+    prev_soft: Option<f32>,
+    n: usize,
+}
+
+impl RobustRx {
+    fn new(code: &ConvCode, idepth: usize) -> Self {
+        RobustRx {
+            dec: [
+                code.streaming_decoder(ROBUST_TRACEBACK),
+                code.streaming_decoder(ROBUST_TRACEBACK),
+            ],
+            inlv: [
+                DiagInterleaver::new(idepth, false, 0.0),
+                DiagInterleaver::new(idepth, false, 0.0),
+            ],
+            idepth,
+            shreg: [0, 0],
+            text: [String::new(), String::new()],
+            emitted: [0, 0],
+            prev_soft: None,
+            n: 0,
+        }
+    }
+
+    /// Push one differential soft code bit (LLR, positive ⇒ code bit 0).
+    fn push_symbol(&mut self, soft: f32) {
+        if let Some(p) = self.prev_soft {
+            // The pair (previous, current) feeds decoder A on odd symbol counts
+            // (pairs starting at an even index) and decoder B on even counts —
+            // the two phase hypotheses.
+            let d = 1 - (self.n & 1); // n odd → 0 (dec A); n even → 1 (dec B)
+            // fldigi de-interleaves the pair [newest, prev] then reverses it into
+            // the decoder as [prev, newest] (poly1, poly2). ref: psk.cxx:1252-1263.
+            let mut pair = [soft, p];
+            if self.idepth > 0 {
+                self.inlv[d].symbols(&mut pair);
+            }
+            if let Some(bit) = self.dec[d].push(&[pair[1], pair[0]]) {
+                let sh = &mut self.shreg[d];
+                *sh = (*sh << 1) | bit as u32;
+                if *sh & 7 == 1 {
+                    if let Some(b) = mfsk_symbol_to_byte(*sh >> 1) {
+                        if b != 0 {
+                            self.text[d].push(b as char);
+                        }
+                    }
+                    *sh = 1;
+                }
+            }
+        }
+        self.prev_soft = Some(soft);
+        self.n += 1;
+    }
+
+    /// The not-yet-emitted tail of the higher-metric stream, if any.
+    fn drain(&mut self) -> Option<String> {
+        let w = if self.dec[0].total_metric() >= self.dec[1].total_metric() { 0 } else { 1 };
+        if self.text[w].len() > self.emitted[w] {
+            let new = self.text[w][self.emitted[w]..].to_string();
+            self.emitted[w] = self.text[w].len();
+            Some(new)
+        } else {
+            None
+        }
+    }
+}
 
 /// Costas loop bandwidth (normalized to sample rate) for a given symbol length.
 /// PSK31 (256 samples/symbol) uses a wide 0.06 loop that acquires in a few
@@ -332,7 +516,10 @@ impl PskDemod {
             p_tot: 0.0,
             pending: Vec::new(),
             sample_index: 0,
-            qpsk_dec: v.conv_code().map(|c| c.streaming_decoder(QPSK_TRACEBACK)),
+            qpsk_dec: v
+                .is_qpsk()
+                .then(|| v.conv_code().unwrap().streaming_decoder(QPSK_TRACEBACK)),
+            robust: v.is_robust().then(|| RobustRx::new(&v.conv_code().unwrap(), v.idepth())),
         }
     }
 
@@ -384,7 +571,41 @@ impl PskDemod {
         }
     }
 
+    /// Robust (`+F`/PSK-R) symbol decision: differential BPSK → one soft code bit
+    /// (LLR), fed to the streaming two-phase K=7 decoder. A steady carrier is code
+    /// bit `1` (negative LLR), a reversal code bit `0` (positive LLR); `positive
+    /// ⇒ code bit 0` is the Viterbi convention. ref: psk.cxx:1518-1528, 2335-2341.
+    fn on_robust_symbol(&mut self, sym: Cplx) {
+        if !self.have_prev {
+            self.prev = sym;
+            self.have_prev = true;
+            return;
+        }
+        let dot = sym.re * self.prev.re + sym.im * self.prev.im;
+        let norm = (self.prev.norm() * sym.norm()).max(1e-9);
+        self.prev = sym;
+        if let Some(r) = self.robust.as_mut() {
+            r.push_symbol(-QPSK_LLR * (dot / norm)); // normalised soft bit
+        }
+    }
+
     fn drain_completed(&mut self) -> Vec<Frame> {
+        if let Some(r) = self.robust.as_mut() {
+            return r
+                .drain()
+                .map(|text| {
+                    vec![Frame {
+                        payload: FramePayload::Text(text),
+                        meta: FrameMeta {
+                            crc_ok: true,
+                            sample_offset: self.sample_index,
+                            decoder: Some(self.v.label().into()),
+                            ..Default::default()
+                        },
+                    }]
+                })
+                .unwrap_or_default();
+        }
         let last_sep = (1..self.pending.len())
             .rev()
             .find(|&i| self.pending[i] == 0 && self.pending[i - 1] == 0);
@@ -466,12 +687,17 @@ impl Demodulator for PskDemod {
                     self.prev = Cplx::new(0.0, 0.0);
                     self.synced = false;
                     self.zrun = 0;
-                    if let Some(c) = self.v.conv_code() {
-                        self.qpsk_dec = Some(c.streaming_decoder(QPSK_TRACEBACK));
+                    if let Some(dec) = self.qpsk_dec.as_mut() {
+                        *dec = self.v.conv_code().unwrap().streaming_decoder(QPSK_TRACEBACK);
+                    }
+                    if self.robust.is_some() {
+                        self.robust = Some(RobustRx::new(&self.v.conv_code().unwrap(), self.v.idepth()));
                     }
                     continue;
                 }
-                if self.v.is_qpsk() {
+                if self.v.is_robust() {
+                    self.on_robust_symbol(sym);
+                } else if self.v.is_qpsk() {
                     self.on_qpsk_symbol(sym);
                 } else if self.have_prev {
                     // Differential BPSK on the complex symbol: Re{conj(prev)·sym}
@@ -632,6 +858,73 @@ mod tests {
             let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
             assert!(text.contains(msg), "{v:?} loopback recovered {text:?}");
         }
+    }
+
+    #[test]
+    fn psk63f_uses_k7_conv_code_and_mfsk() {
+        // ref: psk.cxx:70-74, 983-992, 448-451.
+        let c = PskVariant::Psk63F.conv_code().unwrap();
+        assert_eq!((c.k, c.polys), (7, vec![0x6d, 0x4f]));
+        assert!(PskVariant::Psk63F.is_robust());
+        assert!(!PskVariant::Psk63F.is_qpsk());
+    }
+
+    #[test]
+    fn psk63f_loopback() {
+        // The MFSK Varicode drops the final char (no trailing boundary bit), so
+        // check the message minus its last character round-trips through the full
+        // robust chain (K=7 FEC + two-phase Viterbi + MFSK framing).
+        let msg = "CQ DE K1ABC";
+        let audio = PskMod::new(PskVariant::Psk63F, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let text = recovered_text(&PskDemod::new(PskVariant::Psk63F, 1500.0).feed(&audio));
+        assert!(text.contains(&msg[..msg.len() - 1]), "psk63f recovered {text:?}");
+    }
+
+    #[test]
+    fn pskr_idepth_table_matches_fldigi() {
+        // ref: psk.cxx:658-685.
+        assert_eq!(PskVariant::Psk125R.idepth(), 40);
+        assert_eq!(PskVariant::Psk250R.idepth(), 80);
+        assert_eq!(PskVariant::Psk500R.idepth(), 160);
+        assert_eq!(PskVariant::Psk1000R.idepth(), 160);
+        assert_eq!(PskVariant::Psk63F.idepth(), 0);
+        for v in [PskVariant::Psk125R, PskVariant::Psk250R, PskVariant::Psk500R] {
+            assert!(v.is_robust() && v.conv_code().unwrap().k == 7);
+        }
+    }
+
+    #[test]
+    fn pskr_grid_loopback() {
+        // The interleaved robust grid: MFSK Varicode + K=7 FEC + 2×2×idepth
+        // interleaver + two-phase Viterbi. MFSK drops the final char.
+        let msg = "CQ DE K1ABC";
+        for v in [
+            PskVariant::Psk125R,
+            PskVariant::Psk250R,
+            PskVariant::Psk500R,
+            PskVariant::Psk1000R,
+        ] {
+            let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
+            assert!(text.contains(&msg[..msg.len() - 1]), "{v:?} recovered {text:?}");
+        }
+    }
+
+    #[test]
+    fn psk63f_chunked_feed_emits_each_char_once() {
+        // The daemon streams small chunks: the concatenation of all emitted text
+        // must equal the single-feed decode exactly — no duplicated or dropped
+        // characters from the incremental two-phase emit.
+        let msg = "CQ DE K1ABC";
+        let audio = PskMod::new(PskVariant::Psk63F, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = PskDemod::new(PskVariant::Psk63F, 1500.0);
+        let mut text = String::new();
+        for chunk in audio.chunks(157) {
+            text.push_str(&recovered_text(&rx.feed(chunk)));
+        }
+        assert!(text.contains(&msg[..msg.len() - 1]), "chunked recovered {text:?}");
+        // No duplication: the recovered payload appears exactly once.
+        assert_eq!(text.matches("K1AB").count(), 1, "duplicated emit: {text:?}");
     }
 }
 
