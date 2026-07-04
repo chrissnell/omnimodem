@@ -205,17 +205,28 @@ mod tests {
             ("psk500r", 1500.0),
             ("psk1000r", 1500.0),
             ("psk63rc4", 1500.0),
+            ("psk63rc5", 1500.0),
             ("psk63rc10", 1500.0),
             ("psk63rc20", 1500.0),
             ("psk63rc32", 1500.0),
             ("psk125rc4", 1500.0),
+            ("psk125rc5", 1500.0),
             ("psk125rc10", 1500.0),
             ("psk125rc12", 1500.0),
             ("psk125rc16", 1500.0),
             ("psk250rc2", 1500.0),
+            ("psk250rc3", 1500.0),
+            ("psk250rc5", 1500.0),
             ("psk250rc6", 1500.0),
+            ("psk250rc7", 1500.0),
             ("psk500rc2", 1500.0),
+            ("psk500rc3", 1500.0),
             ("psk500rc4", 1500.0),
+            ("psk125c12", 1500.0),
+            ("psk250c6", 1500.0),
+            ("psk500c2", 1500.0),
+            ("psk500c4", 1500.0),
+            ("psk1000c2", 1500.0),
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
@@ -229,9 +240,8 @@ mod tests {
         // Round-trips through the canonical mode string.
         let c = ModeConfig::Psk { submode: "qpsk250".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
-        // Unknown PSK submodes (the multi-carrier nX grid lands later) are
-        // rejected, not silently accepted.
-        assert_eq!(ModeConfig::parse("psk63rc5"), None);
+        // A genuinely unknown submode is rejected, not silently accepted.
+        assert_eq!(ModeConfig::parse("psk9000"), None);
     }
 
     #[test]

@@ -46,6 +46,27 @@ impl Fir {
     }
 }
 
+/// Blackman-windowed sinc lowpass, cutoff `fc` given as a **normalized**
+/// frequency (cycles/sample). `len` follows fldigi's `wsincfilt` convention:
+/// the filter has `len + 1` taps. This is a byte-for-byte port of fldigi's
+/// `wsincfilt` (src/psk/pskcoeff.cxx:285), used for the PSK multi-carrier
+/// two-stage decimating matched filter so adjacent-carrier rejection matches.
+pub fn wsinc_blackman(len: usize, fc: f32) -> Vec<f32> {
+    let l2 = len as f32 / 2.0;
+    let k1 = 2.0 * PI / len as f32;
+    let k2 = 2.0 * PI * fc;
+    let mut h = vec![0.0f32; len + 1];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let x = i as f32 - l2;
+        let sinc = if i as f32 == l2 { 1.0 } else { (k2 * x).sin() / (k2 * x) };
+        let w = 0.42 - 0.5 * (k1 * i as f32).cos() + 0.08 * (2.0 * k1 * i as f32).cos();
+        *hi = sinc * w;
+    }
+    let sum: f32 = h.iter().sum();
+    h.iter_mut().for_each(|x| *x /= sum);
+    h
+}
+
 /// Windowed-sinc lowpass (Hamming), `cutoff_hz` normalized by `rate_hz`.
 pub fn design_lowpass(num_taps: usize, cutoff_hz: f32, rate_hz: f32) -> Vec<f32> {
     let fc = cutoff_hz / rate_hz; // cycles/sample
