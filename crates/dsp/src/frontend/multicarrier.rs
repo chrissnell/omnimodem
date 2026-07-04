@@ -26,6 +26,9 @@ pub struct MultiCarrier {
 
 impl MultiCarrier {
     pub fn new(rate: f32, center_hz: f32, symbollen: usize, numcarriers: usize) -> Self {
+        // At least one carrier: `modulate_symbols` scales by 1/N, so N=0 would
+        // emit NaN audio rather than fail loudly.
+        assert!(numcarriers >= 1, "MultiCarrier needs at least one carrier");
         let sc_bw = rate / symbollen as f32;
         let inter = SEPARATION * sc_bw;
         // f[0] = center + ((-N)+1) * inter/2; carriers step by `inter`, centered.

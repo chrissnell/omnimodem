@@ -300,14 +300,19 @@ impl Demodulator for PskDemod {
             // Track the symbol boundary from the filtered envelope and dump the
             // integrate-and-dump there. Both `derot` and the envelope share the
             // lowpass group delay, so the histogram's boundary phase aligns the
-            // integration window to `derot`'s symbols automatically. The half-
-            // symbol guard prevents a double dump when the tracked phase nudges,
-            // and the fallback forces progress if it nudges the other way.
+            // integration window to `derot`'s symbols automatically.
+            //
+            // The dump is pinned to one per symbol: it fires only in the window
+            // [sps-1, sps+2) since the last dump, so it can follow the tracked
+            // boundary drifting by ±1 sample/symbol (real clock offset is far
+            // slower) but can never fire a half-length symbol — a loose guard
+            // would let a jittering boundary inject a spurious extra symbol. The
+            // `+2` fallback forces progress if the boundary jumps past the match.
             let sps = self.v.samples_per_symbol();
             self.tm.feed(f.norm());
             let boundary = self.tm.transition_phase() as u64;
             let at_boundary =
-                self.sample_index % sps as u64 == boundary && self.since_dump >= sps / 2;
+                self.sample_index % sps as u64 == boundary && self.since_dump + 1 >= sps;
             if at_boundary || self.since_dump >= sps + 2 {
                 self.since_dump = 0;
                 let sym = self.acc;
