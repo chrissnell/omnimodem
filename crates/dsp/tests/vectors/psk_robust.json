@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "upstream": "w1hkj/fldigi 4.1.23 @ 61b97f413",
+    "files": ["src/filters/viterbi.cxx:218-256 (encoder)", "src/psk/psk.cxx:70-74 (PSKR_K=7, PSKR_POLY1=0x6d, PSKR_POLY2=0x4f), 983-992 (init), 2335-2342 (tx_bit)", "src/mfsk/mfskvaricode.cxx"],
+    "cmd": "bash scratch/refvectors/build_psk_robust.sh",
+    "note": "pskr_symbols = per-MFSK-varicode-bit K=7 code symbol s = parity(POLY1 & shreg) | (parity(POLY2 & shreg) << 1), s in 0..3, from fldigi's `encoder(7,0x6d,0x4f)` over the MFSK-varicode bitstream (before the interleaver, which PSK63F skips). omnimodem's ConvCode(k=7, [0x6d,0x4f]).encode paired s_i = out[2i] | (out[2i+1]<<1) must reproduce it over the payload."
+  },
+  "records": [
+{"msg":"CQ DE K1ABC","mfsk_bits":"110101001101100001001101110010111000100101111100111100001011110010000000011010100","pskr_symbols":"3 1 1 3 1 1 3 0 1 2 0 0 2 0 2 0 1 1 1 3 0 1 0 0 2 3 0 3 1 0 2 1 2 3 3 2 1 0 0 0 2 1 1 2 0 2 3 2 2 3 0 2 2 1 1 2 1 1 0 2 2 0 1 1 2 0 1 0 0 1 3 0 0 3 1 1 3 1 1 3 0"}
+  ]
+}
