@@ -367,6 +367,30 @@ mod tests {
             .collect()
     }
 
+    /// Bit-exact: omnimodem's PSK31 Varicode payload bitstream reproduces
+    /// fldigi's `psk_varicode_encode` output byte-for-byte. Provenance:
+    /// `tests/vectors/psk_bpsk.json` (fldigi 4.1.23 @ 61b97f413, driver
+    /// `scratch/refvectors/build_psk_varicode.sh`). Kept as a lib unit test (not
+    /// the `testutil`-gated kat.rs) so the reference gate runs in CI's default
+    /// `cargo test --workspace`.
+    #[test]
+    fn varicode_matches_fldigi_vector() {
+        let raw = include_str!("../../tests/vectors/psk_bpsk.json");
+        for msg in ["CQ DE K1ABC", "The quick brown fox 0123456789"] {
+            let needle = format!("\"msg\":\"{msg}\"");
+            let line = raw.lines().find(|l| l.contains(&needle)).expect("vector record");
+            let key = "\"varicode_bits\":\"";
+            let bi = line.find(key).unwrap() + key.len();
+            let want: Vec<u8> =
+                line[bi..line[bi..].find('"').unwrap() + bi].bytes().map(|c| c - b'0').collect();
+            assert_eq!(
+                encode_bpsk_bits(PskVariant::Psk125, msg),
+                want,
+                "PSK Varicode payload differs from fldigi for {msg:?}"
+            );
+        }
+    }
+
     #[test]
     fn params_match_fldigi_symbollen_table() {
         // ref: psk.cxx:382-409.
