@@ -16,8 +16,9 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"psk31", "psk63", "psk125", "psk250", "psk500", "psk1000",
 		"qpsk31", "qpsk63", "qpsk125", "qpsk250", "qpsk500",
 		"psk63f", "psk125r", "psk250r", "psk500r", "psk1000r",
-		"psk63rc4", "psk63rc10", "psk63rc20", "psk63rc32",
-		"psk125rc4", "psk125rc10", "psk125rc12", "psk125rc16", "psk250rc2", "psk250rc6", "psk500rc2", "psk500rc4",
+		"psk63rc4", "psk63rc5", "psk63rc10", "psk63rc20", "psk63rc32",
+		"psk125rc4", "psk125rc5", "psk125rc10", "psk125rc12", "psk125rc16",
+		"psk250rc2", "psk250rc3", "psk250rc5", "psk250rc6", "psk250rc7", "psk500rc2", "psk500rc3", "psk500rc4",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {

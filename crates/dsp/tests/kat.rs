@@ -640,6 +640,7 @@ fn nx_psk63r_grid_loopback_and_awgn() {
     let want = &msg[..msg.len() - 1];
     for v in [
         PskVariant::Psk63Rc4,
+        PskVariant::Psk63Rc5,
         PskVariant::Psk63Rc10,
         PskVariant::Psk63Rc20,
         PskVariant::Psk63Rc32,
@@ -675,10 +676,11 @@ fn nx_rate_grid_loopback_and_awgn() {
     let msg = "CQ DE K1ABC";
     let want = &msg[..msg.len() - 1];
     for v in [
-        PskVariant::Psk125Rc4,
+        PskVariant::Psk125Rc5,
         PskVariant::Psk125Rc16,
-        PskVariant::Psk250Rc6,
-        PskVariant::Psk500Rc4,
+        PskVariant::Psk250Rc3,
+        PskVariant::Psk250Rc7,
+        PskVariant::Psk500Rc3,
     ] {
         let clean = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
         assert!(texts(&PskDemod::new(v, 1500.0).feed(&clean)).contains(want), "{v:?} clean");
