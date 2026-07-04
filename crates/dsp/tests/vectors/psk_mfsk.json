@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "upstream": "w1hkj/fldigi 4.1.23 @ 61b97f413",
+    "files": ["src/mfsk/mfskvaricode.cxx:35-349 (varicode[]/varidecode[])", "src/psk/psk.cxx:1117-1123 (rx_bit MFSK framing), 2467-2489 (tx_char)"],
+    "cmd": "bash scratch/refvectors/build_mfsk_varicode.sh",
+    "note": "mfsk_bits = the self-framed IZ8BLY MFSK Varicode bitstream fldigi's PSK-R/+F path feeds its FEC (varienc(c) codewords concatenated with NO separator). decoded = the round-trip through fldigi's rx_bit framing (shreg=(shreg<<1)|bit; on (shreg&7)==1 decode shreg>>1, reset shreg=1). The trailing 'C' is dropped because no following codeword supplies the boundary bit — this is fldigi's exact behaviour for this input, so omnimodem must reproduce it byte-for-byte."
+  },
+  "records": [
+{"msg":"CQ DE K1ABC","mfsk_bits":"110101001101100001001101110010111000100101111100111100001011110010000000011010100","decoded":"CQ DE K1AB"}
+  ]
+}

@@ -246,6 +246,28 @@ mod tests {
         bits.iter().map(|&b| if b == 0 { 4.0 } else { -4.0 }).collect()
     }
 
+    /// Bit-exact: the PSK-R robust K=7 code (POLY 0x6d/0x4f) reproduces fldigi's
+    /// `encoder(7,0x6d,0x4f)` code-symbol sequence over an MFSK-varicode
+    /// bitstream. Provenance: `tests/vectors/psk_robust.json` (fldigi 4.1.23 @
+    /// 61b97f413, driver `scratch/refvectors/build_psk_robust.sh`). This is the
+    /// FEC prerequisite for the PSK-R / +F robust modes.
+    #[test]
+    fn k7_pskr_matches_fldigi_vector() {
+        let raw = include_str!("../../tests/vectors/psk_robust.json");
+        let line = raw.lines().find(|l| l.contains("\"pskr_symbols\"")).unwrap();
+        let field = |k: &str| {
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let vbits: Vec<u8> = field("\"mfsk_bits\":\"").bytes().map(|c| c - b'0').collect();
+        let want: Vec<u8> =
+            field("\"pskr_symbols\":\"").split(' ').map(|s| s.parse().unwrap()).collect();
+        let code = ConvCode { k: 7, polys: vec![0x6d, 0x4f] };
+        let out = code.encode(&vbits);
+        let got: Vec<u8> = (0..want.len()).map(|i| out[2 * i] | (out[2 * i + 1] << 1)).collect();
+        assert_eq!(got, want, "K=7 PSK-R code symbols differ from fldigi");
+    }
+
     #[test]
     fn streaming_viterbi_recovers_stream_after_traceback_delay() {
         // A K=5 code (as QPSK uses): encode a bit stream, feed the code bits as
