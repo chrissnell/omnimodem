@@ -81,6 +81,12 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		if rf := msg.ev.GetRxFrame(); rf != nil && rf.GetChannel() == v.m.sel {
 			v.appendRx(string(rf.GetData()))
 		}
+		if tf := msg.ev.GetTransmitFailed(); tf != nil && v.tx.active() {
+			// The burst never keyed (e.g. the message can't be encoded in this
+			// mode). Tell the operator instead of leaving them with silence; the
+			// TransmitComplete that follows resets state and releases the lease.
+			v.m.toast = ui.NewToast("TX failed: "+tf.GetReason(), ui.SeverityError)
+		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
 			return v, releaseLeaseCmd(v.m.c, v.m.sel)

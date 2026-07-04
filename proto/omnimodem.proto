@@ -181,6 +181,7 @@ message Event {
     ClockOffset clock_offset = 11;      // LOSSY
     ChannelMetrics channel_metrics = 12; // LOSSY
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
+    TransmitFailed transmit_failed = 14; // LOSSY: TX aborted before keying
   }
 }
 
@@ -216,6 +217,15 @@ message TransmitStarted {
 message TransmitComplete {
   uint32 channel = 1;
   uint64 transmit_id = 2;
+}
+
+// A transmit that could not go on the air (e.g. the message can't be encoded in
+// this mode), reported so the client can tell the operator instead of leaving
+// them with unexplained silence.
+message TransmitFailed {
+  uint32 channel = 1;
+  uint64 transmit_id = 2;
+  string reason = 3;
 }
 
 // A decoded RX frame. No DSP exists in Phase 1, so this is emitted only by

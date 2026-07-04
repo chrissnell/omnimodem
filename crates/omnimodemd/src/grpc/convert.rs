@@ -175,6 +175,13 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
                 transmit_id: transmit_id.0,
             })
         }
+        TelemetryEvent::TransmitFailed { channel, transmit_id, reason } => {
+            Kind::TransmitFailed(proto::TransmitFailed {
+                channel: channel.0,
+                transmit_id: transmit_id.0,
+                reason,
+            })
+        }
         TelemetryEvent::AudioLevel { channel, dbfs } => {
             Kind::AudioLevel(proto::AudioLevel { channel: channel.0, dbfs })
         }
