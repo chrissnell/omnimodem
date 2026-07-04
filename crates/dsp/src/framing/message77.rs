@@ -891,14 +891,44 @@ pub mod legacy {
         }
     }
 
-    /// Pack a standard `CALL1 CALL2 GRID` JT65/JT9 message to 72 bits.
+    /// Number of distinct base callsigns `pack_basecall` can produce (`0..NBASE`).
+    /// The `CQ`/`QRZ`/`DE` calling tokens are packed just above this range so they
+    /// never collide with a real callsign and still fit the 28-bit call field.
+    /// WSJT-X uses the same NBASE-relative scheme; only the round-trip within this
+    /// port matters here (the exact on-air layout is the `#[ignore]` cross-decode
+    /// gate).
+    const NBASE: u32 = 37 * 36 * 10 * 27 * 27 * 27;
+
+    /// Pack a first/second callsign field for a legacy 72-bit message: a real base
+    /// call, or one of the `CQ`/`QRZ`/`DE` calling tokens. Without this, calling CQ
+    /// in JT65/JT9 failed to encode and the mode transmitted nothing.
+    fn pack_call72(token: &str) -> Option<u32> {
+        match token {
+            "CQ" => Some(NBASE),
+            "QRZ" => Some(NBASE + 1),
+            "DE" => Some(NBASE + 2),
+            _ => pack_basecall(token, token.len()).map(|n| n as u32),
+        }
+    }
+
+    fn unpack_call72(n: u32) -> Option<String> {
+        match n {
+            n if n == NBASE => Some("CQ".to_string()),
+            n if n == NBASE + 1 => Some("QRZ".to_string()),
+            n if n == NBASE + 2 => Some("DE".to_string()),
+            _ => unpack_basecall(n),
+        }
+    }
+
+    /// Pack a `CALL1 CALL2 GRID` JT65/JT9 message to 72 bits. `CALL1` may be a
+    /// `CQ`/`QRZ`/`DE` calling token (the FT8-style QSO ladder opens with `CQ …`).
     pub fn pack72(message: &str) -> Option<[u8; 72]> {
         let parts: Vec<&str> = message.split_whitespace().collect();
         if parts.len() != 3 {
             return None;
         }
-        let n1 = pack_basecall(parts[0], parts[0].len())? as u128;
-        let n2 = pack_basecall(parts[1], parts[1].len())? as u128;
+        let n1 = pack_call72(parts[0])? as u128;
+        let n2 = pack_call72(parts[1])? as u128;
         let ng = packgrid(parts[2]) as u128;
         if ng > 0xFFFF {
             return None;
@@ -912,8 +942,8 @@ pub mod legacy {
         let ng = (v & 0xFFFF) as u16;
         let n2 = ((v >> 16) & 0x0FFF_FFFF) as u32;
         let n1 = ((v >> 44) & 0x0FFF_FFFF) as u32;
-        let c1 = unpack_basecall(n1)?;
-        let c2 = unpack_basecall(n2)?;
+        let c1 = unpack_call72(n1)?;
+        let c2 = unpack_call72(n2)?;
         let grid = unpackgrid(ng, 0);
         Some(format!("{c1} {c2} {grid}"))
     }
@@ -984,6 +1014,22 @@ mod legacy_tests {
     fn jt65_message_two_prefix_call_round_trips() {
         let bits = pack72("VK3ABC ZL2XYZ RF80").unwrap();
         assert_eq!(unpack72(&bits).unwrap(), "VK3ABC ZL2XYZ RF80");
+    }
+
+    #[test]
+    fn jt65_cq_call_round_trips() {
+        // The QSO ladder opens with "CQ MYCALL MYGRID"; before CQ was a valid
+        // call token this failed to pack and JT65/JT9 transmitted silence.
+        let bits = pack72("CQ K1ABC FN42").unwrap();
+        assert_eq!(unpack72(&bits).unwrap(), "CQ K1ABC FN42");
+        // The other calling tokens round-trip in the first field too.
+        for tok in ["QRZ", "DE"] {
+            let bits = pack72(&format!("{tok} K1ABC FN42")).unwrap();
+            assert_eq!(unpack72(&bits).unwrap(), format!("{tok} K1ABC FN42"));
+        }
+        // A real callsign starting with those letters is not mistaken for a token.
+        let bits = pack72("CQ2ABC W9XYZ EN37").unwrap();
+        assert_eq!(unpack72(&bits).unwrap(), "CQ2ABC W9XYZ EN37");
     }
 
     #[test]
