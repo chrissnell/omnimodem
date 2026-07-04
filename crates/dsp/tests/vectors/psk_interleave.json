@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "upstream": "w1hkj/fldigi 4.1.23 @ 61b97f413",
+    "files": ["src/mfsk/interleave.cxx", "src/include/interleave.h", "src/psk/psk.cxx:2337 (Txinlv->bits)"],
+    "cmd": "bash scratch/refvectors/build_psk_interleave.sh",
+    "note": "The fldigi diagonal (de)interleaver, size=2, depth=40 (PSK125R idepth). `in` = 2-bit code pairs fed to the forward interleaver; `fwd` = its output (one bit of each pair delayed by `depth`); `rev` = round-trip through the reverse interleaver (recovers `in` delayed by `depth` pairs; 256 = an un-repacked PUNCTURE fill). omnimodem's DiagInterleaver forward output must reproduce `fwd` byte-for-byte."
+  },
+  "records": [
+{"depth":40,"in":"1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2","fwd":"0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 0 0 2 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2 1 0 3 2"}
+  ]
+}

@@ -200,6 +200,10 @@ mod tests {
             ("qpsk250", 1500.0),
             ("qpsk500", 1500.0),
             ("psk63f", 1500.0),
+            ("psk125r", 1500.0),
+            ("psk250r", 1500.0),
+            ("psk500r", 1500.0),
+            ("psk1000r", 1500.0),
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
@@ -213,8 +217,9 @@ mod tests {
         // Round-trips through the canonical mode string.
         let c = ModeConfig::Psk { submode: "qpsk250".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
-        // Unknown PSK submodes (robust/+F land later) are rejected, not silent.
-        assert_eq!(ModeConfig::parse("psk125r"), None);
+        // Unknown PSK submodes (the multi-carrier nX grid lands later) are
+        // rejected, not silently accepted.
+        assert_eq!(ModeConfig::parse("psk63rc4"), None);
     }
 
     #[test]
