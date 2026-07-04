@@ -30,6 +30,7 @@ pub use modes::{
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     olivia::{OliviaDemod, OliviaMod},
+    psk::{PskDemod, PskMod, PskVariant},
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
     wspr::{WsprDemod, WsprMod},

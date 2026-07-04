@@ -420,3 +420,82 @@ fn phase4_exit_criterion() {
     win[..wave.len()].copy_from_slice(&wave);
     assert!(texts(&Ft8Demod::new().decode_window(&win, 0)).contains("CQ K1ABC FN42"), "FT8 exit");
 }
+
+// --- Group P: PSK family (fldigi parity) ---------------------------------
+
+/// Extract the `varicode_bits` (0/1 string) for one message from the fldigi
+/// golden vector, using the same minimal line scan as message77's vector test
+/// (no serde dependency in the test crate).
+fn psk_bpsk_vector_bits(msg: &str) -> Vec<u8> {
+    let raw = include_str!("vectors/psk_bpsk.json");
+    let needle = format!("\"msg\":\"{msg}\"");
+    for line in raw.lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        let key = "\"varicode_bits\":\"";
+        let bi = line.find(key).expect("varicode_bits field") + key.len();
+        let bits = &line[bi..line[bi..].find('"').unwrap() + bi];
+        return bits.bytes().map(|c| c - b'0').collect();
+    }
+    panic!("message {msg:?} not in psk_bpsk.json");
+}
+
+/// Bit-exact: omnimodem's PSK31 Varicode payload bitstream (codeword + `00`
+/// separators) reproduces fldigi's `psk_varicode_encode` output byte-for-byte.
+/// Provenance: `tests/vectors/psk_bpsk.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_psk_varicode.sh`).
+#[test]
+fn psk_bpsk_varicode_matches_fldigi_vector() {
+    use omnimodem_dsp::modes::psk::{encode_bpsk_bits, PskVariant};
+    for msg in ["CQ DE K1ABC", "The quick brown fox 0123456789"] {
+        let want = psk_bpsk_vector_bits(msg);
+        let got = encode_bpsk_bits(PskVariant::Psk125, msg);
+        assert_eq!(got, want, "PSK Varicode payload differs from fldigi for {msg:?}");
+    }
+}
+
+/// The full BPSK rate grid round-trips a message through TX→RX on a clean
+/// channel and under light AWGN (envelope-histogram timing + differential
+/// decode). One representative per rate; the submode grid is parametric.
+#[test]
+fn psk_bpsk_rate_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::psk::{PskDemod, PskMod, PskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC";
+    for v in [
+        PskVariant::Psk31,
+        PskVariant::Psk63,
+        PskVariant::Psk125,
+        PskVariant::Psk250,
+        PskVariant::Psk500,
+        PskVariant::Psk1000,
+    ] {
+        // Clean channel.
+        let clean = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert!(
+            texts(&PskDemod::new(v, 1500.0).feed(&clean)).contains(msg),
+            "{v:?} clean loopback"
+        );
+        // Light AWGN.
+        let mut noisy = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x9151 + v.samples_per_symbol() as u64);
+        add_awgn(&mut noisy, 0.03, &mut rng);
+        assert!(
+            texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(msg),
+            "{v:?} AWGN loopback"
+        );
+    }
+}
