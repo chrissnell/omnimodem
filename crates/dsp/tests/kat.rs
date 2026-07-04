@@ -499,3 +499,53 @@ fn psk_bpsk_rate_grid_loopback_and_awgn() {
         );
     }
 }
+
+/// QPSK family: bit-exact K=5 FEC vs fldigi, plus clean + AWGN loopback across
+/// the rate grid (differential-QPSK detection + continuous Viterbi).
+#[test]
+fn psk_qpsk_fec_and_loopback() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::psk::{PskDemod, PskMod, PskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    // Bit-exact FEC vs the fldigi vector.
+    let raw = include_str!("vectors/psk_qpsk.json");
+    let line = raw.lines().find(|l| l.contains("\"qpsk_symbols\"")).unwrap();
+    let field = |k: &str| {
+        let i = line.find(k).unwrap() + k.len();
+        line[i..line[i..].find('"').unwrap() + i].to_string()
+    };
+    let vbits: Vec<u8> = field("\"varicode_bits\":\"").bytes().map(|c| c - b'0').collect();
+    let want: Vec<u8> =
+        field("\"qpsk_symbols\":\"").split(' ').map(|s| s.parse().unwrap()).collect();
+    let code = PskVariant::Qpsk125.conv_code().unwrap();
+    let out = code.encode(&vbits);
+    let got: Vec<u8> = (0..want.len()).map(|i| out[2 * i] | (out[2 * i + 1] << 1)).collect();
+    assert_eq!(got, want, "QPSK K=5 code symbols differ from fldigi");
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC";
+    for v in [
+        PskVariant::Qpsk31,
+        PskVariant::Qpsk63,
+        PskVariant::Qpsk125,
+        PskVariant::Qpsk250,
+        PskVariant::Qpsk500,
+    ] {
+        let clean = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert!(texts(&PskDemod::new(v, 1500.0).feed(&clean)).contains(msg), "{v:?} clean");
+        let mut noisy = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x9251 + v.samples_per_symbol() as u64);
+        add_awgn(&mut noisy, 0.03, &mut rng);
+        assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(msg), "{v:?} AWGN");
+    }
+}

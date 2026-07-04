@@ -18,6 +18,7 @@
 //! the modulator is validated by round-trip recovery rather than a captured
 //! waveform.
 
+use crate::fec::conv::{ConvCode, StreamingViterbi};
 use crate::framing::varicode::{decode as vari_decode, encode as vari_encode, PSK31};
 use crate::frontend::fir::{design_lowpass, Fir};
 use crate::frontend::modulate::DiffPsk;
@@ -30,8 +31,10 @@ use crate::types::{Cplx, Frame, FrameMeta, FramePayload, Sample};
 /// fldigi samplerate for every Phase-7 (8 kHz) PSK submode. ref: psk.cxx:370.
 pub const PSK_RATE: u32 = 8_000;
 
-/// The plain differential-BPSK rates. `symbollen` (samples/symbol) fixes the
-/// baud as `PSK_RATE / symbollen`. ref: psk.cxx:382-409.
+/// The Phase-7 PSK submodes ported so far: the plain differential-BPSK rates
+/// and the differential-QPSK rates (K=5 convolutional FEC). `symbollen`
+/// (samples/symbol) fixes the baud as `PSK_RATE / symbollen`. ref:
+/// psk.cxx:382-444.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PskVariant {
     Psk31,
@@ -40,29 +43,42 @@ pub enum PskVariant {
     Psk250,
     Psk500,
     Psk1000,
+    Qpsk31,
+    Qpsk63,
+    Qpsk125,
+    Qpsk250,
+    Qpsk500,
 }
 
-/// Resolved per-variant parameters. ref: psk.cxx:382-409.
+/// Resolved per-variant parameters. ref: psk.cxx:382-444.
 #[derive(Debug, Clone, Copy)]
 pub struct PskParams {
     /// Samples per symbol at `PSK_RATE`; baud = `PSK_RATE / symbollen`.
     pub symbollen: usize,
     /// Preamble/postamble length in phase reversals (fldigi `dcdbits`).
     pub dcdbits: usize,
+    /// Differential QPSK (2 bits/symbol, K=5 convolutional FEC) vs plain BPSK.
+    pub qpsk: bool,
 }
 
 impl PskVariant {
-    /// ref: psk.cxx:382-409 (symbollen/dcdbits switch).
+    /// ref: psk.cxx:382-444 (symbollen/dcdbits/_qpsk switch).
     pub fn params(self) -> PskParams {
         use PskVariant::*;
-        let p = |symbollen, dcdbits| PskParams { symbollen, dcdbits };
+        let p = |symbollen, dcdbits, qpsk| PskParams { symbollen, dcdbits, qpsk };
         match self {
-            Psk31 => p(256, 32),
-            Psk63 => p(128, 64),
-            Psk125 => p(64, 128),
-            Psk250 => p(32, 256),
-            Psk500 => p(16, 512),
-            Psk1000 => p(8, 128),
+            Psk31 => p(256, 32, false),
+            Psk63 => p(128, 64, false),
+            Psk125 => p(64, 128, false),
+            Psk250 => p(32, 256, false),
+            Psk500 => p(16, 512, false),
+            Psk1000 => p(8, 128, false),
+            // QPSK: same symbol rates, 2 bits/symbol, K=5 FEC. ref: psk.cxx:414-444.
+            Qpsk31 => p(256, 32, true),
+            Qpsk63 => p(128, 64, true),
+            Qpsk125 => p(64, 128, true),
+            Qpsk250 => p(32, 256, true),
+            Qpsk500 => p(16, 512, true),
         }
     }
 
@@ -72,6 +88,17 @@ impl PskVariant {
 
     pub fn samples_per_symbol(self) -> usize {
         self.params().symbollen
+    }
+
+    pub fn is_qpsk(self) -> bool {
+        self.params().qpsk
+    }
+
+    /// The K=5 rate-1/2 convolutional code fldigi's QPSK modes use, or `None`
+    /// for the plain-BPSK rates. ref: psk.cxx:66-68 (K=5, POLY1=0x17, POLY2=0x19)
+    /// + psk.cxx:979-981 (`enc = new encoder(K, POLY1, POLY2)`).
+    pub fn conv_code(self) -> Option<ConvCode> {
+        self.is_qpsk().then(|| ConvCode { k: 5, polys: vec![0x17, 0x19] })
     }
 
     /// Parse an omnimodem/fldigi mode label. Returns `None` for unknown labels.
@@ -84,6 +111,11 @@ impl PskVariant {
             "psk250" => Psk250,
             "psk500" => Psk500,
             "psk1000" => Psk1000,
+            "qpsk31" => Qpsk31,
+            "qpsk63" => Qpsk63,
+            "qpsk125" => Qpsk125,
+            "qpsk250" => Qpsk250,
+            "qpsk500" => Qpsk500,
             _ => return None,
         })
     }
@@ -97,8 +129,23 @@ impl PskVariant {
             Psk250 => "psk250",
             Psk500 => "psk500",
             Psk1000 => "psk1000",
+            Qpsk31 => "qpsk31",
+            Qpsk63 => "qpsk63",
+            Qpsk125 => "qpsk125",
+            Qpsk250 => "qpsk250",
+            Qpsk500 => "qpsk500",
         }
     }
+}
+
+/// The differential rotation index fed to `DiffPsk` (bps=2) for a QPSK code
+/// symbol `s` (0..3, `s = poly1_bit | poly2_bit<<1`). fldigi maps `s` through
+/// `(4-s)&3` then `*4` into a 16-PSK constellation whose points are 22.5° apart
+/// (`sym_vec_pos`), landing on the four 90°-spaced QPSK phases {180,90,0,270}°;
+/// `DiffPsk` rotates by `idx*90°`, so `idx(s) = (6 - s) & 3` reproduces exactly
+/// that rotation. ref: psk.cxx:2247-2252, 2193-2210.
+fn qpsk_rot_index(s: u32) -> u32 {
+    (6 - s) & 3
 }
 
 /// The plain-BPSK payload bitstream: PSK31 Varicode + `00` separators, MSB-first.
@@ -139,6 +186,31 @@ impl PskMod {
         rev.extend(std::iter::repeat_n(1u32, pp.dcdbits.min(64)));
         rev
     }
+
+    /// The differential-rotation index stream (units of 90°) for a QPSK frame,
+    /// fed to `DiffPsk` (bps=2): `dcdbits` preamble reversals (rotation index 2 =
+    /// 180°), then the K=5-encoded Varicode payload — each code symbol `s` mapped
+    /// to `qpsk_rot_index(s)` — then a short reversal postamble. The convolutional
+    /// encoder appends its own K-1 zero-flush tail (via `ConvCode::encode`), which
+    /// terminates the trellis so the streaming decoder settles.
+    fn qpsk_rot_stream(&self, text: &str) -> Vec<u32> {
+        let pp = self.v.params();
+        let code = self.v.conv_code().expect("qpsk variant");
+        // Sacrificial FEC-lock-in header of zero bits so the receiver's
+        // continuous Viterbi converges onto the valid trellis before the real
+        // Varicode payload (fldigi pads with <NUL> chars; ref: psk.cxx:2585).
+        // The leading `00` also gives the Varicode framer a clean sync point.
+        let mut vbits = vec![0u8; 64];
+        vbits.extend(encode_bpsk_bits(self.v, text));
+        let coded = code.encode(&vbits); // 2 bits/symbol, tail-flushed
+        let mut rot = vec![2u32; pp.dcdbits]; // preamble: 180° reversals
+        for pair in coded.chunks(2) {
+            let s = pair[0] as u32 | ((pair[1] as u32) << 1);
+            rot.push(qpsk_rot_index(s));
+        }
+        rot.extend(std::iter::repeat_n(2u32, pp.dcdbits.min(64))); // postamble
+        rot
+    }
 }
 
 impl Modulator for PskMod {
@@ -157,9 +229,16 @@ impl Modulator for PskMod {
             FramePayload::Text(t) => t,
             _ => return Err(ModError::UnsupportedPayload("psk needs text")),
         };
-        let rev = self.reversal_stream(text);
-        let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, self.v.samples_per_symbol(), 1);
-        Ok(psk.modulate(&rev))
+        let sps = self.v.samples_per_symbol();
+        if self.v.is_qpsk() {
+            let rot = self.qpsk_rot_stream(text);
+            let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, sps, 2);
+            Ok(psk.modulate(&rot))
+        } else {
+            let rev = self.reversal_stream(text);
+            let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, sps, 1);
+            Ok(psk.modulate(&rev))
+        }
     }
 }
 
@@ -194,7 +273,15 @@ pub struct PskDemod {
     p_tot: f32,
     pending: Vec<u8>,
     sample_index: u64,
+    // QPSK only: the continuous K=5 Viterbi decoding the differential symbol
+    // stream into Varicode bits. `None` for the plain-BPSK rates.
+    qpsk_dec: Option<StreamingViterbi>,
 }
+
+/// Viterbi traceback depth for the K=5 QPSK stream (~6× constraint length).
+const QPSK_TRACEBACK: usize = 30;
+/// Strong hard-decision LLR magnitude (fldigi feeds 0/255 hard soft-symbols).
+const QPSK_LLR: f32 = 4.0;
 
 /// Costas loop bandwidth (normalized to sample rate) for a given symbol length.
 /// PSK31 (256 samples/symbol) uses a wide 0.06 loop that acquires in a few
@@ -245,6 +332,55 @@ impl PskDemod {
             p_tot: 0.0,
             pending: Vec::new(),
             sample_index: 0,
+            qpsk_dec: v.conv_code().map(|c| c.streaming_decoder(QPSK_TRACEBACK)),
+        }
+    }
+
+    /// Feed one Varicode data bit into the `00`-framed accumulator/sync (shared
+    /// by the BPSK differential path and the QPSK Viterbi output).
+    fn push_data_bit(&mut self, data_bit: u8) {
+        if self.synced {
+            self.pending.push(data_bit);
+        } else if data_bit == 0 {
+            self.zrun += 1;
+            if self.zrun >= 2 {
+                self.synced = true;
+            }
+        } else {
+            self.zrun = 0;
+        }
+    }
+
+    /// QPSK symbol decision: differential phase → the two K=5 code bits (fldigi's
+    /// exact remap), pushed as hard LLRs through the continuous Viterbi; any bit
+    /// it emits is a Varicode data bit. ref: psk.cxx:1495-1497 (phase→bits),
+    /// 1188-1211 (rx_qpsk soft-symbol mapping).
+    fn on_qpsk_symbol(&mut self, sym: Cplx) {
+        if !self.have_prev {
+            self.prev = sym;
+            self.have_prev = true;
+            return;
+        }
+        let mut phase = (sym * self.prev.conj()).arg();
+        if phase < 0.0 {
+            phase += std::f32::consts::TAU;
+        }
+        self.prev = sym;
+        // fldigi: bits = (int)(phase / (π/2) + 0.5) & 3; then (4 - bits) & 3.
+        let r = (phase / std::f32::consts::FRAC_PI_2 + 0.5) as u32 & 3;
+        let bits2 = (4 - r) & 3;
+        // sym[0] carries poly1 (0x17): 1 ⇒ bits2&1. sym[1] carries poly2 (0x19),
+        // "top bit flipped": poly2 bit = 1 ⇔ (bits2 & 2) == 0.
+        let p1 = bits2 & 1;
+        let p2 = u32::from(bits2 & 2 == 0);
+        let llr = [
+            if p1 == 0 { QPSK_LLR } else { -QPSK_LLR },
+            if p2 == 0 { QPSK_LLR } else { -QPSK_LLR },
+        ];
+        if let Some(dec) = self.qpsk_dec.as_mut() {
+            if let Some(bit) = dec.push(&llr) {
+                self.push_data_bit(bit);
+            }
         }
     }
 
@@ -294,7 +430,13 @@ impl Demodulator for PskDemod {
             let f = Cplx::new(self.lpf_i.push(bb.re), self.lpf_q.push(bb.im));
             self.p_in += CARRIER_EMA * (f.norm_sqr() - self.p_in);
             self.p_tot += CARRIER_EMA * (bb.norm_sqr() - self.p_tot);
-            let derot = self.costas.process(f);
+            // BPSK uses a Costas loop for carrier recovery; QPSK is detected
+            // differentially (non-coherent), and a BPSK Costas mis-locks on the
+            // 4-fold-symmetric QPSK constellation — its time-varying rotation
+            // would not cancel in the differential, so QPSK runs on the raw
+            // filtered baseband and lets `arg(conj(prev)·cur)` reject the
+            // constant carrier phase.
+            let derot = if self.v.is_qpsk() { f } else { self.costas.process(f) };
             self.acc += derot;
             self.since_dump += 1;
             // Track the symbol boundary from the filtered envelope and dump the
@@ -324,9 +466,14 @@ impl Demodulator for PskDemod {
                     self.prev = Cplx::new(0.0, 0.0);
                     self.synced = false;
                     self.zrun = 0;
+                    if let Some(c) = self.v.conv_code() {
+                        self.qpsk_dec = Some(c.streaming_decoder(QPSK_TRACEBACK));
+                    }
                     continue;
                 }
-                if self.have_prev {
+                if self.v.is_qpsk() {
+                    self.on_qpsk_symbol(sym);
+                } else if self.have_prev {
                     // Differential BPSK on the complex symbol: Re{conj(prev)·sym}
                     // is positive for a steady carrier (data `1`), negative for a
                     // phase reversal (data `0`). Using the full phasor keeps the
@@ -335,19 +482,13 @@ impl Demodulator for PskDemod {
                     // offset would otherwise bleed the in-phase energy away.
                     let dot = sym.re * self.prev.re + sym.im * self.prev.im;
                     let data_bit = u8::from(dot >= 0.0);
-                    if self.synced {
-                        self.pending.push(data_bit);
-                    } else if data_bit == 0 {
-                        self.zrun += 1;
-                        if self.zrun >= 2 {
-                            self.synced = true;
-                        }
-                    } else {
-                        self.zrun = 0;
-                    }
+                    self.push_data_bit(data_bit);
+                    self.prev = sym;
+                    self.have_prev = true;
+                } else {
+                    self.prev = sym;
+                    self.have_prev = true;
                 }
-                self.prev = sym;
-                self.have_prev = true;
             }
         }
         self.drain_completed()
@@ -418,10 +559,47 @@ mod tests {
             PskVariant::Psk250,
             PskVariant::Psk500,
             PskVariant::Psk1000,
+            PskVariant::Qpsk31,
+            PskVariant::Qpsk63,
+            PskVariant::Qpsk125,
+            PskVariant::Qpsk250,
+            PskVariant::Qpsk500,
         ] {
             assert_eq!(PskVariant::from_label(v.label()), Some(v));
         }
-        assert_eq!(PskVariant::from_label("qpsk31"), None);
+        assert_eq!(PskVariant::from_label("psk2000"), None);
+    }
+
+    /// Bit-exact: omnimodem's K=5 convolutional encoder reproduces fldigi's QPSK
+    /// code-symbol sequence byte-for-byte over the Varicode payload. Provenance:
+    /// `tests/vectors/psk_qpsk.json` (fldigi 4.1.23 @ 61b97f413, driver
+    /// `scratch/refvectors/build_psk_qpsk.sh`).
+    #[test]
+    fn qpsk_fec_matches_fldigi_vector() {
+        let raw = include_str!("../../tests/vectors/psk_qpsk.json");
+        let line = raw.lines().find(|l| l.contains("\"qpsk_symbols\"")).expect("record");
+        let vkey = "\"varicode_bits\":\"";
+        let vi = line.find(vkey).unwrap() + vkey.len();
+        let vbits: Vec<u8> =
+            line[vi..line[vi..].find('"').unwrap() + vi].bytes().map(|c| c - b'0').collect();
+        let skey = "\"qpsk_symbols\":\"";
+        let si = line.find(skey).unwrap() + skey.len();
+        let want: Vec<u8> = line[si..line[si..].find('"').unwrap() + si]
+            .split(' ')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let code = PskVariant::Qpsk125.conv_code().unwrap();
+        let out = code.encode(&vbits);
+        let got: Vec<u8> = (0..want.len()).map(|i| out[2 * i] | (out[2 * i + 1] << 1)).collect();
+        assert_eq!(got, want, "K=5 QPSK code symbols differ from fldigi");
+    }
+
+    #[test]
+    fn qpsk_uses_k5_conv_code() {
+        // ref: psk.cxx:66-68, 979-981.
+        let c = PskVariant::Qpsk125.conv_code().unwrap();
+        assert_eq!((c.k, c.polys), (5, vec![0x17, 0x19]));
+        assert!(PskVariant::Psk125.conv_code().is_none());
     }
 
     #[test]
@@ -433,6 +611,22 @@ mod tests {
             PskVariant::Psk250,
             PskVariant::Psk500,
             PskVariant::Psk1000,
+        ] {
+            let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
+            assert!(text.contains(msg), "{v:?} loopback recovered {text:?}");
+        }
+    }
+
+    #[test]
+    fn qpsk_rate_grid_loopback() {
+        let msg = "CQ DE K1ABC";
+        for v in [
+            PskVariant::Qpsk31,
+            PskVariant::Qpsk63,
+            PskVariant::Qpsk125,
+            PskVariant::Qpsk250,
+            PskVariant::Qpsk500,
         ] {
             let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
             let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
