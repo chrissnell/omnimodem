@@ -652,8 +652,9 @@ struct MultiCarrierRx {
     fir2_i: Vec<Fir>,
     fir2_q: Vec<Fir>,
     z2: Vec<Cplx>, // latest matched-filter output per carrier
-    z2_index: u64,
     sample_index: u64, // raw input samples (for frame offsets, like every demod)
+    syncbuf: Vec<f32>, // fldigi bitclk envelope histogram (one symbol, mf_sps bins)
+    bitclk: f32,       // fractional symbol-clock accumulator (0..mf_sps)
     prev: Vec<Cplx>,
     have_prev: Vec<bool>,
     decode: McDecode,
@@ -689,8 +690,9 @@ impl MultiCarrierRx {
             fir2_i: (0..n).map(|_| Fir::new(f2.clone())).collect(),
             fir2_q: (0..n).map(|_| Fir::new(f2.clone())).collect(),
             z2: vec![Cplx::new(0.0, 0.0); n],
-            z2_index: 0,
             sample_index: 0,
+            syncbuf: vec![0.0; mf_sps],
+            bitclk: 0.0,
             prev: vec![Cplx::new(0.0, 0.0); n],
             have_prev: vec![false; n],
             decode,
@@ -719,12 +721,30 @@ impl MultiCarrierRx {
             if !decimate {
                 continue;
             }
-            self.z2_index += 1;
-            // Fixed eye-centre sampling aligned to the two-stage filter group delay
-            // (both stages FIRLEN/2; fir1 delay in z2 units is FIRLEN/2/dec).
-            let delay_z2 = (FIRLEN / 2) / self.dec + FIRLEN / 2;
-            let center = ((delay_z2 + self.mf_sps / 2) % self.mf_sps) as u64;
-            if self.z2_index % self.mf_sps as u64 == center {
+            // fldigi's `bitclk` symbol-timing recovery (psk.cxx:2058-2145): a leaky
+            // envelope histogram over one symbol (mf_sps bins), with a clock
+            // accumulator nudged by the lower-vs-upper-half amplitude imbalance so
+            // the sampling instant tracks transmitter clock drift rather than
+            // relying on a fixed grid. Shared across all carriers (mean envelope).
+            let bitsteps = self.mf_sps;
+            let symsteps = bitsteps / 2;
+            let idx = (self.bitclk as usize).min(bitsteps - 1);
+            let env: f32 = self.z2.iter().map(|z| z.norm()).sum::<f32>() / self.n as f32;
+            self.syncbuf[idx] = 0.8 * self.syncbuf[idx] + 0.2 * env;
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for i in 0..symsteps {
+                num += self.syncbuf[i] - self.syncbuf[i + symsteps];
+                den += self.syncbuf[i] + self.syncbuf[i + symsteps];
+            }
+            let err = if den == 0.0 { 0.0 } else { num / den };
+            self.bitclk -= err / (5.0 * 16.0 / bitsteps as f32);
+            self.bitclk += 1.0;
+            if self.bitclk < 0.0 {
+                self.bitclk += bitsteps as f32;
+            }
+            if self.bitclk >= bitsteps as f32 {
+                self.bitclk -= bitsteps as f32;
                 for c in 0..self.n {
                     let sym = self.z2[c];
                     if self.have_prev[c] {
@@ -1108,6 +1128,45 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Resample `sig` by `ratio` via linear interpolation, simulating a receiver
+    /// whose sample clock differs from the transmitter's by `(ratio - 1)`. The
+    /// symbol boundaries then walk relative to a fixed sampling grid, which the
+    /// `bitclk` timing loop must track.
+    fn resample_clock(sig: &[Sample], ratio: f64) -> Vec<Sample> {
+        let out_len = (sig.len() as f64 / ratio) as usize;
+        (0..out_len)
+            .map(|i| {
+                let t = i as f64 * ratio;
+                let j = t.floor() as usize;
+                let f = (t - j as f64) as f32;
+                let a = sig.get(j).copied().unwrap_or(0.0);
+                let b = sig.get(j + 1).copied().unwrap_or(a);
+                a + (b - a) * f
+            })
+            .collect()
+    }
+
+    /// The multi-carrier receiver tracks a transmitter clock offset: with the
+    /// audio resampled by ±0.3 % (a large clock error for HF), the `bitclk`
+    /// symbol-timing loop follows the drifting symbol boundaries and still
+    /// decodes, where a fixed sampling grid would walk off the eye. Covers both
+    /// decode backends — a robust FEC mode and an uncoded PSK31 mode.
+    #[test]
+    fn nx_tracks_clock_drift() {
+        let msg = "CQ DE K1ABC";
+        for (v, ratio, want) in [
+            (PskVariant::Psk250Rc3, 1.015, &msg[..msg.len() - 1]),
+            (PskVariant::Psk250Rc3, 0.985, &msg[..msg.len() - 1]),
+            (PskVariant::Psk500c2, 1.015, msg),
+            (PskVariant::Psk500c2, 0.985, msg),
+        ] {
+            let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let drifted = resample_clock(&audio, ratio);
+            let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&drifted));
+            assert!(text.contains(want), "{v:?} @ {ratio} recovered {text:?}");
+        }
     }
 
     /// Bit-exact: omnimodem's PSK31 Varicode payload bitstream reproduces
