@@ -318,7 +318,8 @@ mod tests {
             channel: ChannelId(0),
             rig: DeviceId::placeholder(),
             rate: 8_000,
-            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk31 {
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk {
+                submode: "psk31".into(),
                 center_hz: 1000.0,
             })
             .unwrap(),
@@ -501,7 +502,8 @@ mod tests {
             channel: ChannelId(0),
             rig: rig.clone(),
             rate: 8_000,
-            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk31 {
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk {
+                submode: "psk31".into(),
                 center_hz: 1000.0,
             })
             .unwrap(),
@@ -546,7 +548,7 @@ mod tests {
     fn payload_to_frame_routes_by_mode() {
         let f = payload_to_frame(&ModeConfig::Afsk1200 { tx: true }, vec![1, 2, 3]);
         assert!(matches!(f.payload, FramePayload::Packet(b) if b == vec![1, 2, 3]));
-        let f = payload_to_frame(&ModeConfig::Psk31 { center_hz: 1000.0 }, b"CQ".to_vec());
+        let f = payload_to_frame(&ModeConfig::Psk { submode: "psk31".into(), center_hz: 1000.0 }, b"CQ".to_vec());
         assert!(matches!(f.payload, FramePayload::Text(t) if t == "CQ"));
     }
 

@@ -89,6 +89,7 @@ message ModeParams {
     Psk31Params psk31 = 3;
     OliviaParams olivia = 4;
     Afsk1200Params afsk1200 = 5;
+    PskParams psk = 6;
   }
 }
 
@@ -106,6 +107,14 @@ message RttyParams {
 
 message Psk31Params {
   float center_hz = 1;  // audio center frequency
+}
+
+// The full fldigi PSK family (psk31/63/125/250/500/1000 and, as they land, the
+// QPSK/+F/robust submodes). `submode` is the mode label; `center_hz` the audio
+// carrier. Supersedes Psk31Params, which remains for legacy clients.
+message PskParams {
+  string submode = 1;   // psk::PskVariant label, e.g. "psk125"
+  float  center_hz = 2; // audio center frequency
 }
 
 message OliviaParams {

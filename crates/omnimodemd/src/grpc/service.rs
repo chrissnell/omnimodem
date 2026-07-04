@@ -363,7 +363,17 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
             ModeConfig::Rtty { baud: r.baud, shift_hz: r.shift_hz, center_hz, reverse: r.reverse }
                 .to_mode_string()
         }
-        Params::Psk31(p) => ModeConfig::Psk31 { center_hz: p.center_hz }.to_mode_string(),
+        Params::Psk31(p) => {
+            ModeConfig::Psk { submode: "psk31".into(), center_hz: p.center_hz }.to_mode_string()
+        }
+        Params::Psk(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
         Params::Olivia(o) => {
             ModeConfig::Olivia { tones: o.tones as u16, bandwidth_hz: o.bandwidth_hz as u16 }
                 .to_mode_string()
@@ -396,5 +406,21 @@ mod tests {
             params: Some(proto::mode_params::Params::Cw(proto::CwParams { wpm: 25, tone_hz: 600.0 })),
         };
         assert_eq!(effective_mode("ignored".into(), Some(mp)), "cw:wpm=25,tone=600");
+    }
+
+    #[test]
+    fn effective_mode_encodes_psk_family_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Psk(proto::PskParams {
+                submode: "psk250".into(),
+                center_hz: 1500.0,
+            })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "psk250:center=1500");
+        // Legacy Psk31Params still maps onto the parametric Psk config.
+        let legacy = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Psk31(proto::Psk31Params { center_hz: 1000.0 })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(legacy)), "psk31:center=1000");
     }
 }
