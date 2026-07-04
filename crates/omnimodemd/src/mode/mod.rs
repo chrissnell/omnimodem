@@ -185,7 +185,8 @@ mod tests {
 
     #[test]
     fn parse_resolves_psk_family() {
-        // Every fldigi BPSK rate resolves; the higher rates default to 1500 Hz.
+        // Every fldigi BPSK + QPSK rate resolves; the higher rates default to
+        // 1500 Hz (psk31 keeps its historical 1000 Hz).
         for (label, center) in [
             ("psk31", 1000.0),
             ("psk63", 1500.0),
@@ -193,6 +194,11 @@ mod tests {
             ("psk250", 1500.0),
             ("psk500", 1500.0),
             ("psk1000", 1500.0),
+            ("qpsk31", 1500.0),
+            ("qpsk63", 1500.0),
+            ("qpsk125", 1500.0),
+            ("qpsk250", 1500.0),
+            ("qpsk500", 1500.0),
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
@@ -204,10 +210,10 @@ mod tests {
             Some(ModeConfig::Psk { submode: "psk250".into(), center_hz: 1000.0 })
         );
         // Round-trips through the canonical mode string.
-        let c = ModeConfig::Psk { submode: "psk500".into(), center_hz: 1500.0 };
+        let c = ModeConfig::Psk { submode: "qpsk250".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
-        // Unknown PSK submodes (QPSK/robust land later) are rejected, not silent.
-        assert_eq!(ModeConfig::parse("qpsk31"), None);
+        // Unknown PSK submodes (robust/+F land later) are rejected, not silent.
+        assert_eq!(ModeConfig::parse("psk125r"), None);
     }
 
     #[test]

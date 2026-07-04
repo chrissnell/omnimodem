@@ -14,6 +14,7 @@ import (
 func TestAllDaemonModesAreExposed(t *testing.T) {
 	want := []string{
 		"psk31", "psk63", "psk125", "psk250", "psk500", "psk1000",
+		"qpsk31", "qpsk63", "qpsk125", "qpsk250", "qpsk500",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
@@ -64,6 +65,10 @@ func TestPskModeParams(t *testing.T) {
 	}
 	if d := modeParamsFor("psk125", nil).GetPsk(); d.GetCenterHz() != 1500 {
 		t.Fatalf("psk125 default center = %v, want 1500", d.GetCenterHz())
+	}
+	// QPSK routes through the same PskParams oneof, carrying its own submode.
+	if q := modeParamsFor("qpsk250", nil).GetPsk(); q == nil || q.GetSubmode() != "qpsk250" {
+		t.Fatalf("qpsk250 must carry PskParams with submode qpsk250")
 	}
 }
 

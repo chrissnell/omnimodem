@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "upstream": "w1hkj/fldigi 4.1.23 @ 61b97f413",
+    "files": ["src/filters/viterbi.cxx:218-256 (encoder)", "src/psk/psk.cxx:66-68 (K=5, POLY1=0x17, POLY2=0x19)", "src/psk/pskvaricode.cxx"],
+    "cmd": "bash scratch/refvectors/build_psk_qpsk.sh",
+    "note": "qpsk_symbols = per-varicode-bit K=5 convolutional code symbol s = parity(POLY1 & shreg) | (parity(POLY2 & shreg) << 1), s in 0..3, from fldigi's `encoder`. This is the bit-exact FEC domain (before the (4-s)&3 constellation remap in tx_carriers): omnimodem's ConvCode(k=5, polys=[0x17,0x19]).encode over the same varicode bitstream, paired s_i = out[2i] | (out[2i+1]<<1), must reproduce it byte-for-byte over the payload (omnimodem additionally appends k-1 tail-flush symbols)."
+  },
+  "records": [
+{"msg":"CQ DE K1ABC","varicode_bits":"101011010011101110100100101101010011101110010010111110100101111010011111010011101011001010110100","qpsk_symbols":"3 1 2 3 1 0 3 0 0 2 1 1 3 2 3 3 0 2 3 0 2 1 2 1 1 2 2 0 3 0 0 1 3 2 1 1 3 2 3 3 0 2 0 2 2 1 1 2 2 0 0 1 2 1 3 0 2 1 2 2 0 0 1 1 3 0 2 1 1 3 1 2 1 3 0 2 1 1 3 2 3 0 1 0 3 3 2 2 2 3 1 0 3 0 0 2"}
+  ]
+}
