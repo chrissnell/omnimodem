@@ -98,6 +98,119 @@ impl ConvCode {
         out.truncate(data_len);
         out
     }
+
+    /// A continuous (streaming) soft Viterbi decoder for this code, for modes
+    /// whose payload length is not known in advance and whose trellis is never
+    /// tail-terminated (fldigi's differential PSK/QPSK feed the decoder one
+    /// symbol at a time forever). See [`StreamingViterbi`].
+    pub fn streaming_decoder(&self, traceback: usize) -> StreamingViterbi {
+        StreamingViterbi::new(self.clone(), traceback)
+    }
+}
+
+/// Continuous soft-decision Viterbi decoder with a fixed traceback depth.
+///
+/// Unlike [`ConvCode::viterbi_decode`] (block, zero-tail-terminated), this keeps
+/// a rolling survivor history of `traceback` steps and, once primed, emits one
+/// decoded bit per pushed trellis step — the bit on the best survivor path
+/// `traceback` steps in the past. This matches fldigi's `viterbi` class, which
+/// decodes the never-terminated convolutional stream of the QPSK/PSK-R modes.
+pub struct StreamingViterbi {
+    code: ConvCode,
+    states: usize,
+    mask: usize,
+    metric: Vec<f32>,
+    // Ring buffers of `depth` steps: the entering bit and predecessor per state.
+    depth: usize,
+    bit_at: Vec<u8>,   // depth * states
+    prev_at: Vec<usize>, // depth * states
+    pos: usize,        // ring write index (mod depth)
+    filled: usize,     // steps pushed, capped at depth
+}
+
+impl StreamingViterbi {
+    fn new(code: ConvCode, traceback: usize) -> Self {
+        let states = 1usize << (code.k - 1);
+        let depth = traceback.max(1);
+        let mut metric = vec![f32::NEG_INFINITY; states];
+        metric[0] = 0.0; // encoder starts in the zero state
+        StreamingViterbi {
+            code,
+            states,
+            mask: states - 1,
+            metric,
+            depth,
+            bit_at: vec![0u8; depth * states],
+            prev_at: vec![0usize; depth * states],
+            pos: 0,
+            filled: 0,
+        }
+    }
+
+    /// Push one trellis step's `n` LLRs (positive ⇒ code bit 0, `polys` order).
+    /// Returns the decoded data bit `traceback` steps ago once the history has
+    /// filled, else `None`.
+    pub fn push(&mut self, llrs: &[Llr]) -> Option<u8> {
+        let n = self.code.polys.len();
+        debug_assert_eq!(llrs.len(), n);
+        let mut next = vec![f32::NEG_INFINITY; self.states];
+        let base = self.pos * self.states;
+        for (s, &ms) in self.metric.iter().enumerate() {
+            if ms == f32::NEG_INFINITY {
+                continue;
+            }
+            for bit in 0..2u32 {
+                let reg = ((s as u32) << 1) | bit;
+                let ns = (reg as usize) & self.mask;
+                let mut branch = 0.0f32;
+                for (j, &p) in self.code.polys.iter().enumerate() {
+                    let code_bit = (reg & p).count_ones() & 1;
+                    branch += if code_bit == 0 { llrs[j] } else { -llrs[j] };
+                }
+                let cand = ms + branch;
+                if cand > next[ns] {
+                    next[ns] = cand;
+                    self.bit_at[base + ns] = bit as u8;
+                    self.prev_at[base + ns] = s;
+                }
+            }
+        }
+        // Renormalise so metrics stay bounded on an endless stream.
+        let best = next.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        if best.is_finite() {
+            for m in next.iter_mut() {
+                if m.is_finite() {
+                    *m -= best;
+                }
+            }
+        }
+        self.metric = next;
+        self.pos = (self.pos + 1) % self.depth;
+        // After writing `depth` steps (steps 0..depth-1) the history spans the
+        // full traceback window, so the first emit lands on data bit 0.
+        self.filled = (self.filled + 1).min(self.depth);
+        if self.filled < self.depth {
+            return None;
+        }
+        // Trace back `depth` steps from the current best state and emit the
+        // oldest bit (the one about to be overwritten at `self.pos`).
+        let mut s = self
+            .metric
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let mut ring = (self.pos + self.depth - 1) % self.depth; // most-recent write
+        let mut oldest_bit = 0u8;
+        for _ in 0..self.depth {
+            let idx = ring * self.states + s;
+            oldest_bit = self.bit_at[idx];
+            s = self.prev_at[idx];
+            ring = (ring + self.depth - 1) % self.depth;
+        }
+        Some(oldest_bit)
+    }
 }
 
 /// Puncture an encoded stream by a boolean pattern (true = keep).
@@ -131,6 +244,38 @@ mod tests {
     fn bits_to_llr(bits: &[u8]) -> Vec<Llr> {
         // Hard bits → strong LLRs (+4 for code bit 0, -4 for 1).
         bits.iter().map(|&b| if b == 0 { 4.0 } else { -4.0 }).collect()
+    }
+
+    #[test]
+    fn streaming_viterbi_recovers_stream_after_traceback_delay() {
+        // A K=5 code (as QPSK uses): encode a bit stream, feed the code bits as
+        // strong LLRs to the streaming decoder, and confirm the emitted bits are
+        // the input delayed by the traceback depth, with no tail termination.
+        let code = ConvCode { k: 5, polys: vec![0x17, 0x19] };
+        let data: Vec<u8> = (0..200u32).map(|i| ((i * 37 + 11) >> 2 & 1) as u8).collect();
+        // Encode WITHOUT the block tail (continuous stream): raw per-bit outputs.
+        let mut reg = 0u32;
+        let mut coded = Vec::new();
+        for &b in &data {
+            reg = (reg << 1) | b as u32;
+            for &p in &code.polys {
+                coded.push((reg & p).count_ones() as u8 & 1);
+            }
+        }
+        let depth = 30;
+        let mut dec = code.streaming_decoder(depth);
+        let mut out = Vec::new();
+        for pair in coded.chunks(2) {
+            if let Some(b) = dec.push(&bits_to_llr(pair)) {
+                out.push(b);
+            }
+        }
+        // `out[i]` is `data[i]` (the decoder emits one bit per step once primed,
+        // lagging by `depth`). Compare the overlapping, settled region.
+        assert!(out.len() >= data.len() - depth);
+        for i in 0..(data.len() - depth) {
+            assert_eq!(out[i], data[i], "streaming viterbi bit {i}");
+        }
     }
 
     #[test]
@@ -197,3 +342,4 @@ mod tests {
         assert_eq!(code.viterbi_decode(&de, data.len()), data);
     }
 }
+
