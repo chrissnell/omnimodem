@@ -1,0 +1,12 @@
+{
+  "_meta": {
+    "upstream": "w1hkj/fldigi 4.1.23 @ 61b97f413",
+    "files": ["src/psk/pskvaricode.cxx:31-334 (varicodetab1 + psk_varicode_encode)"],
+    "cmd": "bash scratch/refvectors/build_psk_varicode.sh",
+    "note": "varicode_bits = per-char PSK31 Varicode codeword (MSB-first, as written in varicodetab1[]) followed by the '00' inter-character separator. This is the exact BPSK payload bitstream fldigi feeds its differential encoder; omnimodem's framing::varicode::encode(&PSK31, msg) must reproduce it byte-for-byte. The differential BPSK symbol-phase stream (0=reversal, 1=steady) follows from these bits by the single-differential PSK31 rule and is exercised by the loopback rate-grid KAT, since fldigi's tx_symbol path is entangled with its modem/FLTK runtime."
+  },
+  "records": [
+{"msg":"CQ DE K1ABC","varicode_bits":"101011010011101110100100101101010011101110010010111110100101111010011111010011101011001010110100"},
+{"msg":"The quick brown fox 0123456789","varicode_bits":"1101101001010110011001001101111110011011100110100101111001011111100100101111100101010011100110101100111100100111101001110011011111001001011011100101111010011101101001111111100101110111001010110110010110101100110101101001101010110011011011100"}
+  ]
+}

@@ -12,7 +12,10 @@ import (
 // selectable in the operate screen. If the daemon gains a mode, add it here and
 // to modes.go in the same change.
 func TestAllDaemonModesAreExposed(t *testing.T) {
-	want := []string{"psk31", "rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr"}
+	want := []string{
+		"psk31", "psk63", "psk125", "psk250", "psk500", "psk1000",
+		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
+	}
 	for _, label := range want {
 		if modeByLabel(label) == nil {
 			t.Errorf("mode %q is not offered in the TUI modes list", label)
@@ -38,6 +41,29 @@ func TestOliviaModeParams(t *testing.T) {
 	d := modeParamsFor("olivia", nil).GetOlivia()
 	if d.GetTones() != 32 || d.GetBandwidthHz() != 1000 {
 		t.Fatalf("olivia defaults = %d / %d, want 32 / 1000", d.GetTones(), d.GetBandwidthHz())
+	}
+}
+
+// The PSK family carries its submode label and center; the oneof must round-trip
+// the operator's values rather than fall through to the bare-label default.
+func TestPskModeParams(t *testing.T) {
+	mp := modeParamsFor("psk250", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("psk250 must produce typed ModeParams")
+	}
+	p := mp.GetPsk()
+	if p == nil {
+		t.Fatalf("expected PskParams, got %T", mp.GetParams())
+	}
+	if p.GetSubmode() != "psk250" || p.GetCenterHz() != 1200 {
+		t.Fatalf("psk params = %q / %v, want psk250 / 1200", p.GetSubmode(), p.GetCenterHz())
+	}
+	// Defaults: psk31 centres at 1000 Hz, the higher rates at 1500 Hz.
+	if d := modeParamsFor("psk31", nil).GetPsk(); d.GetCenterHz() != 1000 {
+		t.Fatalf("psk31 default center = %v, want 1000", d.GetCenterHz())
+	}
+	if d := modeParamsFor("psk125", nil).GetPsk(); d.GetCenterHz() != 1500 {
+		t.Fatalf("psk125 default center = %v, want 1500", d.GetCenterHz())
 	}
 }
 

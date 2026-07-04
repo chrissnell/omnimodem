@@ -15,7 +15,9 @@ pub enum ModeConfig {
     Ft8,
     Cw { wpm: u16, tone_hz: f32 },
     Rtty { baud: f32, shift_hz: f32, center_hz: f32, reverse: bool },
-    Psk31 { center_hz: f32 },
+    /// PSK family (fldigi parity): `submode` is a `psk::PskVariant` label
+    /// (`psk31`/`psk63`/…/`psk1000`), `center_hz` the audio carrier.
+    Psk { submode: String, center_hz: f32 },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
     Jt65,
@@ -57,7 +59,15 @@ impl ModeConfig {
                 center_hz: f("center", omnimodem_dsp::modes::rtty::CENTER_HZ),
                 reverse: b("reverse"),
             }),
-            "psk31" => Some(ModeConfig::Psk31 { center_hz: f("center", 1000.0) }),
+            m if omnimodem_dsp::modes::psk::PskVariant::from_label(m).is_some() => {
+                // fldigi centres the higher rates at 1500 Hz; psk31 keeps its
+                // historical 1000 Hz default so existing configs are unchanged.
+                let default_center = if m == "psk31" { 1000.0 } else { 1500.0 };
+                Some(ModeConfig::Psk {
+                    submode: m.to_string(),
+                    center_hz: f("center", default_center),
+                })
+            }
             "ft4" => Some(ModeConfig::Ft4),
             "jt65" => Some(ModeConfig::Jt65),
             "jt9" => Some(ModeConfig::Jt9),
@@ -79,7 +89,7 @@ impl ModeConfig {
             ModeConfig::Rtty { baud, shift_hz, center_hz, reverse } => {
                 format!("rtty:baud={baud},shift={shift_hz},center={center_hz},reverse={reverse}")
             }
-            ModeConfig::Psk31 { center_hz } => format!("psk31:center={center_hz}"),
+            ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
@@ -94,7 +104,9 @@ impl ModeConfig {
             ModeConfig::Ft8 => "ft8",
             ModeConfig::Cw { .. } => "cw",
             ModeConfig::Rtty { .. } => "rtty",
-            ModeConfig::Psk31 { .. } => "psk31",
+            ModeConfig::Psk { submode, .. } => omnimodem_dsp::modes::psk::PskVariant::from_label(submode)
+                .map(|v| v.label())
+                .unwrap_or("psk"),
             ModeConfig::Ft4 => "ft4",
             ModeConfig::Jt65 => "jt65",
             ModeConfig::Jt9 => "jt9",
@@ -162,10 +174,40 @@ mod tests {
             ModeConfig::parse("rtty"),
             Some(ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0, reverse: false })
         );
-        assert_eq!(ModeConfig::parse("psk31"), Some(ModeConfig::Psk31 { center_hz: 1000.0 }));
+        assert_eq!(
+            ModeConfig::parse("psk31"),
+            Some(ModeConfig::Psk { submode: "psk31".into(), center_hz: 1000.0 })
+        );
         assert_eq!(ModeConfig::parse("none"), Some(ModeConfig::None));
         assert_eq!(ModeConfig::parse(""), Some(ModeConfig::None));
         assert_eq!(ModeConfig::parse("bogus"), None);
+    }
+
+    #[test]
+    fn parse_resolves_psk_family() {
+        // Every fldigi BPSK rate resolves; the higher rates default to 1500 Hz.
+        for (label, center) in [
+            ("psk31", 1000.0),
+            ("psk63", 1500.0),
+            ("psk125", 1500.0),
+            ("psk250", 1500.0),
+            ("psk500", 1500.0),
+            ("psk1000", 1500.0),
+        ] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Psk { submode: label.into(), center_hz: center })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("psk250:center=1000"),
+            Some(ModeConfig::Psk { submode: "psk250".into(), center_hz: 1000.0 })
+        );
+        // Round-trips through the canonical mode string.
+        let c = ModeConfig::Psk { submode: "psk500".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        // Unknown PSK submodes (QPSK/robust land later) are rejected, not silent.
+        assert_eq!(ModeConfig::parse("qpsk31"), None);
     }
 
     #[test]
@@ -204,7 +246,7 @@ mod tests {
         );
         assert_eq!(
             ModeConfig::parse("psk31:center=1500"),
-            Some(ModeConfig::Psk31 { center_hz: 1500.0 })
+            Some(ModeConfig::Psk { submode: "psk31".into(), center_hz: 1500.0 })
         );
         assert_eq!(
             ModeConfig::parse("olivia:tones=16,bw=500"),
@@ -233,7 +275,7 @@ mod tests {
             ModeConfig::Ft8,
             ModeConfig::Cw { wpm: 25, tone_hz: 600.0 },
             ModeConfig::Rtty { baud: 75.0, shift_hz: 850.0, center_hz: 2125.0, reverse: true },
-            ModeConfig::Psk31 { center_hz: 1500.0 },
+            ModeConfig::Psk { submode: "psk31".into(), center_hz: 1500.0 },
             ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 },
             ModeConfig::Wspr,
         ];
@@ -258,7 +300,7 @@ mod tests {
             ModeConfig::Ft8.label(),
             ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }.label(),
             ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0, reverse: false }.label(),
-            ModeConfig::Psk31 { center_hz: 1000.0 }.label(),
+            ModeConfig::Psk { submode: "psk31".into(), center_hz: 1000.0 }.label(),
             ModeConfig::Ft4.label(),
             ModeConfig::Jt65.label(),
             ModeConfig::Jt9.label(),

@@ -13,7 +13,7 @@ use omnimodem_dsp::modes::{
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     olivia::{OliviaDemod, OliviaMod},
-    psk31::{Psk31Demod, Psk31Mod},
+    psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
     wspr::{WsprDemod, WsprMod},
 };
@@ -46,8 +46,9 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Rtty { baud, shift_hz, center_hz, reverse } => DemodKind::Streaming(Box::new(
             RttyDemod::with_center(*baud, *shift_hz, *center_hz).reversed(*reverse),
         )),
-        ModeConfig::Psk31 { center_hz } => {
-            DemodKind::Streaming(Box::new(Psk31Demod::new(*center_hz)))
+        ModeConfig::Psk { submode, center_hz } => {
+            let v = PskVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(PskDemod::new(v, *center_hz)))
         }
         ModeConfig::Ft8 => windowed(Box::new(Ft8Demod::new())),
         ModeConfig::Ft4 => windowed(Box::new(Ft4Demod::new())),
@@ -81,7 +82,10 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Rtty { baud, shift_hz, center_hz, .. } => {
             Some(Box::new(RttyMod::with_center(*baud, *shift_hz, *center_hz)))
         }
-        ModeConfig::Psk31 { center_hz } => Some(Box::new(Psk31Mod::new(*center_hz))),
+        ModeConfig::Psk { submode, center_hz } => {
+            let v = PskVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(PskMod::new(v, *center_hz)))
+        }
         ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
         ModeConfig::Ft4 => Some(Box::new(Ft4Mod::new())),
         ModeConfig::Jt65 => Some(Box::new(Jt65Mod::new())),
@@ -175,7 +179,7 @@ mod tests {
             ModeConfig::Ft8,
             ModeConfig::Cw { wpm: 20, tone_hz: 700.0 },
             ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0, reverse: false },
-            ModeConfig::Psk31 { center_hz: 1000.0 },
+            ModeConfig::Psk { submode: "psk31".into(), center_hz: 1000.0 },
         ] {
             assert!(build_modulator(&cfg).is_some(), "no modulator for {cfg:?}");
         }
@@ -185,6 +189,6 @@ mod tests {
     fn only_ft8_has_a_tx_slot() {
         assert_eq!(tx_slot_s(&ModeConfig::Ft8), Some(15.0));
         assert_eq!(tx_slot_s(&ModeConfig::Afsk1200 { tx: true }), None);
-        assert_eq!(tx_slot_s(&ModeConfig::Psk31 { center_hz: 1000.0 }), None);
+        assert_eq!(tx_slot_s(&ModeConfig::Psk { submode: "psk31".into(), center_hz: 1000.0 }), None);
     }
 }
