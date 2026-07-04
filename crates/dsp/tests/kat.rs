@@ -549,3 +549,34 @@ fn psk_qpsk_fec_and_loopback() {
         assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(msg), "{v:?} AWGN");
     }
 }
+
+/// PSK63F (robust +F, no interleaver): the K=7 FEC + MFSK-Varicode + two-phase
+/// Viterbi chain round-trips a message on a clean channel and under light AWGN.
+/// The MFSK Varicode drops the final char (no trailing boundary bit), so the
+/// check is the message minus its last character.
+#[test]
+fn psk63f_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::psk::{PskDemod, PskMod, PskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC";
+    let want = &msg[..msg.len() - 1];
+    let clean = PskMod::new(PskVariant::Psk63F, 1500.0).modulate(&Frame::text(msg)).unwrap();
+    assert!(texts(&PskDemod::new(PskVariant::Psk63F, 1500.0).feed(&clean)).contains(want), "clean");
+
+    let mut noisy = PskMod::new(PskVariant::Psk63F, 1500.0).modulate(&Frame::text(msg)).unwrap();
+    let mut rng = Rng::new(0x63f0);
+    add_awgn(&mut noisy, 0.05, &mut rng);
+    assert!(texts(&PskDemod::new(PskVariant::Psk63F, 1500.0).feed(&noisy)).contains(want), "AWGN");
+}

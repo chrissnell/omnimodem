@@ -199,6 +199,7 @@ mod tests {
             ("qpsk125", 1500.0),
             ("qpsk250", 1500.0),
             ("qpsk500", 1500.0),
+            ("psk63f", 1500.0),
         ] {
             assert_eq!(
                 ModeConfig::parse(label),

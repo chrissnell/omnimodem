@@ -126,6 +126,10 @@ pub struct StreamingViterbi {
     prev_at: Vec<usize>, // depth * states
     pos: usize,        // ring write index (mod depth)
     filled: usize,     // steps pushed, capped at depth
+    // Accumulated per-step best branch metric (before renormalisation). Higher
+    // for a stream whose LLRs consistently agree with a valid code path — used
+    // to vote between decoders (e.g. PSK-R's two pair-phase hypotheses).
+    total_metric: f64,
 }
 
 impl StreamingViterbi {
@@ -144,7 +148,14 @@ impl StreamingViterbi {
             prev_at: vec![0usize; depth * states],
             pos: 0,
             filled: 0,
+            total_metric: 0.0,
         }
+    }
+
+    /// Accumulated path metric — a confidence score for voting between decoders
+    /// (higher ⇒ the LLR stream fits a valid code path better).
+    pub fn total_metric(&self) -> f64 {
+        self.total_metric
     }
 
     /// Push one trellis step's `n` LLRs (positive ⇒ code bit 0, `polys` order).
@@ -178,6 +189,7 @@ impl StreamingViterbi {
         // Renormalise so metrics stay bounded on an endless stream.
         let best = next.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         if best.is_finite() {
+            self.total_metric += best as f64;
             for m in next.iter_mut() {
                 if m.is_finite() {
                     *m -= best;

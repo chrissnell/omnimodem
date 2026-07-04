@@ -14,7 +14,7 @@ import (
 func TestAllDaemonModesAreExposed(t *testing.T) {
 	want := []string{
 		"psk31", "psk63", "psk125", "psk250", "psk500", "psk1000",
-		"qpsk31", "qpsk63", "qpsk125", "qpsk250", "qpsk500",
+		"qpsk31", "qpsk63", "qpsk125", "qpsk250", "qpsk500", "psk63f",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
