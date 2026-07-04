@@ -52,7 +52,7 @@ source directory to study for that family.
 
 ### PSK family expansion — reference `fldigi/src/psk/` (`psk.cxx`, `pskvaricode.cxx`, `pskeval.cxx`)
 - **BPSK rates:** PSK63, PSK63F, PSK125, PSK250, PSK500, PSK1000 — our `psk31` assembly re-parametrized by symbol rate; `F` variants add a convolutional FEC layer (`fec::conv`).
-- **QPSK:** QPSK31/63/125/250/500 — differential QPSK + K=7 convolutional FEC + soft Viterbi (blocks exist).
+- **QPSK:** QPSK31/63/125/250/500 — differential QPSK + convolutional FEC + soft Viterbi. Note: fldigi's QPSK uses **K=5** (`POLY 0x17/0x19`, `psk.cxx:66-68`); the robust/`+F` PSK modes use **K=7** (`0x6d/0x4f`). (Corrected from an earlier "K=7 for QPSK" — the reference wins.)
 - **PSK-R (robust):** PSK125R…1000R plus the multi-carrier `nX_PSK*R` grid — PSK + convolutional FEC + interleaver, run over N parallel carriers.
 - **Multi-carrier PSK:** `nX_PSK*` (e.g. `12X_PSK125`, `2X_PSK500`) — N BPSK carriers in parallel; needs a small multi-carrier harness (§4).
 - **8PSK:** 8PSK125…1200F — 8-ary PSK, with/without FEC. Lower priority (rare on the air).

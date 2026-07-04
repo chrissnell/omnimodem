@@ -19,3 +19,4 @@ pub mod ax25;
 pub mod fx25;
 pub mod il2p;
 pub mod message77;
+pub mod pack77;

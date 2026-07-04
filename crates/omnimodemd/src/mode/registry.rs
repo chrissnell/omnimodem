@@ -7,6 +7,7 @@ use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
     cw::{CwDemod, CwMod},
+    fst4::{Fst4Demod, Fst4Mod},
     ft4::{Ft4Demod, Ft4Mod},
     ft8::{Ft8Demod, Ft8Mod},
     jt65::{Jt65Demod, Jt65Mod},
@@ -53,6 +54,7 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Jt65 => windowed(Box::new(Jt65Demod::new())),
         ModeConfig::Jt9 => windowed(Box::new(Jt9Demod::new())),
         ModeConfig::Wspr => windowed(Box::new(WsprDemod::new())),
+        ModeConfig::Fst4 { tr_s } => windowed(Box::new(Fst4Demod::new(*tr_s as u32))),
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
@@ -85,6 +87,7 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Jt65 => Some(Box::new(Jt65Mod::new())),
         ModeConfig::Jt9 => Some(Box::new(Jt9Mod::new())),
         ModeConfig::Wspr => Some(Box::new(WsprMod::new())),
+        ModeConfig::Fst4 { tr_s } => Some(Box::new(Fst4Mod::new(*tr_s as u32))),
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
         }
@@ -137,6 +140,23 @@ mod tests {
         }
         assert_eq!(tx_slot_s(&ModeConfig::Wspr), Some(120.0));
         assert_eq!(tx_slot_s(&ModeConfig::Ft4), Some(7.5));
+    }
+
+    #[test]
+    fn fst4_is_windowed_with_a_modulator_per_tr_period() {
+        for (tr, win) in [(15u16, 15.0f32), (60, 60.0), (120, 120.0)] {
+            let cfg = ModeConfig::Fst4 { tr_s: tr };
+            assert!(
+                matches!(demod_kind(&cfg), DemodKind::Windowed(_, w) if (w - win).abs() < 0.5),
+                "fst4 tr={tr} not windowed @ {win}"
+            );
+            assert!(build_modulator(&cfg).is_some(), "no modulator for fst4 tr={tr}");
+            assert_eq!(tx_slot_s(&cfg), Some(win));
+        }
+        // Parses and round-trips through the canonical mode string.
+        assert_eq!(ModeConfig::parse("fst4"), Some(ModeConfig::Fst4 { tr_s: 15 }));
+        assert_eq!(ModeConfig::parse("fst4:tr=120"), Some(ModeConfig::Fst4 { tr_s: 120 }));
+        assert_eq!(ModeConfig::Fst4 { tr_s: 60 }.to_mode_string(), "fst4:tr=60");
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub enum ModeConfig {
     Wspr,
     // Phase 5 fldigi breadth modes.
     Olivia { tones: u16, bandwidth_hz: u16 },
+    // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
+    Fst4 { tr_s: u16 },
 }
 
 impl ModeConfig {
@@ -60,6 +62,7 @@ impl ModeConfig {
             "jt65" => Some(ModeConfig::Jt65),
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
+            "fst4" => Some(ModeConfig::Fst4 { tr_s: u("tr", 15) }),
             "olivia" => {
                 Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
             }
@@ -77,6 +80,7 @@ impl ModeConfig {
                 format!("rtty:baud={baud},shift={shift_hz},center={center_hz},reverse={reverse}")
             }
             ModeConfig::Psk31 { center_hz } => format!("psk31:center={center_hz}"),
+            ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
             }
@@ -95,6 +99,7 @@ impl ModeConfig {
             ModeConfig::Jt65 => "jt65",
             ModeConfig::Jt9 => "jt9",
             ModeConfig::Wspr => "wspr",
+            ModeConfig::Fst4 { .. } => "fst4",
             ModeConfig::Olivia { .. } => "olivia",
         }
     }

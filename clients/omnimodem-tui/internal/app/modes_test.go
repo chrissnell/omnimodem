@@ -12,7 +12,7 @@ import (
 // selectable in the operate screen. If the daemon gains a mode, add it here and
 // to modes.go in the same change.
 func TestAllDaemonModesAreExposed(t *testing.T) {
-	want := []string{"psk31", "rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "wspr"}
+	want := []string{"psk31", "rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr"}
 	for _, label := range want {
 		if modeByLabel(label) == nil {
 			t.Errorf("mode %q is not offered in the TUI modes list", label)

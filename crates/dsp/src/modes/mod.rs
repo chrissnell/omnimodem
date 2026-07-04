@@ -11,6 +11,7 @@ pub mod cw;
 pub mod ft8;
 pub mod fsk_util;
 pub mod ft4;
+pub mod fst4;
 pub mod jt65;
 pub mod jt9;
 pub mod olivia;
