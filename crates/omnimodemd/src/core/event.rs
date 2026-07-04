@@ -24,6 +24,10 @@ pub enum TelemetryEvent {
     ChannelConfigured { channel: ChannelId },
     TransmitStarted { channel: ChannelId, transmit_id: TransmitId },
     TransmitComplete { channel: ChannelId, transmit_id: TransmitId },
+    /// A transmit that never keyed because the frame could not be encoded in the
+    /// channel's mode. Carries a human-readable reason so the client can surface
+    /// it instead of leaving the operator with unexplained silence.
+    TransmitFailed { channel: ChannelId, transmit_id: TransmitId, reason: String },
     AudioLevel { channel: ChannelId, dbfs: f32 },
     Status { channel: ChannelId, tx_frames: u64 },
     DeviceArrived { device_id: DeviceId, label: String },

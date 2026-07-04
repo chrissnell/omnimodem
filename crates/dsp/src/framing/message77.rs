@@ -751,6 +751,19 @@ mod tests {
     }
 
     #[test]
+    fn normalize_grid6_truncates_only_trailing_locators() {
+        // 6-char grid -> 4-char square, in CQ and reply forms.
+        assert_eq!(normalize_grid6("CQ NW5W EM10dg"), "CQ NW5W EM10");
+        assert_eq!(normalize_grid6("W9XYZ K1ABC EM10dg"), "W9XYZ K1ABC EM10");
+        // 4-char grids and non-grid tails are untouched.
+        assert_eq!(normalize_grid6("CQ NW5W EM10"), "CQ NW5W EM10");
+        assert_eq!(normalize_grid6("W9XYZ K1ABC RR73"), "W9XYZ K1ABC RR73");
+        assert_eq!(normalize_grid6("W9XYZ K1ABC R-10"), "W9XYZ K1ABC R-10");
+        // A 6-char token that isn't a valid locator (digit in the field) is left.
+        assert_eq!(normalize_grid6("CQ NW5W 1M10dg"), "CQ NW5W 1M10dg");
+    }
+
+    #[test]
     fn byte_exact_with_ft8_lib() {
         let cases = [
             ("CQ K1ABC FN42", "000000204def1a8a1988"),
@@ -849,6 +862,35 @@ mod tests {
 /// the common standard-callsign forms are handled (special tokens like `CQ`,
 /// hashed nonstandard calls, and the JT65 report tokens beyond a plain grid are
 /// out of scope here — they round-trip through the modern 77-bit codec instead).
+/// True for a 6-character Maidenhead locator (`[A-R][A-R][0-9][0-9][a-x][a-x]`).
+fn is_grid6(tok: &str) -> bool {
+    let b = tok.as_bytes();
+    b.len() == 6
+        && (b'A'..=b'R').contains(&b[0])
+        && (b'A'..=b'R').contains(&b[1])
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && (b'a'..=b'x').contains(&b[4])
+        && (b'a'..=b'x').contains(&b[5])
+}
+
+/// Truncate a trailing 6-character Maidenhead locator to its 4-character
+/// field+square (`EM10dg` -> `EM10`). WSJT-X standard Type-1 messages (FT8/FT4/
+/// JT65/JT9/FST4) only carry a 4-char grid, so a station configured with a 6-char
+/// locator would otherwise fail to encode and transmit silence. Non-grid trailing
+/// tokens (reports, RR73/73, a second callsign) are returned unchanged.
+pub fn normalize_grid6(msg: &str) -> String {
+    let mut toks: Vec<&str> = msg.split_whitespace().collect();
+    if let Some(last) = toks.last() {
+        if is_grid6(last) {
+            let n = toks.len();
+            toks[n - 1] = &last[..4];
+            return toks.join(" ");
+        }
+    }
+    msg.to_string()
+}
+
 pub mod legacy {
     use super::{
         charn, pack_basecall, packgrid, unpackgrid, ALPHANUM, ALPHANUM_SPACE, LETTERS_SPACE,

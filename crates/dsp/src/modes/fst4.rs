@@ -345,7 +345,8 @@ impl Modulator for Fst4Mod {
 
     fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
         let msg = match &frame.payload {
-            FramePayload::Text(t) => t.clone(),
+            // 6-char locators don't fit a standard message; use the 4-char square.
+            FramePayload::Text(t) => crate::framing::message77::normalize_grid6(t),
             _ => return Err(ModError::UnsupportedPayload("fst4 needs text")),
         };
         let nsps = fst4_nsps(self.tr_s).ok_or(ModError::Encode(format!("bad T/R {}", self.tr_s)))?;
@@ -555,6 +556,23 @@ mod tests {
     fn fst4_mod_rejects_unsupported_message() {
         let mut m = Fst4Mod::new(15);
         assert!(m.modulate(&Frame::text("this is free text not a call")).is_err());
+    }
+
+    #[test]
+    fn fst4_six_char_grid_encodes_as_four() {
+        // A station configured with a 6-char locator must still transmit (the
+        // standard message carries only the 4-char square). Before this, a 6-char
+        // grid failed to encode and FST4 went silent.
+        let mut m = Fst4Mod::with_base(15, 1200.0);
+        let wave = m.modulate(&Frame::text("CQ K1ABC FN42dg")).expect("modulate");
+        assert!(wave.iter().any(|&s| s.abs() > 0.1), "silent modulation");
+        let mut d = Fst4Demod::with_band(15, 1140.0, 1260.0);
+        let frames = d.decode_window(&wave, 0);
+        assert_eq!(frames.len(), 1, "expected one decode");
+        match &frames[0].payload {
+            FramePayload::Text(t) => assert_eq!(t, "CQ K1ABC FN42"),
+            other => panic!("unexpected payload {other:?}"),
+        }
     }
 
     #[test]
