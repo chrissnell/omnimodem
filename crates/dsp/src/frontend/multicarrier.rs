@@ -58,6 +58,8 @@ impl MultiCarrier {
         let n = self.freqs.len();
         let mut out = vec![0.0f32; symbols.len() * sps];
         for (s, syms) in symbols.iter().enumerate() {
+            // Indexes syms/freqs/tx_phase in lockstep; a range loop reads clearest.
+            #[allow(clippy::needless_range_loop)]
             for car in 0..n {
                 let cur = syms[car];
                 let dphi = TAU * self.freqs[car] / self.rate;
@@ -81,6 +83,8 @@ impl MultiCarrier {
         let mut out = vec![Vec::with_capacity(audio.len() / sps.max(1)); n];
         let mut acc = vec![Cplx::new(0.0, 0.0); n];
         for (i, &x) in audio.iter().enumerate() {
+            // Indexes acc/down in lockstep; a range loop reads clearest.
+            #[allow(clippy::needless_range_loop)]
             for car in 0..n {
                 acc[car] += self.down[car].push(x);
             }
