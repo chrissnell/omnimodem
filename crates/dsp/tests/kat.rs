@@ -690,3 +690,41 @@ fn nx_rate_grid_loopback_and_awgn() {
         assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(want), "{v:?} AWGN");
     }
 }
+
+/// The uncoded multi-carrier `nX_PSKnnn` grid (no FEC): plain differential BPSK
+/// + PSK31 Varicode over N carriers, through the decimating matched filter.
+/// Clean loopback plus a gentle AWGN pass — with no FEC the noise margin is thin
+/// (0.01, well below the FEC-bearing modes' 0.02+). PSK31 keeps the trailing
+/// `00`, so the full message round-trips.
+#[test]
+fn nx_nonrobust_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::psk::{PskDemod, PskMod, PskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC";
+    for v in [
+        PskVariant::Psk125c12,
+        PskVariant::Psk250c6,
+        PskVariant::Psk500c2,
+        PskVariant::Psk500c4,
+        PskVariant::Psk1000c2,
+    ] {
+        let clean = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert!(texts(&PskDemod::new(v, 1500.0).feed(&clean)).contains(msg), "{v:?} clean");
+        let mut noisy = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x6600 + v.carriers() as u64);
+        add_awgn(&mut noisy, 0.01, &mut rng);
+        assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(msg), "{v:?} AWGN");
+    }
+}

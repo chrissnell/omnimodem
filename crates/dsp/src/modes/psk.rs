@@ -81,6 +81,14 @@ pub enum PskVariant {
     Psk500Rc2,
     Psk500Rc3,
     Psk500Rc4,
+    // Uncoded multi-carrier `nX_PSKnnn` grid: plain differential BPSK + PSK31
+    // Varicode (no FEC), distributed over N carriers and received through the
+    // same two-stage decimating matched filter. ref: psk.cxx:754-884.
+    Psk125c12,
+    Psk250c6,
+    Psk500c2,
+    Psk500c4,
+    Psk1000c2,
 }
 
 /// Resolved per-variant parameters. ref: psk.cxx:382-687.
@@ -154,6 +162,12 @@ impl PskVariant {
             Psk500Rc2 => p(16, 1024, false, true, 160, 2),
             Psk500Rc3 => p(16, 1024, false, true, 160, 3),
             Psk500Rc4 => p(16, 1024, false, true, 160, 4),
+            // Uncoded multi-carrier (no FEC/interleaver). ref: psk.cxx:754-884.
+            Psk125c12 => p(64, 128, false, false, 0, 12),
+            Psk250c6 => p(32, 512, false, false, 0, 6),
+            Psk500c2 => p(16, 512, false, false, 0, 2),
+            Psk500c4 => p(16, 512, false, false, 0, 4),
+            Psk1000c2 => p(8, 1024, false, false, 0, 2),
         }
     }
 
@@ -234,6 +248,11 @@ impl PskVariant {
             "psk500rc2" => Psk500Rc2,
             "psk500rc3" => Psk500Rc3,
             "psk500rc4" => Psk500Rc4,
+            "psk125c12" => Psk125c12,
+            "psk250c6" => Psk250c6,
+            "psk500c2" => Psk500c2,
+            "psk500c4" => Psk500c4,
+            "psk1000c2" => Psk1000c2,
             _ => return None,
         })
     }
@@ -275,6 +294,11 @@ impl PskVariant {
             Psk500Rc2 => "psk500rc2",
             Psk500Rc3 => "psk500rc3",
             Psk500Rc4 => "psk500rc4",
+            Psk125c12 => "psk125c12",
+            Psk250c6 => "psk250c6",
+            Psk500c2 => "psk500c2",
+            Psk500c4 => "psk500c4",
+            Psk1000c2 => "psk1000c2",
         }
     }
 }
@@ -393,17 +417,22 @@ impl PskMod {
         rev
     }
 
-    /// Multi-carrier robust audio: the single-carrier robust reversal stream is
-    /// distributed round-robin across `carriers` frequency-offset carriers
-    /// (symbol `i` → carrier `i % N`, as fldigi's `tx_symbol` fills carriers in
-    /// turn before `tx_carriers` emits them; ref psk.cxx:2310-2318), each carrier
-    /// differentially BPSK-modulated at its own frequency and summed (÷N). The
-    /// carrier layout matches `MultiCarrier` (spacing 1.4·sc_bw).
-    fn robust_multicarrier_audio(&self, text: &str) -> Vec<Sample> {
+    /// Multi-carrier audio: the single-carrier reversal stream (robust FEC stream
+    /// for the `nX_PSKnnnR` modes, plain PSK31 stream for the uncoded `nX_PSKnnn`
+    /// modes) is distributed round-robin across `carriers` frequency-offset
+    /// carriers (symbol `i` → carrier `i % N`, as fldigi's `tx_symbol` fills
+    /// carriers in turn before `tx_carriers` emits them; ref psk.cxx:2310-2318),
+    /// each carrier differentially BPSK-modulated at its own frequency and summed
+    /// (÷N). The carrier layout matches `MultiCarrier` (spacing 1.4·sc_bw).
+    fn multicarrier_audio(&self, text: &str) -> Vec<Sample> {
         let pp = self.v.params();
         let n = pp.carriers;
         let sps = pp.symbollen;
-        let mut stream = self.robust_rev_stream(text);
+        let mut stream = if self.v.is_robust() {
+            self.robust_rev_stream(text)
+        } else {
+            self.reversal_stream(text)
+        };
         while !stream.len().is_multiple_of(n) {
             stream.push(1); // pad with reversals so every carrier gets equal count
         }
@@ -439,7 +468,7 @@ impl Modulator for PskMod {
         };
         let sps = self.v.samples_per_symbol();
         if self.v.carriers() > 1 {
-            Ok(self.robust_multicarrier_audio(text))
+            Ok(self.multicarrier_audio(text))
         } else if self.v.is_qpsk() {
             let rot = self.qpsk_rot_stream(text);
             let psk = DiffPsk::new(PSK_RATE as f32, self.center_hz, sps, 2);
@@ -603,21 +632,31 @@ const MF_SPS: usize = 16;
 /// pushes the odd-carrier modes over the FEC threshold. All carriers share the
 /// symbol clock and recombine round-robin (inverse of the TX distribution) into
 /// one `RobustRx`. ref: psk.cxx:944-955 (filters), 2032-2075 (rx), 1216-1290.
+/// The per-symbol decode backend behind the multi-carrier front-end: the K=7
+/// two-phase Viterbi for the robust modes, or a plain PSK31-Varicode framer for
+/// the uncoded (`nX_PSKnnn`) modes.
+enum McDecode {
+    Robust(Box<RobustRx>),
+    /// PSK31 Varicode framer (no FEC): `00`-delimited codewords over hard bits.
+    Bpsk { pending: Vec<u8>, synced: bool, zrun: u8 },
+}
+
 struct MultiCarrierRx {
     n: usize,
     dec: usize,
     dec_count: usize,
+    mf_sps: usize, // decimated samples/symbol = min(16, symbollen)
     down: Vec<DownConverter>,
     fir1_i: Vec<Fir>,
     fir1_q: Vec<Fir>,
     fir2_i: Vec<Fir>,
     fir2_q: Vec<Fir>,
-    z2: Vec<Cplx>, // latest matched-filter output per carrier (16 samples/symbol)
+    z2: Vec<Cplx>, // latest matched-filter output per carrier
     z2_index: u64,
     sample_index: u64, // raw input samples (for frame offsets, like every demod)
     prev: Vec<Cplx>,
     have_prev: Vec<bool>,
-    robust: RobustRx,
+    decode: McDecode,
     label: &'static str,
 }
 
@@ -628,15 +667,22 @@ impl MultiCarrierRx {
         let n = pp.carriers;
         let mc = MultiCarrier::new(rate, center_hz, pp.symbollen, n);
         // fir1: cutoff = baud (normalized 1/symbollen), decimating by symbollen/16
-        // to 16 samples/symbol. fir2: cutoff = 1/16 on the decimated stream (= baud
-        // there). Both are FIRLEN+1-tap blackman-windowed sincs, matching fldigi.
-        let dec = (pp.symbollen / MF_SPS).max(1);
+        // to 16 samples/symbol (fewer for the sub-16-sample rates). fir2: cutoff =
+        // 1/mf_sps on the decimated stream (= baud there). Both are FIRLEN+1-tap
+        // blackman-windowed sincs, matching fldigi.
+        let mf_sps = MF_SPS.min(pp.symbollen);
+        let dec = (pp.symbollen / mf_sps).max(1);
         let f1 = wsinc_blackman(FIRLEN, 1.0 / pp.symbollen as f32);
-        let f2 = wsinc_blackman(FIRLEN, 1.0 / MF_SPS as f32);
+        let f2 = wsinc_blackman(FIRLEN, 1.0 / mf_sps as f32);
+        let decode = match v.conv_code() {
+            Some(code) => McDecode::Robust(Box::new(RobustRx::new(&code, pp.idepth))),
+            None => McDecode::Bpsk { pending: Vec::new(), synced: false, zrun: 0 },
+        };
         MultiCarrierRx {
             n,
             dec,
             dec_count: 0,
+            mf_sps,
             down: (0..n).map(|c| DownConverter::new(mc.carrier_hz(c), rate)).collect(),
             fir1_i: (0..n).map(|_| Fir::new(f1.clone())).collect(),
             fir1_q: (0..n).map(|_| Fir::new(f1.clone())).collect(),
@@ -647,7 +693,7 @@ impl MultiCarrierRx {
             sample_index: 0,
             prev: vec![Cplx::new(0.0, 0.0); n],
             have_prev: vec![false; n],
-            robust: RobustRx::new(&v.conv_code().unwrap(), pp.idepth),
+            decode,
             label: v.label(),
         }
     }
@@ -677,19 +723,41 @@ impl MultiCarrierRx {
             // Fixed eye-centre sampling aligned to the two-stage filter group delay
             // (both stages FIRLEN/2; fir1 delay in z2 units is FIRLEN/2/dec).
             let delay_z2 = (FIRLEN / 2) / self.dec + FIRLEN / 2;
-            let center = ((delay_z2 + MF_SPS / 2) % MF_SPS) as u64;
-            if self.z2_index % MF_SPS as u64 == center {
+            let center = ((delay_z2 + self.mf_sps / 2) % self.mf_sps) as u64;
+            if self.z2_index % self.mf_sps as u64 == center {
                 for c in 0..self.n {
                     let sym = self.z2[c];
                     if self.have_prev[c] {
                         let dot = sym.re * self.prev[c].re + sym.im * self.prev[c].im;
-                        let norm = (self.prev[c].norm() * sym.norm()).max(1e-9);
-                        self.robust.push_symbol(-QPSK_LLR * (dot / norm));
+                        match &mut self.decode {
+                            McDecode::Robust(r) => {
+                                let norm = (self.prev[c].norm() * sym.norm()).max(1e-9);
+                                r.push_symbol(-QPSK_LLR * (dot / norm));
+                            }
+                            McDecode::Bpsk { pending, synced, zrun } => {
+                                // Reversal (dot<0) = Varicode `0`, steady = `1`.
+                                let bit = u8::from(dot >= 0.0);
+                                if *synced {
+                                    pending.push(bit);
+                                } else if bit == 0 {
+                                    *zrun += 1;
+                                    if *zrun >= 2 {
+                                        *synced = true;
+                                    }
+                                } else {
+                                    *zrun = 0;
+                                }
+                            }
+                        }
                     }
                     self.prev[c] = sym;
                     self.have_prev[c] = true;
                 }
-                if let Some(text) = self.robust.drain() {
+                let text = match &mut self.decode {
+                    McDecode::Robust(r) => r.drain(),
+                    McDecode::Bpsk { pending, .. } => drain_psk31(pending),
+                };
+                if let Some(text) = text {
                     out.push(Frame {
                         payload: FramePayload::Text(text),
                         meta: FrameMeta {
@@ -704,6 +772,21 @@ impl MultiCarrierRx {
         }
         out
     }
+}
+
+/// Decode and drain completed PSK31 Varicode characters up to the last `00`
+/// separator (shared by the single- and multi-carrier BPSK paths).
+fn drain_psk31(pending: &mut Vec<u8>) -> Option<String> {
+    let last_sep = (1..pending.len()).rev().find(|&i| pending[i] == 0 && pending[i - 1] == 0);
+    let Some(idx) = last_sep else {
+        if pending.len() > MAX_PENDING_BITS {
+            pending.clear();
+        }
+        return None;
+    };
+    let text = vari_decode(&PSK31, &pending[..=idx]);
+    pending.drain(..=idx);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Costas loop bandwidth (normalized to sample rate) for a given symbol length.
@@ -992,6 +1075,28 @@ mod tests {
             let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
             let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
             assert!(text.contains(want), "{v:?} recovered {text:?}");
+        }
+    }
+
+    /// The uncoded multi-carrier `nX_PSKnnn` grid: plain differential BPSK +
+    /// PSK31 Varicode (no FEC), distributed over N carriers and received through
+    /// the same two-stage decimating matched filter. With no FEC the per-carrier
+    /// BER must be near zero, so this exercises the matched filter's ICI
+    /// rejection directly. PSK31 keeps the trailing `00`, so the full message
+    /// (including its last char) round-trips.
+    #[test]
+    fn nx_nonrobust_grid_loopback() {
+        let msg = "CQ DE K1ABC";
+        for v in [
+            PskVariant::Psk125c12,
+            PskVariant::Psk250c6,
+            PskVariant::Psk500c2,
+            PskVariant::Psk500c4,
+            PskVariant::Psk1000c2,
+        ] {
+            let audio = PskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let text = recovered_text(&PskDemod::new(v, 1500.0).feed(&audio));
+            assert!(text.contains(msg), "{v:?} recovered {text:?}");
         }
     }
 

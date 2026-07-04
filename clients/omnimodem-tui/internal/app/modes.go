@@ -55,6 +55,11 @@ var modes = []modeInfo{
 	{"psk500rc2", "chat", 0, []modeParam{{"center", 1500}}},
 	{"psk500rc3", "chat", 0, []modeParam{{"center", 1500}}},
 	{"psk500rc4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"psk125c12", "chat", 0, []modeParam{{"center", 1500}}},
+	{"psk250c6", "chat", 0, []modeParam{{"center", 1500}}},
+	{"psk500c2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"psk500c4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"psk1000c2", "chat", 0, []modeParam{{"center", 1500}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -101,7 +106,8 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		"psk63f", "psk125r", "psk250r", "psk500r", "psk1000r",
 		"psk63rc4", "psk63rc5", "psk63rc10", "psk63rc20", "psk63rc32",
 		"psk125rc4", "psk125rc5", "psk125rc10", "psk125rc12", "psk125rc16",
-		"psk250rc2", "psk250rc3", "psk250rc5", "psk250rc6", "psk250rc7", "psk500rc2", "psk500rc3", "psk500rc4":
+		"psk250rc2", "psk250rc3", "psk250rc5", "psk250rc6", "psk250rc7", "psk500rc2", "psk500rc3", "psk500rc4",
+		"psk125c12", "psk250c6", "psk500c2", "psk500c4", "psk1000c2":
 		// The whole fldigi PSK/QPSK rate family: submode label + audio center.
 		// psk31 keeps its 1000 Hz default; the higher rates centre at 1500 Hz.
 		def := 1500.0

@@ -222,6 +222,11 @@ mod tests {
             ("psk500rc2", 1500.0),
             ("psk500rc3", 1500.0),
             ("psk500rc4", 1500.0),
+            ("psk125c12", 1500.0),
+            ("psk250c6", 1500.0),
+            ("psk500c2", 1500.0),
+            ("psk500c4", 1500.0),
+            ("psk1000c2", 1500.0),
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
