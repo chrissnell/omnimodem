@@ -92,6 +92,7 @@ message ModeParams {
     PskParams psk = 6;
     DominoParams dominoex = 7;
     HellParams hell = 8;
+    ThorParams thor = 9;
   }
 }
 
@@ -136,6 +137,14 @@ message DominoParams {
 // `submode` is the mode label; `center_hz` the audio carrier.
 message HellParams {
   string submode = 1;   // hell::HellVariant label, e.g. "feldhell"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi THOR family (thormicro/4/5/8/11/16/22/25x4/50x1/50x2/100). DominoEX's
+// 18-tone IFK+ core with convolutional FEC + interleave + soft decode.
+// `submode` is the mode label; `center_hz` the audio carrier.
+message ThorParams {
+  string submode = 1;   // thor::ThorVariant label, e.g. "thor16"
   float  center_hz = 2; // audio center frequency
 }
 

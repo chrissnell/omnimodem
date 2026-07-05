@@ -26,6 +26,20 @@ impl ConvCode {
         ConvCode { k: 7, polys: vec![0o171, 0o133] }
     }
 
+    /// THOR / PSK-R low-speed K=7, rate-1/2 code, generator polynomials
+    /// `0x6d`/`0x4f` (fldigi `thor.h`: `THOR_POLY1`/`THOR_POLY2`). Used by THOR
+    /// Micro/4/5/8/11/16/22.
+    pub fn thor_k7() -> Self {
+        ConvCode { k: 7, polys: vec![0x6d, 0x4f] }
+    }
+
+    /// THOR high-speed K=15, rate-1/2 code, generator polynomials octal
+    /// `044735`/`063057` (fldigi `thor.h`: `K15_POLY1`/`K15_POLY2`). Used by THOR
+    /// 25x4/50x1/50x2/100.
+    pub fn thor_k15() -> Self {
+        ConvCode { k: 15, polys: vec![0o44735, 0o63057] }
+    }
+
     /// Encode data bits (each 0/1) → n output bits per input bit, with a
     /// zero-tail flush of `k-1` bits so the decoder terminates in the zero
     /// state. Output bit order: for each input bit, the n poly outputs in
@@ -222,6 +236,37 @@ impl StreamingViterbi {
             ring = (ring + self.depth - 1) % self.depth;
         }
         Some(oldest_bit)
+    }
+}
+
+/// Streaming (stateful) convolutional encoder — the TX counterpart to
+/// [`StreamingViterbi`]. Encodes one data bit at a time, carrying shift-register
+/// state across calls with **no** per-block zero tail, matching fldigi's
+/// `encoder` class (`viterbi.cxx`: `shreg=(shreg<<1)|bit; out=output[shreg]`).
+/// This is what the never-terminated THOR/DominoEX-FEC TX stream needs; use
+/// [`ConvCode::encode`] instead when the block is tail-terminated.
+pub struct ConvEncoder {
+    code: ConvCode,
+    reg: u32,
+}
+
+impl ConvEncoder {
+    pub fn new(code: ConvCode) -> Self {
+        ConvEncoder { code, reg: 0 }
+    }
+
+    /// Encode one data bit, appending the `polys.len()` output bits (in `polys`
+    /// order — poly1 first) to `out`.
+    pub fn encode(&mut self, bit: u8, out: &mut Vec<u8>) {
+        self.reg = (self.reg << 1) | (bit as u32 & 1);
+        for &p in &self.code.polys {
+            out.push((self.reg & p).count_ones() as u8 & 1);
+        }
+    }
+
+    /// Reset the shift register to the zero state (a fresh transmission).
+    pub fn reset(&mut self) {
+        self.reg = 0;
     }
 }
 

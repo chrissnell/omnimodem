@@ -181,6 +181,85 @@ impl DiagInterleaver<u8> {
     }
 }
 
+/// fldigi's general `size`×`size` MFSK diagonal (de)interleaver
+/// (`src/mfsk/interleave.cxx`), the shape THOR uses at `size = 4`. It is a
+/// cascade of `depth` `size`×`size` delay stages; each `symbols` call feeds one
+/// `size`-element group through every stage in place, shifting each row left,
+/// inserting the input in the last column, and reading out the forward
+/// anti-diagonal (`col = size-i-1`) or reverse main diagonal (`col = i`). A
+/// forward→reverse round-trip recovers the input delayed by the fill latency.
+/// Generic over the cell type so TX runs it on bits (`u8`) and RX on soft LLRs
+/// (`f32`, `fill = 0.0` = erasure, matching fldigi's `PUNCTURE`).
+///
+/// [`DiagInterleaver`] is the specialised `size = 2` case (PSK-R / MFSK16); this
+/// covers the general square used by THOR. ref: interleave.cxx:57-90.
+pub struct MfskInterleaver<T: Copy> {
+    size: usize,
+    depth: usize,
+    fwd: bool,
+    table: Vec<T>, // depth * size * size, indexed [k][i][j] = size*size*k + size*i + j
+    scratch: Vec<T>, // reused by `bits` to avoid a per-call allocation
+}
+
+impl<T: Copy + Default> MfskInterleaver<T> {
+    /// `fill` seeds the delay cells (fldigi: 0 for TX, PUNCTURE/erasure for RX).
+    /// `fwd` selects interleave (TX) vs de-interleave (RX).
+    pub fn new(size: usize, depth: usize, fwd: bool, fill: T) -> Self {
+        MfskInterleaver {
+            size,
+            depth,
+            fwd,
+            table: vec![fill; depth * size * size],
+            scratch: vec![T::default(); size],
+        }
+    }
+
+    /// Interleave (or de-interleave) one `size`-element group in place.
+    /// ref: interleave::symbols.
+    pub fn symbols(&mut self, psyms: &mut [T]) {
+        debug_assert_eq!(psyms.len(), self.size);
+        let size = self.size;
+        for k in 0..self.depth {
+            let base = k * size * size;
+            // Shift each row left by one column.
+            for i in 0..size {
+                let row = base + i * size;
+                for j in 0..size - 1 {
+                    self.table[row + j] = self.table[row + j + 1];
+                }
+            }
+            // Insert the input group into the last column.
+            for i in 0..size {
+                self.table[base + i * size + (size - 1)] = psyms[i];
+            }
+            // Read out along the (forward) anti-diagonal / (reverse) main diagonal.
+            for i in 0..size {
+                let col = if self.fwd { size - i - 1 } else { i };
+                psyms[i] = self.table[base + i * size + col];
+            }
+        }
+    }
+}
+
+impl MfskInterleaver<u8> {
+    /// Interleave the low `size` bits of `pbits` (bit `size-1` = MSB) in place,
+    /// matching fldigi `interleave::bits`. ref: interleave.cxx:78-90.
+    pub fn bits(&mut self, pbits: &mut u32) {
+        let size = self.size;
+        for i in 0..size {
+            self.scratch[i] = ((*pbits >> (size - i - 1)) & 1) as u8;
+        }
+        // `scratch` is a field; borrow it out to satisfy the borrow checker.
+        let mut syms = std::mem::take(&mut self.scratch);
+        self.symbols(&mut syms);
+        *pbits = 0;
+        for i in 0..size {
+            *pbits = (*pbits << 1) | syms[i] as u32;
+        }
+        self.scratch = syms;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

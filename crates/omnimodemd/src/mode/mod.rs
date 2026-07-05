@@ -22,6 +22,10 @@ pub enum ModeConfig {
     /// label (`dominoex4`/…/`dominoex88`/`dominoexmicro`), `center_hz` the audio
     /// carrier. 18-tone IFK+ MFSK.
     DominoEx { submode: String, center_hz: f32 },
+    /// THOR family (fldigi parity): `submode` is a `thor::ThorVariant` label
+    /// (`thor4`/…/`thor100`/`thormicro`), `center_hz` the audio carrier. DominoEX's
+    /// IFK+ core with convolutional FEC + interleave + soft decode.
+    Thor { submode: String, center_hz: f32 },
     /// Hellschreiber family (fldigi parity): `submode` is a `hell::HellVariant`
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
@@ -73,6 +77,12 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::thor::ThorVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Thor {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
             m if omnimodem_dsp::modes::hell::HellVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Hell {
                     submode: m.to_string(),
@@ -111,6 +121,7 @@ impl ModeConfig {
             }
             ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Thor { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
@@ -133,6 +144,11 @@ impl ModeConfig {
                 omnimodem_dsp::modes::dominoex::DominoVariant::from_label(submode)
                     .map(|v| v.label())
                     .unwrap_or("dominoex")
+            }
+            ModeConfig::Thor { submode, .. } => {
+                omnimodem_dsp::modes::thor::ThorVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("thor")
             }
             ModeConfig::Hell { submode, .. } => {
                 omnimodem_dsp::modes::hell::HellVariant::from_label(submode)
@@ -303,6 +319,28 @@ mod tests {
         let c = ModeConfig::DominoEx { submode: "dominoex8".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         assert_eq!(ModeConfig::parse("dominoex99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_thor_family() {
+        // Every fldigi THOR submode resolves, defaulting to a 1500 Hz carrier.
+        for label in [
+            "thormicro", "thor4", "thor5", "thor8", "thor11", "thor16", "thor22", "thor25x4",
+            "thor50x1", "thor50x2", "thor100",
+        ] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Thor { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("thor16:center=1200"),
+            Some(ModeConfig::Thor { submode: "thor16".into(), center_hz: 1200.0 })
+        );
+        // Round-trips through the canonical mode string.
+        let c = ModeConfig::Thor { submode: "thor100".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("thor99"), None);
     }
 
     #[test]

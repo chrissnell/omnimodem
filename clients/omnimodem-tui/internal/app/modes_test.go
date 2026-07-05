@@ -23,6 +23,8 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"psk125c12", "psk250c6", "psk500c2", "psk500c4", "psk1000c2",
 		"dominoexmicro", "dominoex4", "dominoex5", "dominoex8", "dominoex11",
 		"dominoex16", "dominoex22", "dominoex44", "dominoex88",
+		"thormicro", "thor4", "thor5", "thor8", "thor11", "thor16", "thor22",
+		"thor25x4", "thor50x1", "thor50x2", "thor100",
 		"feldhell", "slowhell", "hellx5", "hellx9", "hell80",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
@@ -97,6 +99,31 @@ func TestDominoExModeParams(t *testing.T) {
 	}
 	if def := modeParamsFor("dominoex4", nil).GetDominoex(); def.GetCenterHz() != 1500 {
 		t.Fatalf("dominoex4 default center = %v, want 1500", def.GetCenterHz())
+	}
+}
+
+// The THOR family carries its submode label and center through the dedicated
+// ThorParams oneof, and every submode uses the ragchew "chat" shape.
+func TestThorModeParams(t *testing.T) {
+	mp := modeParamsFor("thor16", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("thor16 must produce typed ModeParams")
+	}
+	th := mp.GetThor()
+	if th == nil {
+		t.Fatalf("expected ThorParams, got %T", mp.GetParams())
+	}
+	if th.GetSubmode() != "thor16" || th.GetCenterHz() != 1200 {
+		t.Fatalf("thor params = %q / %v, want thor16 / 1200", th.GetSubmode(), th.GetCenterHz())
+	}
+	for _, label := range []string{"thormicro", "thor4", "thor16", "thor25x4", "thor100"} {
+		mi := modeByLabel(label)
+		if mi == nil || mi.shape != "chat" {
+			t.Fatalf("%s must use the chat shape, got %v", label, mi)
+		}
+		if def := modeParamsFor(label, nil).GetThor(); def == nil || def.GetCenterHz() != 1500 {
+			t.Fatalf("%s default center = %v, want 1500", label, def.GetCenterHz())
+		}
 	}
 }
 
