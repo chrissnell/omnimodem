@@ -1241,3 +1241,81 @@ fn mt63_cross_decode_doc() {
     // The bit-exact encoder/TxVect gate above already pins the on-air integer
     // domain; this live-audio gate additionally exercises the sync tracker.
 }
+
+// --- Phase 12: NAVTEX / SITOR-B (CCIR-476 FEC-B) --------------------------
+
+/// The CCIR-476 code tables, `char_to_code` encode, `create_fec` time-diversity
+/// stream, and the LSB-first on-air bit stream match the fldigi reference
+/// byte-for-byte (the bit-exact domain, Doctrine §3). Provenance:
+/// `tests/vectors/navtex_ccir476.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_navtex_ccir476.sh`).
+#[test]
+fn navtex_ccir476_matches_fldigi_vector() {
+    use omnimodem_dsp::fec::ccir476::{
+        check_bits, codes_to_bits, create_fec, Ccir476, CODE_TO_FIGS, CODE_TO_LTRS,
+    };
+
+    let raw = include_str!("vectors/navtex_ccir476.json");
+
+    // Helper: the integer after `"key":` up to the next `,`/`}`.
+    let int_after = |hay: &str, at: usize, key: &str| -> i64 {
+        let i = hay[at..].find(key).unwrap() + at + key.len();
+        let end = hay[i..].find([',', '}']).unwrap() + i;
+        hay[i..end].parse().unwrap()
+    };
+
+    // 1. Full 128-entry code table: valid mask + letter/figure slots.
+    for code in 0u16..128 {
+        let needle = format!("\"code\":{code},");
+        let at = raw.find(&needle).expect("table row");
+        let valid_str = {
+            let i = raw[at..].find("\"valid\":").unwrap() + at + "\"valid\":".len();
+            raw[i..].starts_with("true")
+        };
+        let want_ltrs = int_after(raw, at, "\"ltrs\":") as u8;
+        let want_figs = int_after(raw, at, "\"figs\":") as u8;
+        assert_eq!(check_bits(code as u8), valid_str, "code {code} validity");
+        assert_eq!(CODE_TO_LTRS[code as usize], want_ltrs, "code {code} ltrs");
+        assert_eq!(CODE_TO_FIGS[code as usize], want_figs, "code {code} figs");
+    }
+
+    // 2. Per-message encode + FEC + LSB-first bit stream, bit-exact.
+    let ccir = Ccir476::new();
+    for line in raw.lines().filter(|l| l.contains("\"label\":")) {
+        let msg = {
+            let k = "\"msg\":\"";
+            let i = line.find(k).unwrap() + k.len();
+            line[i..i + line[i..].find('"').unwrap()].to_string()
+        };
+        let arr = |key: &str| -> Vec<u8> {
+            let k = format!("\"{key}\":[");
+            let i = line.find(&k).unwrap() + k.len();
+            let end = line[i..].find(']').unwrap() + i;
+            line[i..end].split(',').map(|s| s.trim().parse().unwrap()).collect()
+        };
+        let want_codes = arr("codes");
+        let want_fec = arr("fec");
+        let want_bits = {
+            let k = "\"bits\":\"";
+            let i = line.find(k).unwrap() + k.len();
+            line[i..i + line[i..].find('"').unwrap()].to_string()
+        };
+
+        let codes = ccir.encode(&msg);
+        assert_eq!(codes, want_codes, "{msg:?} encode codes");
+        let fec = create_fec(&codes);
+        assert_eq!(fec, want_fec, "{msg:?} create_fec stream");
+        let bits: String =
+            codes_to_bits(&fec).iter().map(|&b| if b { '1' } else { '0' }).collect();
+        assert_eq!(bits, want_bits, "{msg:?} on-air bit stream");
+    }
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-12 interop gate)"]
+fn navtex_cross_decode_doc() {
+    // Cross-check NAVTEX / SITOR-B against fldigi's navtex modem in both
+    // directions (our TX decodes in fldigi and fldigi's TX decodes in ours).
+    // The bit-exact CCIR-476 + FEC-B gate above pins the on-air integer domain;
+    // this live-audio gate additionally exercises the 100-baud FSK sync.
+}
