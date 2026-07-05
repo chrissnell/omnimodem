@@ -61,6 +61,15 @@ var modes = []modeInfo{
 	{"psk500c2", "chat", 0, []modeParam{{"center", 1500}}},
 	{"psk500c4", "chat", 0, []modeParam{{"center", 1500}}},
 	{"psk1000c2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoexmicro", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex5", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex8", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex11", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex16", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex22", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex44", "chat", 0, []modeParam{{"center", 1500}}},
+	{"dominoex88", "chat", 0, []modeParam{{"center", 1500}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -117,6 +126,12 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		}
 		return &pb.ModeParams{Params: &pb.ModeParams_Psk{Psk: &pb.PskParams{
 			Submode: label, CenterHz: float32(get("center", def)),
+		}}}
+	case "dominoexmicro", "dominoex4", "dominoex5", "dominoex8", "dominoex11",
+		"dominoex16", "dominoex22", "dominoex44", "dominoex88":
+		// The fldigi DominoEX IFK+ family: submode label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Dominoex{Dominoex: &pb.DominoParams{
+			Submode: label, CenterHz: float32(get("center", 1500)),
 		}}}
 	case "afsk1200":
 		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: true}}}

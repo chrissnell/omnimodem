@@ -18,6 +18,10 @@ pub enum ModeConfig {
     /// PSK family (fldigi parity): `submode` is a `psk::PskVariant` label
     /// (`psk31`/`psk63`/…/`psk1000`), `center_hz` the audio carrier.
     Psk { submode: String, center_hz: f32 },
+    /// DominoEX family (fldigi parity): `submode` is a `dominoex::DominoVariant`
+    /// label (`dominoex4`/…/`dominoex88`/`dominoexmicro`), `center_hz` the audio
+    /// carrier. 18-tone IFK+ MFSK.
+    DominoEx { submode: String, center_hz: f32 },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
     Jt65,
@@ -59,6 +63,12 @@ impl ModeConfig {
                 center_hz: f("center", omnimodem_dsp::modes::rtty::CENTER_HZ),
                 reverse: b("reverse"),
             }),
+            m if omnimodem_dsp::modes::dominoex::DominoVariant::from_label(m).is_some() => {
+                Some(ModeConfig::DominoEx {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
             m if omnimodem_dsp::modes::psk::PskVariant::from_label(m).is_some() => {
                 // fldigi centres the higher rates at 1500 Hz; psk31 keeps its
                 // historical 1000 Hz default so existing configs are unchanged.
@@ -90,6 +100,7 @@ impl ModeConfig {
                 format!("rtty:baud={baud},shift={shift_hz},center={center_hz},reverse={reverse}")
             }
             ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
@@ -107,6 +118,11 @@ impl ModeConfig {
             ModeConfig::Psk { submode, .. } => omnimodem_dsp::modes::psk::PskVariant::from_label(submode)
                 .map(|v| v.label())
                 .unwrap_or("psk"),
+            ModeConfig::DominoEx { submode, .. } => {
+                omnimodem_dsp::modes::dominoex::DominoVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("dominoex")
+            }
             ModeConfig::Ft4 => "ft4",
             ModeConfig::Jt65 => "jt65",
             ModeConfig::Jt9 => "jt9",
@@ -242,6 +258,35 @@ mod tests {
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         // A genuinely unknown submode is rejected, not silently accepted.
         assert_eq!(ModeConfig::parse("psk9000"), None);
+    }
+
+    #[test]
+    fn parse_resolves_dominoex_family() {
+        // Every fldigi DominoEX submode resolves, defaulting to a 1500 Hz carrier.
+        for label in [
+            "dominoexmicro",
+            "dominoex4",
+            "dominoex5",
+            "dominoex8",
+            "dominoex11",
+            "dominoex16",
+            "dominoex22",
+            "dominoex44",
+            "dominoex88",
+        ] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::DominoEx { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("dominoex16:center=1200"),
+            Some(ModeConfig::DominoEx { submode: "dominoex16".into(), center_hz: 1200.0 })
+        );
+        // Round-trips through the canonical mode string.
+        let c = ModeConfig::DominoEx { submode: "dominoex8".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("dominoex99"), None);
     }
 
     #[test]

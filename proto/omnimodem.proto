@@ -90,6 +90,7 @@ message ModeParams {
     OliviaParams olivia = 4;
     Afsk1200Params afsk1200 = 5;
     PskParams psk = 6;
+    DominoParams dominoex = 7;
   }
 }
 
@@ -120,6 +121,13 @@ message PskParams {
 message OliviaParams {
   uint32 tones = 1;         // number of tones (e.g. 32)
   uint32 bandwidth_hz = 2;  // bandwidth in Hz (e.g. 1000)
+}
+
+// The fldigi DominoEX family (dominoex4/5/8/11/16/22/44/88/micro). 18-tone IFK+
+// MFSK. `submode` is the mode label; `center_hz` the audio carrier.
+message DominoParams {
+  string submode = 1;   // dominoex::DominoVariant label, e.g. "dominoex16"
+  float  center_hz = 2; // audio center frequency
 }
 
 message Afsk1200Params {
