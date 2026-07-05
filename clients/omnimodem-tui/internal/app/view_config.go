@@ -134,7 +134,13 @@ func newConfigView(m *Model) *configView {
 		v.name.SetValue(defaultChannelName(m))
 	}
 	// Build the settings form for the preloaded mode so its params are ready to
-	// edit and to seed the change-detection baseline.
+	// edit and to seed the change-detection baseline. It opens at the mode's
+	// DEFAULTS, not the saved values: the snapshot's ChannelInfo carries the mode
+	// label but not its typed ModeParams, so there's nothing to reload yet. Until
+	// ChannelInfo gains mode_params (daemon-side change), edited settings persist
+	// within a session but revert to defaults on reopen — see GRA follow-up. Do
+	// not "fix" this by seeding from stale local state; seed from the daemon once
+	// it reports the saved params.
 	v.settings = newModeSettingsForm(v.modeLabel(), nil)
 	// Seed the change-detection baseline with the preloaded values so opening
 	// the form doesn't spuriously re-persist what's already saved.

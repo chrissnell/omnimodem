@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
@@ -21,8 +22,9 @@ func centerField(def float64) ui.Field {
 	}
 }
 
-// toneEnum / bwEnum build the tone-count and bandwidth choosers used by the
-// MFSK-grid modes (Olivia/Contestia). Both are radio-style pickers.
+// enumFrom builds a set of radio-style options from numeric values, using the
+// number as both label and stored value (e.g. the Olivia tone-count/bandwidth
+// choosers).
 func enumFrom(vals []float64) []ui.Option {
 	opts := make([]ui.Option, len(vals))
 	for i, v := range vals {
@@ -172,7 +174,7 @@ func modeSettingsSummary(label string, f *ui.SettingsForm) string {
 	if len(parts) == 0 {
 		return fmt.Sprintf("%d setting(s)", len(fields))
 	}
-	return joinComma(parts)
+	return strings.Join(parts, " · ")
 }
 
 func unitSuffix(u string) string {
@@ -180,15 +182,4 @@ func unitSuffix(u string) string {
 		return ""
 	}
 	return " " + u
-}
-
-func joinComma(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += " · "
-		}
-		out += p
-	}
-	return out
 }
