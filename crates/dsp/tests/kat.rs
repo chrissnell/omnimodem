@@ -1012,3 +1012,110 @@ fn contestia_grid_loopback_and_awgn() {
         assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
     }
 }
+
+// --- Group 11: MT63 family (64-carrier overlapping-Walsh OFDM, fldigi parity) --
+
+/// Locate an MT63 config block's `encoder`/`txvect` lines by a minimal scan.
+fn mt63_config_lines(cfg: &str) -> (&'static str, &'static str) {
+    let raw = include_str!("vectors/mt63.json");
+    let mut lines = raw.lines();
+    let needle = format!("\"{cfg}\": {{");
+    for l in lines.by_ref() {
+        if l.contains(&needle) {
+            break;
+        }
+    }
+    let (mut enc, mut tx) = (None, None);
+    for l in lines.by_ref() {
+        if l.contains("\"encoder\"") {
+            enc = Some(l);
+        } else if l.contains("\"txvect\"") {
+            tx = Some(l);
+            break;
+        }
+    }
+    (enc.unwrap(), tx.unwrap())
+}
+
+/// Bit-exact: omnimodem's MT63 encoder (inverse-Walsh spread + block interleave)
+/// and per-carrier `TxVect` DBPSK phase indices reproduce fldigi's
+/// `MT63encoder.Output` and `MT63tx::SendChar` byte-for-byte across every config.
+/// Provenance: `tests/vectors/mt63.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_mt63.sh`). Mirrors the `frontend::ofdm` lib KAT so
+/// the gate runs both with and without the `testutil` feature.
+#[test]
+fn mt63_encoder_and_txvect_match_fldigi_vector() {
+    use omnimodem_dsp::frontend::ofdm::{tx_phase_indices, Interleave, Mt63Encoder, Mt63Geometry};
+    const MSG: &str = "CQ CQ DE K1ABC K1ABC/7 --.,?!";
+
+    for cfg in ["mt63_500s", "mt63_1000s", "mt63_1000l", "mt63_2000s"] {
+        let (enc_line, tx_line) = mt63_config_lines(cfg);
+        let intlv = if cfg.ends_with('l') { Interleave::Long } else { Interleave::Short };
+        let bw: u32 =
+            cfg.trim_start_matches("mt63_").trim_end_matches(|c| c == 's' || c == 'l').parse().unwrap();
+
+        // encoder bits
+        let want_enc: Vec<Vec<u8>> = {
+            let inner = &enc_line[enc_line.find('[').unwrap() + 1..enc_line.rfind(']').unwrap()];
+            inner
+                .split(',')
+                .map(|t| t.trim().trim_matches('"').bytes().map(|c| c - b'0').collect())
+                .collect()
+        };
+        let mut enc = Mt63Encoder::new(intlv);
+        for (k, ch) in MSG.bytes().enumerate() {
+            assert_eq!(enc.process(ch).to_vec(), want_enc[k], "{cfg}: encoder char {k}");
+        }
+
+        // txvect phase indices
+        let want_tx: Vec<Vec<i32>> = {
+            let inner = &tx_line[tx_line.find('[').unwrap() + 1..tx_line.rfind(']').unwrap()];
+            inner
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split("],[")
+                .map(|r| r.split(',').map(|s| s.trim().parse().unwrap()).collect())
+                .collect()
+        };
+        let geo = Mt63Geometry::new(bw, 1500.0);
+        let chars: Vec<u8> = MSG.bytes().collect();
+        let got = tx_phase_indices(&geo, intlv, &chars);
+        for (k, (g, w)) in got.iter().zip(&want_tx).enumerate() {
+            assert_eq!(g.to_vec(), *w, "{cfg}: txvect symbol {k}");
+        }
+    }
+}
+
+/// Every MT63 submode round-trips a message TX→RX on a clean channel (windowed
+/// OFDM synthesis → per-carrier differential-BPSK demod → deinterleave + Walsh).
+/// The submode grid is parametric; one message per submode.
+#[test]
+fn mt63_submode_grid_loopback() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::mt63::{Mt63Demod, Mt63Mod, Mt63Variant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    let msg = "CQ DE K1ABC/7 EM73";
+    for &v in Mt63Variant::all() {
+        let audio = Mt63Mod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = Mt63Demod::new(v, 1500.0);
+        let mut out = String::new();
+        for chunk in audio.chunks(1024) {
+            for f in rx.feed(chunk) {
+                if let FramePayload::Text(t) = &f.payload {
+                    out.push_str(t);
+                }
+            }
+        }
+        assert!(out.contains(msg), "{}: got {out:?}", v.label());
+    }
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-11 interop gate)"]
+fn mt63_cross_decode_doc() {
+    // Cross-check MT63-500/1000/2000 × Short/Long against fldigi's MT63 modem in
+    // both directions (our TX decodes in fldigi and fldigi's TX decodes in ours).
+    // The bit-exact encoder/TxVect gate above already pins the on-air integer
+    // domain; this live-audio gate additionally exercises the sync tracker.
+}

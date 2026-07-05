@@ -109,6 +109,13 @@ var modes = []modeInfo{
 	{"contestia64_500", "chat", 0, []modeParam{{"tones", 64}, {"bw", 500}}},
 	{"contestia64_1000", "chat", 0, []modeParam{{"tones", 64}, {"bw", 1000}}},
 	{"contestia64_2000", "chat", 0, []modeParam{{"tones", 64}, {"bw", 2000}}},
+	// The fldigi MT63 family: 64-carrier overlapping-Walsh OFDM + deep interleave.
+	{"mt63_500s", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mt63_500l", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mt63_1000s", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mt63_1000l", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mt63_2000s", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mt63_2000l", "chat", 0, []modeParam{{"center", 1500}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -181,6 +188,11 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l":
 		// The fldigi MFSK family: submode label + audio center (1500 Hz).
 		return &pb.ModeParams{Params: &pb.ModeParams_Mfsk{Mfsk: &pb.MfskParams{
+			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l":
+		// The fldigi MT63 family: submode label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Mt63{Mt63: &pb.Mt63Params{
 			Submode: label, CenterHz: float32(get("center", 1500)),
 		}}}
 	case "contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",

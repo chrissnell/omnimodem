@@ -38,6 +38,10 @@ pub enum ModeConfig {
     /// Contestia grid (fldigi parity): Olivia's 32-chip-Walsh sibling, parametric
     /// over `tones` × `bandwidth_hz`.
     Contestia { tones: u16, bandwidth_hz: u16 },
+    /// MT63 family (fldigi parity): `submode` is an `mt63::Mt63Variant` label
+    /// (`mt63_500s`/…/`mt63_2000l`), `center_hz` the audio carrier. 64-carrier
+    /// overlapping-Walsh OFDM with deep interleave.
+    Mt63 { submode: String, center_hz: f32 },
     // Phase 5 fldigi breadth modes.
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
@@ -92,6 +96,12 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::mt63::Mt63Variant::from_label(m).is_some() => {
+                Some(ModeConfig::Mt63 {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
             m if omnimodem_dsp::modes::contestia::ContestiaVariant::from_label(m).is_some() => {
                 let v = omnimodem_dsp::modes::contestia::ContestiaVariant::from_label(m).unwrap();
                 Some(ModeConfig::Contestia { tones: v.tones, bandwidth_hz: v.bandwidth_hz })
@@ -130,6 +140,7 @@ impl ModeConfig {
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
             // The tones/bw live in the Contestia label itself (contestia8_500).
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
@@ -163,6 +174,11 @@ impl ModeConfig {
                 omnimodem_dsp::modes::mfsk::MfskVariant::from_label(submode)
                     .map(|v| v.label())
                     .unwrap_or("mfsk")
+            }
+            ModeConfig::Mt63 { submode, .. } => {
+                omnimodem_dsp::modes::mt63::Mt63Variant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("mt63")
             }
             ModeConfig::Contestia { .. } => "contestia",
             ModeConfig::Ft4 => "ft4",
@@ -369,6 +385,26 @@ mod tests {
         let c = ModeConfig::Mfsk { submode: "mfsk32".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         assert_eq!(ModeConfig::parse("mfsk99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_mt63_family() {
+        // Every MT63 submode resolves, defaulting to a 1500 Hz carrier.
+        for label in
+            ["mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l"]
+        {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Mt63 { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("mt63_1000l:center=1200"),
+            Some(ModeConfig::Mt63 { submode: "mt63_1000l".into(), center_hz: 1200.0 })
+        );
+        let c = ModeConfig::Mt63 { submode: "mt63_2000s".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("mt63_9000x"), None);
     }
 
     #[test]
