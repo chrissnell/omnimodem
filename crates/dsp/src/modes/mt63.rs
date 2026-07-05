@@ -15,6 +15,11 @@
 //! interleaver drains. The streaming demod assumes symbol alignment (the
 //! ±carrier FEC-scan synchroniser/AFC is deferred with the sync tracker); the
 //! fldigi cross-decode is the `#[ignore]` nightly gate. ref: mt63.cxx:60-165.
+//!
+//! Scope: 7-bit ASCII only. fldigi's optional 8-bit mode (the `c==127` escape →
+//! `c+128`; mt63.cxx:133-148, 210-221, gated on `progdefaults.mt63_8bit`) is
+//! intentionally not ported — RX emits printable + whitespace text and drops the
+//! flush NULs / control codes.
 
 use crate::frontend::ofdm::{Interleave, Mt63Modem, Mt63Rx, AUDIO_RATE};
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
