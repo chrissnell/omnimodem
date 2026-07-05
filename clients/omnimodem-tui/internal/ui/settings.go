@@ -99,6 +99,9 @@ func NewSettingsForm(fields []Field, initial map[string]string) *SettingsForm {
 // settings (e.g. ft8) yields an empty form; the host can skip opening it.
 func (f *SettingsForm) HasFields() bool { return len(f.fields) > 0 }
 
+// NumFields is the total number of settings the form exposes (advanced included).
+func (f *SettingsForm) NumFields() int { return len(f.fields) }
+
 // hasAdvanced reports whether any field is tucked into the advanced section.
 func (f *SettingsForm) hasAdvanced() bool {
 	for i := range f.fields {

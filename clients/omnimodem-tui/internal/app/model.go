@@ -51,6 +51,19 @@ type Model struct {
 	myGrid    string
 	savedCall string
 	savedGrid string
+	// modeParams caches the mode settings last saved from the Configure screen,
+	// per channel. The daemon persists them but doesn't report them back in the
+	// snapshot (ChannelInfo carries only the mode label — see GRA-281), so without
+	// this cache reopening Configure would show mode defaults instead of the values
+	// just saved. Keyed by channel; only trusted when the cached label matches the
+	// channel's current mode.
+	modeParams map[uint32]savedModeParams
+}
+
+// savedModeParams is the last-persisted settings for one channel's mode.
+type savedModeParams struct {
+	label string
+	vals  map[string]float64
 }
 
 func New(c client.ModemClient, addr string) *Model {
@@ -59,6 +72,7 @@ func New(c client.ModemClient, addr string) *Model {
 		c: c, addr: addr, version: "dev", live: map[uint32]*chanLive{},
 		myCall: id.Call, myGrid: id.Grid,
 		savedCall: id.Call, savedGrid: id.Grid,
+		modeParams: map[uint32]savedModeParams{},
 	}
 }
 
