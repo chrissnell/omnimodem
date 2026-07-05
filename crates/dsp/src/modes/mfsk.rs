@@ -251,14 +251,22 @@ impl Modulator for MfskMod {
             _ => return Err(ModError::UnsupportedPayload("mfsk needs text")),
         };
         let p = self.v.params();
-        // Payload bits + a flush: one NUL codeword (its leading boundary closes
-        // the last real varicode char) then enough zero data bits to drain the
-        // interleaver (latency ≤ symbits·depth symbols) and prime the RX Viterbi
-        // traceback. The payload tones are causal, so the flush never perturbs
-        // them (see `text_tones`). ref: mfsk.cxx:973-985 (`flushtx`).
+        // Payload bits + a flush sized to fldigi's on-air length. A trailing NUL
+        // codeword closes the last real varicode char (the reframer needs a
+        // following codeword's leading boundary — fldigi supplies it with the
+        // `\r`/EOT it appends in TX_STATE_FLUSH; NUL is the minimal equivalent and
+        // decodes to 0, which the demod drops), then `preamble` zero bits drain
+        // the interleaver. `preamble` is fldigi's own per-submode drain length —
+        // it scales with depth (107 at depth 10 up to 5000 at depth 800) and
+        // covers our ~48-symbol Viterbi traceback (fldigi's is 45). This is the
+        // reference's actual tail length: the earlier `+ symbits·depth +
+        // 4·TRACEBACK` over-provisioning roughly tripled it into a multi-second
+        // constant-tone tail that held PTT. The payload tones are causal, so the
+        // flush never perturbs them (see `text_tones`). ref: mfsk.cxx:973-985
+        // (`flushtx`), :64 (`tracepair(45, …)`), :1129-1134 (TX_STATE_FLUSH).
         let mut bits = mfsk_encode(text);
         bits.extend(mfsk_encode("\0"));
-        bits.extend(std::iter::repeat_n(0u8, p.preamble + p.symbits * p.depth + 4 * TRACEBACK));
+        bits.extend(std::iter::repeat_n(0u8, p.preamble));
         let tones = symbols_to_tones(&conv_stream(&bits), p);
         let mfsk = MFsk::new(p.samplerate as f32, p.symlen, self.base_hz(), p.tone_spacing(), p.numtones());
         Ok(mfsk.modulate(&tones))
@@ -491,5 +499,30 @@ mod tests {
     fn loopback_recovers_punctuation_and_case() {
         let msg = "The quick brown fox! (73) $5 @ 90%";
         assert_eq!(loopback(MfskVariant::M16, msg), msg);
+    }
+
+    /// Regression: the TX flush is bounded to fldigi's on-air length — a trailing
+    /// NUL codeword plus exactly `preamble` zero bits — not the earlier
+    /// over-provisioned `+ symbits·depth + 4·TRACEBACK`, which tripled the
+    /// constant-tone tail into a multi-second PTT hang. Asserts the whole
+    /// modulated length equals the payload+flush bit chain exactly, so any tail
+    /// bloat regresses this test. ref: mfsk.cxx:973-985 (`flushtx(preamble)`).
+    #[test]
+    fn tx_tail_is_bounded_to_fldigi_flush() {
+        use crate::framing::varicode::mfsk_encode;
+        let msg = "CQ";
+        for &v in MfskVariant::all() {
+            let p = v.params();
+            let flush_bits = mfsk_encode(msg).len() + mfsk_encode("\0").len() + p.preamble;
+            let expect_tones = flush_bits * 2 / p.symbits; // 2 code bits/data bit
+            let samples = MfskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap().len();
+            assert_eq!(samples, expect_tones * p.symlen, "{} tail length", v.label());
+            // The MFSK22 tail the user hit: assert it now sits near fldigi's ~3 s,
+            // well under the ~8 s the old formula produced.
+            if v == MfskVariant::M22 {
+                let secs = samples as f32 / p.samplerate as f32;
+                assert!(secs < 4.0, "mfsk22 TX tail {secs:.1}s should be ~fldigi length");
+            }
+        }
     }
 }
