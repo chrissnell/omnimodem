@@ -100,9 +100,9 @@ not required for the modes in scope.
 
 ---
 
-## 4. Remaining tranches
+## 4. Tranches — all ✅ DONE
 
-### T4 — Modulator (`crates/dsp/src/modes/hell.rs`)
+### T4 — Modulator (`crates/dsp/src/modes/hell.rs`) — ✅
 - `HellVariant { FeldHell, SlowHell, HellX5, HellX9, Hell80 }` with a `params()`
   method returning `(feldcolumnrate, keying, samplerate=8000)` and derived
   `txpixrate`, `upsampleinc`, `baud`, bandwidth (mirror the `DominoVariant` shape
@@ -170,14 +170,38 @@ not required for the modes in scope.
 
 ---
 
-## 5. Sequencing & status
+## 5. Sequencing & status — phase complete
 
-Phase 9 (DominoEX, #65) merged to `main` — this phase's gate is cleared. T1–T3
-(golden vectors, extractor, font+framing port, bit-exact green) are **done** on
-`feature/omnimodem-phase10-hell-image`. Remaining: T4 modulator, T5 raster demod,
-T6 registration, T7 typed `Image` proto, T8 TUI `image` shape, T9 gates + PR.
+Phase 9 (DominoEX, #65) merged to `main` — this phase's gate was cleared. All
+tranches T1–T9 are **done** on `feature/omnimodem-phase10-hell-image`:
+
+- T1–T3: golden-vector extractor + `feldhell.json` + verbatim font/framing port,
+  bit-exact KATs green.
+- T4–T5: `modes/hell.rs` — the five-submode modulator + facsimile raster demod;
+  loopback recovers the exact reference glyph columns for all submodes (incl.
+  HELLX9 at ~3.6 samples/pixel), clean and under light AWGN.
+- T6: daemon `ModeConfig::Hell` parse/registry arms.
+- T7: typed gRPC `Image` message on `RxFrame` + `HellParams`, replacing the P0
+  interim `frame_bytes` flatten.
+- T8: TUI `image` interaction shape (scrolling raster) + the five Hell modes.
+- T9: full-vector KAT + AWGN raster loopback in `kat.rs`; `cargo test --workspace
+  --locked` (dsp 300, daemon 172, snapshots 11) + `clippy --workspace -D warnings`
+  green; TUI `go test ./...` green; every submode selectable.
+
 Build/test env: `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0`; never run
 `cargo fmt`.
+
+### Deferred / follow-ups (documented, not stubs)
+- **Raised-cosine AM edge shaping** (FELDHELL/SLOWHELL `OnShape`/`OffShape`): an
+  on-air splatter refinement in the FP/audio domain — does not affect the
+  bit-exact raster; matters only for the `#[ignore]` cross-decode gate.
+- **`#[ignore]` cross-decode vs the fldigi binary** and a raster match-rate-vs-SNR
+  sweep in `ber.rs`: the nightly interop gates, mirroring the psk/olivia precedent.
+- **The other 14 Feld fonts + multi-font TX selection**: mechanical follow-on via
+  the same extractor path; not needed for the modes in scope.
+- **Live incremental raster streaming**: the RX finalizes the raster on flush; the
+  typed `Image` message is designed to append columns, wiring which is a small
+  follow-up once a live capture path exercises it.
 
 ## 6. Wiki
 
