@@ -12,11 +12,13 @@ type modeParam struct {
 // their editable params. shape "chat" → ragchew surface; "sequencer" → the
 // structured-QSO auto-sequence ladder (FT8/FT4/JT65/JT9); "beacon" → the spot
 // monitor (WSPR), which decodes spots and keys a single call/grid/power beacon on
-// enter. slotSecs is the T/R window length for the windowed sequencer/beacon modes
-// (0 for the streaming "chat" modes).
+// enter; "image" → the facsimile raster surface (Hell), which scrolls the received
+// image columns and composes text that the mode paints as pixels on TX. slotSecs
+// is the T/R window length for the windowed sequencer/beacon modes (0 for the
+// streaming "chat"/"image" modes).
 type modeInfo struct {
 	label    string
-	shape    string // "chat" | "sequencer" | "beacon"
+	shape    string // "chat" | "sequencer" | "beacon" | "image"
 	slotSecs float64
 	params   []modeParam
 }
@@ -70,6 +72,11 @@ var modes = []modeInfo{
 	{"dominoex22", "chat", 0, []modeParam{{"center", 1500}}},
 	{"dominoex44", "chat", 0, []modeParam{{"center", 1500}}},
 	{"dominoex88", "chat", 0, []modeParam{{"center", 1500}}},
+	{"feldhell", "image", 0, []modeParam{{"center", 1500}}},
+	{"slowhell", "image", 0, []modeParam{{"center", 1500}}},
+	{"hellx5", "image", 0, []modeParam{{"center", 1500}}},
+	{"hellx9", "image", 0, []modeParam{{"center", 1500}}},
+	{"hell80", "image", 0, []modeParam{{"center", 1500}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -131,6 +138,11 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		"dominoex16", "dominoex22", "dominoex44", "dominoex88":
 		// The fldigi DominoEX IFK+ family: submode label + audio center (1500 Hz).
 		return &pb.ModeParams{Params: &pb.ModeParams_Dominoex{Dominoex: &pb.DominoParams{
+			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "feldhell", "slowhell", "hellx5", "hellx9", "hell80":
+		// The fldigi Feld Hell facsimile family: submode label + audio center.
+		return &pb.ModeParams{Params: &pb.ModeParams_Hell{Hell: &pb.HellParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
 		}}}
 	case "afsk1200":
