@@ -77,7 +77,11 @@ type configView struct {
 	saved     cfgSig // last state CONFIRMED persisted to the daemon
 	applying  bool   // a save pipeline is in flight (serializes auto-apply)
 	inflight  cfgSig // the sig the in-flight pipeline is persisting
-	closing   bool   // esc pressed; pop once the save fully drains
+	// The mode + settings the in-flight pipeline is persisting, cached on the Model
+	// once the save confirms so a reopen shows the saved values.
+	inflightModeLabel string
+	inflightModeVals  map[string]float64
+	closing           bool // esc pressed; pop once the save fully drains
 }
 
 func newDevList(title string) list.Model {
@@ -133,26 +137,34 @@ func newConfigView(m *Model) *configView {
 	} else {
 		v.name.SetValue(defaultChannelName(m))
 	}
-	// Build the settings form for the preloaded mode so its params are ready to
-	// edit and to seed the change-detection baseline. It opens at the mode's
-	// DEFAULTS, not the saved values: the snapshot's ChannelInfo carries the mode
-	// label but not its typed ModeParams, so there's nothing to reload yet. Until
-	// ChannelInfo gains mode_params (daemon-side change), edited settings persist
-	// within a session but revert to defaults on reopen — see GRA follow-up. Do
-	// not "fix" this by seeding from stale local state; seed from the daemon once
-	// it reports the saved params.
-	v.settings = newModeSettingsForm(v.modeLabel(), nil)
+	// Build the settings form for the preloaded mode, seeded from the last values
+	// saved this session (see buildSettings), so reopening Configure shows what was
+	// just set rather than mode defaults.
+	v.buildSettings()
 	// Seed the change-detection baseline with the preloaded values so opening
 	// the form doesn't spuriously re-persist what's already saved.
 	v.saved = v.sig()
 	return v
 }
 
+// buildSettings swaps in a fresh settings form for the current mode, seeded from
+// the channel's last-saved values when the cached mode matches. The daemon
+// doesn't report saved ModeParams in the snapshot (ChannelInfo carries only the
+// mode label — GRA-281), so this session cache is what makes an edited setting
+// survive closing and reopening the Configure screen. A full app restart still
+// falls back to defaults until the daemon surfaces the saved params.
+func (v *configView) buildSettings() {
+	label := v.modeLabel()
+	var initial map[string]float64
+	if sp, ok := v.m.modeParams[v.m.sel]; ok && sp.label == label {
+		initial = sp.vals
+	}
+	v.settings = newModeSettingsForm(label, initial)
+}
+
 // rebuildSettings swaps in a fresh settings form for the current mode. Called
 // when the mode changes, so the form always matches the selected mode's params.
-func (v *configView) rebuildSettings() {
-	v.settings = newModeSettingsForm(v.modeLabel(), nil)
-}
+func (v *configView) rebuildSettings() { v.buildSettings() }
 
 // defaultChannelName picks the first "VFO-<letter>" not already taken by another
 // channel, so a freshly added channel doesn't default to a name that's already in
@@ -285,6 +297,8 @@ func (v *configView) maybePersist() tea.Cmd {
 	// persisted.
 	v.applying = true
 	v.inflight = cur
+	v.inflightModeLabel = v.modeLabel()
+	v.inflightModeVals = modeValsFrom(v.settings)
 	return v.persistAll()
 }
 
@@ -355,8 +369,13 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			// truth) so reopening Configure shows what actually persisted.
 			return v, snapshotCmd(v.m.c)
 		}
-		// Confirmed: advance the baseline to exactly what this save persisted.
+		// Confirmed: advance the baseline to exactly what this save persisted, and
+		// cache the persisted mode settings so reopening Configure shows them (the
+		// daemon doesn't report them back — see buildSettings).
 		v.saved = v.inflight
+		v.m.modeParams[v.m.sel] = savedModeParams{
+			label: v.inflightModeLabel, vals: v.inflightModeVals,
+		}
 		if msg.warnRxOnly {
 			v.m.toast = ui.NewToast(
 				"Bound RX-only — no usable TX device; transmit is silent. Pick an output device for TX.",
@@ -598,14 +617,15 @@ func (v *configView) Render(w, h int) string {
 	// the selected mode exposes, drawn by the reusable ui.SettingsForm.
 	if v.editing {
 		modalW := w
-		if modalW > 64 {
-			modalW = 64
+		if modalW > 72 {
+			modalW = 72
 		}
-		body := v.settings.View(modalW - 4)
-		box := ui.Modal(
-			v.modeLabel()+" settings  ‹↑/↓› field · ‹←/→/space› change · ‹esc› done",
-			body, modalW)
-		b.WriteString("\n" + lipgloss.PlaceHorizontal(w, lipgloss.Center, box))
+		// Title is just "<mode> settings"; the hotkeys live on their own dim line
+		// along the bottom of the dialog so the header stays clean and unwrapped.
+		body := v.settings.View(modalW-4) + "\n\n" +
+			ui.Dim.Render("↑/↓ field · ←/→ change · space toggle · esc done")
+		box := ui.Modal(v.modeLabel()+" settings", body, modalW)
+		b.WriteString("\n" + centerModal(box, w))
 		return b.String()
 	}
 	// The device picker is a modal: it appears only while a device field is being
@@ -630,8 +650,18 @@ func (v *configView) Render(w, h int) string {
 	}
 	lst.SetSize(modalW-4, listH)
 	box := ui.Modal(label+"  ‹enter› choose · ‹esc› cancel · ‹/› filter", lst.View(), modalW)
-	b.WriteString("\n" + lipgloss.PlaceHorizontal(w, lipgloss.Center, box))
+	b.WriteString("\n" + centerModal(box, w))
 	return b.String()
+}
+
+// centerModal horizontally centers a modal box within width w, painting the
+// surrounding whitespace with the panel background. Without the explicit
+// whitespace background, lipgloss leaves those padding cells unstyled — they then
+// render as the terminal's default background (a grey rectangle beside the box)
+// instead of the black desktop.
+func centerModal(box string, w int) string {
+	return lipgloss.PlaceHorizontal(w, lipgloss.Center, box,
+		lipgloss.WithWhitespaceBackground(ui.ColorPanel))
 }
 
 // txDeviceLabel renders the TX device field. An empty txID means "TX follows the
@@ -649,14 +679,20 @@ func txDeviceLabel(txID, rxID string) string {
 	return ui.Dim.Render("(same as RX)")
 }
 
-// settingsSummary renders the Settings row's value: a one-line digest of the
-// mode's current knobs, with an ‹enter› cue when there's something to open.
+// settingsSummary renders the Settings row's value. It deliberately shows only a
+// count and an ‹enter› cue, not the individual values: a lone value next to the
+// row (e.g. just the center freq) is confusing and meaningless once a mode has
+// more than one knob — the values belong in the editor, not the summary row.
 func (v *configView) settingsSummary() string {
-	sum := modeSettingsSummary(v.modeLabel(), v.settings)
-	if v.settings != nil && v.settings.HasFields() {
-		return sum + "  " + ui.Dim.Render("‹enter›")
+	if v.settings == nil || !v.settings.HasFields() {
+		return ui.Dim.Render("no settings")
 	}
-	return ui.Dim.Render(sum)
+	n := v.settings.NumFields()
+	noun := "settings"
+	if n == 1 {
+		noun = "setting"
+	}
+	return ui.Dim.Render(fmt.Sprintf("%d %s", n, noun)) + "  " + ui.Accent.Render("‹enter to edit›")
 }
 
 func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }

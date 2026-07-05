@@ -1,9 +1,7 @@
 package app
 
 import (
-	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
@@ -143,43 +141,3 @@ func num(v float64) string {
 	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
-// modeSettingsSummary is a one-line description of a mode's current settings for
-// the config form's Settings row (e.g. "center 1500 Hz" or "no settings").
-func modeSettingsSummary(label string, f *ui.SettingsForm) string {
-	fields := modeFields(label)
-	if len(fields) == 0 {
-		return "no settings"
-	}
-	if f == nil {
-		return fmt.Sprintf("%d setting(s)", len(fields))
-	}
-	// Summarise the basic (non-advanced) fields; advanced stay hidden here.
-	var parts []string
-	for _, fld := range fields {
-		if fld.Advanced {
-			continue
-		}
-		v := f.Value(fld.Key)
-		switch fld.Kind {
-		case ui.FieldToggle:
-			state := "off"
-			if v == "1" || v == "true" || v == "on" {
-				state = "on"
-			}
-			parts = append(parts, fld.Label+" "+state)
-		default:
-			parts = append(parts, v+unitSuffix(fld.Unit))
-		}
-	}
-	if len(parts) == 0 {
-		return fmt.Sprintf("%d setting(s)", len(fields))
-	}
-	return strings.Join(parts, " · ")
-}
-
-func unitSuffix(u string) string {
-	if u == "" {
-		return ""
-	}
-	return " " + u
-}
