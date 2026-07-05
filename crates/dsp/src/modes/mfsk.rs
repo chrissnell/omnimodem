@@ -184,6 +184,10 @@ fn conv_stream(bits: &[u8]) -> Vec<u8> {
 /// into `symbits`-bit symbols (MSB first), interleave, then `grayencode`
 /// (== [`gray_decode`]). Emits one tone per complete symbol; a trailing partial
 /// symbol is dropped (drained on TX by the flush). ref: mfsk.cxx:939-937.
+///
+/// The `reverse` sideband toggle (mfsk.cxx:926-927, `sym = numtones-1-sym`, off
+/// by default) is deliberately not ported: it flips the whole tone bank and
+/// affects neither the standard TX/RX path nor any golden vector.
 fn symbols_to_tones(code: &[u8], p: MfskParams) -> Vec<u32> {
     let mut il = MfskInterleaver::new(p.symbits, p.depth, true, 0u8);
     let mut tones = Vec::new();
