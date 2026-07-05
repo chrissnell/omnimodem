@@ -182,7 +182,7 @@ impl Modulator for WefaxMod {
         let mut phasing = vec![0.0f32; out_w];
         for (c, p) in phasing.iter_mut().enumerate() {
             let pos = c as f32 / out_w as f32;
-            *p = if pos < 0.025 || pos >= 0.975 { 1.0 } else { 0.0 };
+            *p = if !(0.025..0.975).contains(&pos) { 1.0 } else { 0.0 };
         }
         for _ in 0..TX_PHASING_LINES {
             self.line(&mut out, &mut phase, &phasing, spl);

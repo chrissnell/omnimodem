@@ -387,8 +387,8 @@ impl FecBDecoder {
 
     fn code_from_soft(soft: &[f32; 7]) -> u8 {
         let mut code = 0u8;
-        for i in 0..7 {
-            if soft[i] > 0.0 {
+        for (i, &s) in soft.iter().enumerate() {
+            if s > 0.0 {
                 code |= 1 << i;
             }
         }
@@ -419,8 +419,8 @@ impl FecBDecoder {
 
         // Soft-combine the direct and repeat confidences.
         let mut avg = [0.0f32; 7];
-        for i in 0..7 {
-            avg[i] = self.bits[(cursor + i as i32) as usize] + self.bits[(reppos + i as i32) as usize];
+        for (i, a) in avg.iter_mut().enumerate() {
+            *a = self.bits[(cursor + i as i32) as usize] + self.bits[(reppos + i as i32) as usize];
         }
         let calc = Self::code_from_soft(&avg);
         if check_bits(calc) {
@@ -462,15 +462,15 @@ impl FecBDecoder {
 
     fn window(&self, pos: i32) -> [f32; 7] {
         let mut w = [0.0f32; 7];
-        for i in 0..7 {
-            w[i] = self.bits[(pos + i as i32) as usize];
+        for (i, slot) in w.iter_mut().enumerate() {
+            *slot = self.bits[(pos + i as i32) as usize];
         }
         w
     }
 
     fn write_window(&mut self, pos: i32, w: &[f32; 7]) {
-        for i in 0..7 {
-            self.bits[(pos + i as i32) as usize] = w[i];
+        for (i, &v) in w.iter().enumerate() {
+            self.bits[(pos + i as i32) as usize] = v;
         }
     }
 
