@@ -33,6 +33,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"contestia16_250", "contestia16_500", "contestia16_1000", "contestia16_2000",
 		"contestia32_1000", "contestia32_2000",
 		"contestia64_500", "contestia64_1000", "contestia64_2000",
+		"mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
@@ -175,6 +176,25 @@ func TestMfskModeParams(t *testing.T) {
 	}
 	if def := modeParamsFor("mfsk64l", nil).GetMfsk(); def == nil || def.GetCenterHz() != 1500 {
 		t.Fatalf("mfsk64l default center = %v, want 1500", def.GetCenterHz())
+	}
+}
+
+// The MT63 family carries its submode label and center through the dedicated
+// Mt63Params oneof, not the MFSK/DominoEX arm.
+func TestMt63ModeParams(t *testing.T) {
+	mp := modeParamsFor("mt63_1000l", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("mt63_1000l must produce typed ModeParams")
+	}
+	m := mp.GetMt63()
+	if m == nil {
+		t.Fatalf("expected Mt63Params, got %T", mp.GetParams())
+	}
+	if m.GetSubmode() != "mt63_1000l" || m.GetCenterHz() != 1200 {
+		t.Fatalf("mt63 params = %q / %v, want mt63_1000l / 1200", m.GetSubmode(), m.GetCenterHz())
+	}
+	if def := modeParamsFor("mt63_2000s", nil).GetMt63(); def == nil || def.GetCenterHz() != 1500 {
+		t.Fatalf("mt63_2000s default center = %v, want 1500", def.GetCenterHz())
 	}
 }
 

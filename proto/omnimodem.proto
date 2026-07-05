@@ -95,6 +95,7 @@ message ModeParams {
     MfskParams mfsk = 9;
     ContestiaParams contestia = 10;
     ThorParams thor = 11;
+    Mt63Params mt63 = 12;
   }
 }
 
@@ -162,6 +163,14 @@ message ContestiaParams {
 // `submode` is the mode label; `center_hz` the audio carrier.
 message ThorParams {
   string submode = 1;   // thor::ThorVariant label, e.g. "thor16"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi MT63 family (mt63_500s/l, 1000s/l, 2000s/l). 64-carrier
+// overlapping-Walsh OFDM + deep interleave. `submode` is the mode label;
+// `center_hz` the audio carrier.
+message Mt63Params {
+  string submode = 1;   // mt63::Mt63Variant label, e.g. "mt63_1000l"
   float  center_hz = 2; // audio center frequency
 }
 

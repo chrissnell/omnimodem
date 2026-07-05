@@ -16,6 +16,7 @@ use omnimodem_dsp::modes::{
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     mfsk::{MfskDemod, MfskMod, MfskVariant},
+    mt63::{Mt63Demod, Mt63Mod, Mt63Variant},
     olivia::{OliviaDemod, OliviaMod},
     psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
@@ -71,6 +72,10 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             let v = MfskVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(MfskDemod::new(v, *center_hz)))
         }
+        ModeConfig::Mt63 { submode, center_hz } => {
+            let v = Mt63Variant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(Mt63Demod::new(v, *center_hz)))
+        }
         ModeConfig::Contestia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(ContestiaDemod::new(*tones, *bandwidth_hz)))
         }
@@ -125,6 +130,10 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Mfsk { submode, center_hz } => {
             let v = MfskVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(MfskMod::new(v, *center_hz)))
+        }
+        ModeConfig::Mt63 { submode, center_hz } => {
+            let v = Mt63Variant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(Mt63Mod::new(v, *center_hz)))
         }
         ModeConfig::Contestia { tones, bandwidth_hz } => {
             Some(Box::new(ContestiaMod::new(*tones, *bandwidth_hz)))
