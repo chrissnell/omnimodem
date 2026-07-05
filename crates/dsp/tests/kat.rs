@@ -828,6 +828,128 @@ fn dominoex_submode_grid_loopback_and_awgn() {
     }
 }
 
+/// Bit-exact: omnimodem's THOR TX chain (THOR varicode → convolutional FEC →
+/// size-4 interleave → IFK+) reproduces fldigi's stage intermediates byte-for-
+/// byte, for both the K=7 (THOR16) and K=15 (THOR100) paths, plus the secondary
+/// varicode table. Provenance: `tests/vectors/thor_varicode.json` (fldigi 4.1.23
+/// @ 61b97f413, driver `scratch/refvectors/build_thor.sh`).
+#[test]
+fn thor_varicode_fec_and_ifk_match_fldigi_vector() {
+    use omnimodem_dsp::fec::conv::ConvEncoder;
+    use omnimodem_dsp::fec::interleave::MfskInterleaver;
+    use omnimodem_dsp::framing::thor_varicode;
+    use omnimodem_dsp::modes::thor::{encode_symbols, ThorVariant};
+
+    let raw = include_str!("vectors/thor_varicode.json");
+    let str_field = |line: &str, k: &str| {
+        let i = line.find(k).unwrap() + k.len();
+        line[i..line[i..].find('"').unwrap() + i].to_string()
+    };
+    let nums = |s: String| -> Vec<u32> { s.split(' ').map(|x| x.parse().unwrap()).collect() };
+
+    // 1. Per-mode message stages: code pairs, post-interleave nibbles, IFK+ tones.
+    for (mode, v) in [("thor16", ThorVariant::T16), ("thor100", ThorVariant::T100)] {
+        let line = raw.lines().find(|l| l.contains(&format!("\"mode\":\"{mode}\""))).unwrap();
+        let msg = str_field(line, "\"msg\":\"");
+        let want_pairs = nums(str_field(line, "\"codepairs\":\""));
+        let want_inlv = nums(str_field(line, "\"inlv\":\""));
+        let want_tones = nums(str_field(line, "\"tones\":\""));
+
+        assert_eq!(encode_symbols(v, &msg), want_tones, "{mode} IFK+ tones");
+
+        // Re-derive the FEC + interleave stages against their columns.
+        let mut enc = ConvEncoder::new(v.conv_code());
+        let mut inlv = MfskInterleaver::<u8>::new(4, v.params().idepth, true, 0u8);
+        let (mut pairs, mut nibbles) = (Vec::new(), Vec::new());
+        let (mut bitstate, mut bitshreg) = (0, 0u32);
+        let mut coded = Vec::new();
+        for &ch in msg.as_bytes() {
+            for bit in thor_varicode::encode(ch, false) {
+                coded.clear();
+                enc.encode(bit, &mut coded);
+                pairs.push(coded[0] as u32 | ((coded[1] as u32) << 1));
+                for &cb in &coded {
+                    bitshreg = (bitshreg << 1) | cb as u32;
+                    bitstate += 1;
+                    if bitstate == 4 {
+                        inlv.bits(&mut bitshreg);
+                        nibbles.push(bitshreg);
+                        bitstate = 0;
+                        bitshreg = 0;
+                    }
+                }
+            }
+        }
+        assert_eq!(pairs, want_pairs, "{mode} conv code pairs");
+        assert_eq!(nibbles, want_inlv, "{mode} interleaved nibbles");
+    }
+
+    // 2. The secondary varicode table, entry by entry.
+    let sline = raw.lines().find(|l| l.contains("\"secondary\"")).unwrap();
+    let mut n = 0;
+    for entry in sline.split('{').skip(2) {
+        let f = |k: &str| -> &str {
+            let i = entry.find(k).unwrap() + k.len();
+            &entry[i..i + entry[i..].find(['"', ',', '}']).unwrap()]
+        };
+        let c: u8 = f("\"c\":").parse().unwrap();
+        let code = f("\"code\":\"").to_string();
+        let dec: u16 = f("\"dec\":").parse().unwrap();
+        let got: String = thor_varicode::encode(c, true).iter().map(|b| (b + b'0') as char).collect();
+        assert_eq!(got, code, "secondary encode c={c}");
+        let sym = code.bytes().fold(0u32, |a, b| (a << 1) | (b - b'0') as u32);
+        assert_eq!(thor_varicode::decode(sym), Some(dec), "secondary decode c={c}");
+        n += 1;
+    }
+    assert_eq!(n, 91, "full secondary table");
+}
+
+/// Every THOR submode round-trips a message TX→RX on a clean channel (and, for
+/// the K=7 low-speed family, under light AWGN — the convolutional FEC recovers
+/// it). The decoded stream contains the message contiguously; the idle
+/// preamble/flush that primes the interleaver + Viterbi frames it.
+#[test]
+fn thor_submode_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::thor::{ThorDemod, ThorMod, ThorVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn decode(v: ThorVariant, samples: &[f32]) -> String {
+        let mut rx = ThorDemod::new(v, 1500.0);
+        rx.feed(samples)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Preamble detection is deferred, so the RX emits a short, bounded startup
+    // transient before the framer locks (see modes::thor docs); assert the strong
+    // invariant — the message arrives intact at the tail after ≤8 bytes of smear —
+    // rather than a loose `contains` that would hide tail corruption or drops.
+    fn assert_recovers(v: ThorVariant, msg: &str, got: &str, ch: &str) {
+        assert!(got.ends_with(msg), "{} {ch} lost the message tail: {got:?}", v.label());
+        assert!(got.len() - msg.len() <= 8, "{} {ch} transient too long: {got:?}", v.label());
+    }
+
+    let msg = "CQ DE K1ABC/7";
+    for (i, &v) in ThorVariant::all().iter().enumerate() {
+        let clean = ThorMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert_recovers(v, msg, &decode(v, &clean), "clean loopback");
+
+        // The K=15 modes carry a much longer Viterbi; keep the noise pass to the
+        // K=7 family to bound test time (still the whole low-speed grid).
+        if v.params().k == 7 {
+            let mut noisy = ThorMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let mut rng = Rng::new(0x7407 + i as u64);
+            add_awgn(&mut noisy, 0.02, &mut rng);
+            assert_recovers(v, msg, &decode(v, &noisy), "AWGN loopback");
+        }
+    }
+}
+
 /// Bit-exact: omnimodem's Feld Hell font (`hellfont::glyph_columns`) and on-air
 /// column raster (`hellfont::on_air_columns`) reproduce fldigi's tables and
 /// `tx_char` framing byte-for-byte, for every printable glyph and both test

@@ -19,6 +19,7 @@ use omnimodem_dsp::modes::{
     olivia::{OliviaDemod, OliviaMod},
     psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
+    thor::{ThorDemod, ThorMod, ThorVariant},
     wspr::{WsprDemod, WsprMod},
 };
 
@@ -57,6 +58,10 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::DominoEx { submode, center_hz } => {
             let v = DominoVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(DominoDemod::new(v, *center_hz)))
+        }
+        ModeConfig::Thor { submode, center_hz } => {
+            let v = ThorVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(ThorDemod::new(v, *center_hz)))
         }
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
@@ -108,6 +113,10 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::DominoEx { submode, center_hz } => {
             let v = DominoVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(DominoMod::new(v, *center_hz)))
+        }
+        ModeConfig::Thor { submode, center_hz } => {
+            let v = ThorVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(ThorMod::new(v, *center_hz)))
         }
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
@@ -212,6 +221,25 @@ mod tests {
         );
         assert_eq!(
             native_rate(&ModeConfig::DominoEx { submode: "dominoex22".into(), center_hz: 1500.0 }),
+            Some(11025)
+        );
+    }
+
+    #[test]
+    fn thor_family_is_streaming_with_modulators() {
+        for label in ["thormicro", "thor4", "thor16", "thor25x4", "thor100"] {
+            let cfg = ModeConfig::Thor { submode: label.into(), center_hz: 1500.0 };
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{label} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), None);
+        }
+        // The native RX rate follows the submode (8 kHz vs 11.025 kHz).
+        assert_eq!(
+            native_rate(&ModeConfig::Thor { submode: "thor16".into(), center_hz: 1500.0 }),
+            Some(8000)
+        );
+        assert_eq!(
+            native_rate(&ModeConfig::Thor { submode: "thor22".into(), center_hz: 1500.0 }),
             Some(11025)
         );
     }

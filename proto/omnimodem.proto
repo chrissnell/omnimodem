@@ -94,6 +94,7 @@ message ModeParams {
     HellParams hell = 8;
     MfskParams mfsk = 9;
     ContestiaParams contestia = 10;
+    ThorParams thor = 11;
   }
 }
 
@@ -154,6 +155,14 @@ message MfskParams {
 message ContestiaParams {
   uint32 tones = 1;         // number of tones (4/8/16/32/64)
   uint32 bandwidth_hz = 2;  // bandwidth in Hz (125..2000)
+}
+
+// The fldigi THOR family (thormicro/4/5/8/11/16/22/25x4/50x1/50x2/100). DominoEX's
+// 18-tone IFK+ core with convolutional FEC + interleave + soft decode.
+// `submode` is the mode label; `center_hz` the audio carrier.
+message ThorParams {
+  string submode = 1;   // thor::ThorVariant label, e.g. "thor16"
+  float  center_hz = 2; // audio center frequency
 }
 
 message Afsk1200Params {
