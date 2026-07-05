@@ -309,9 +309,9 @@ impl HellDemod {
         //
         // AM: envelope power `Σ|z|²` over the pixel's whole span (phase-independent;
         // the residual 2·fc image averages out). On where it exceeds half the peak.
-        // Exact for FELDHELL/SLOWHELL/HELLX5/HELL80; near-exact for HELLX9, which is
-        // only ~3.6 samples/pixel at 8 kHz — a visual facsimile rate (fldigi RX-
-        // resamples it sub-pixel too), so its gate is a raster-fidelity threshold.
+        // Averaging over the whole span recovers the raster exactly for every AM
+        // submode in loopback — including HELLX9, which is only ~3.6 samples/pixel at
+        // 8 kHz (a visual facsimile rate; fldigi RX-resamples it sub-pixel too).
         //
         // FSK: instantaneous frequency `arg(z[n]·conj(z[n-1]))` (a short boxcar
         // first cleans the discriminator), averaged over the pixel's central half;
@@ -492,6 +492,27 @@ mod tests {
         let px = column_pixels(&cols);
         let gray: Vec<u8> = px.iter().map(|&b| if b { 255 } else { 0 }).collect();
         assert_eq!(image_columns(COLUMN_ROWS as u16, &gray), cols);
+    }
+
+    #[test]
+    fn blank_message_produces_all_off_raster_without_panicking() {
+        // A space is five null columns: an all-off raster. The AM threshold sees
+        // peak == 0, so nothing crosses it — no division/normalisation blow-up.
+        for &v in HellVariant::all() {
+            let got = loopback_columns(v, " ");
+            assert!(got.iter().all(|&c| c == 0), "{} blank raster must be all-off", v.label());
+            assert_eq!(got.len(), on_air_columns(" ", DEFAULT_XMT_WIDTH).len());
+        }
+    }
+
+    #[test]
+    fn empty_input_yields_no_frame() {
+        // No text, no samples: flush emits nothing rather than an empty raster.
+        let mut tx = HellMod::new(HellVariant::FeldHell, 1500.0);
+        assert!(tx.modulate(&Frame::text("")).unwrap().is_empty());
+        let mut rx = HellDemod::new(HellVariant::FeldHell, 1500.0);
+        assert!(rx.feed(&[]).is_empty());
+        assert!(rx.flush().is_empty());
     }
 }
 
