@@ -220,13 +220,13 @@ impl<T: Copy> MfskInterleaver<T> {
                 }
             }
             // Insert the input as the new last column.
-            for i in 0..size {
-                self.table[base + i * size + (size - 1)] = psyms[i];
+            for (i, &s) in psyms.iter().enumerate() {
+                self.table[base + i * size + (size - 1)] = s;
             }
             // Read out on the (forward) anti-diagonal / (reverse) main diagonal.
-            for i in 0..size {
+            for (i, s) in psyms.iter_mut().enumerate() {
                 let col = if self.fwd { size - i - 1 } else { i };
-                psyms[i] = self.table[base + i * size + col];
+                *s = self.table[base + i * size + col];
             }
         }
     }
