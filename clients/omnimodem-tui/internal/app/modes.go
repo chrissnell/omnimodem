@@ -72,6 +72,17 @@ var modes = []modeInfo{
 	{"dominoex22", "chat", 0, []modeParam{{"center", 1500}}},
 	{"dominoex44", "chat", 0, []modeParam{{"center", 1500}}},
 	{"dominoex88", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thormicro", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor5", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor8", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor11", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor16", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor22", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor25x4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor50x1", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor50x2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"thor100", "chat", 0, []modeParam{{"center", 1500}}},
 	{"feldhell", "image", 0, []modeParam{{"center", 1500}}},
 	{"slowhell", "image", 0, []modeParam{{"center", 1500}}},
 	{"hellx5", "image", 0, []modeParam{{"center", 1500}}},
@@ -156,6 +167,7 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 	case "rtty":
 		return &pb.ModeParams{Params: &pb.ModeParams_Rtty{Rtty: &pb.RttyParams{
 			Baud: float32(get("baud", 45.45)), ShiftHz: float32(get("shift", 170)),
+			CenterHz: float32(get("center", 0)), Reverse: get("reverse", 0) != 0,
 		}}}
 	case "psk31", "psk63", "psk125", "psk250", "psk500", "psk1000",
 		"qpsk31", "qpsk63", "qpsk125", "qpsk250", "qpsk500",
@@ -177,6 +189,13 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		"dominoex16", "dominoex22", "dominoex44", "dominoex88":
 		// The fldigi DominoEX IFK+ family: submode label + audio center (1500 Hz).
 		return &pb.ModeParams{Params: &pb.ModeParams_Dominoex{Dominoex: &pb.DominoParams{
+			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "thormicro", "thor4", "thor5", "thor8", "thor11", "thor16", "thor22",
+		"thor25x4", "thor50x1", "thor50x2", "thor100":
+		// The fldigi THOR family (IFK+ core + convolutional FEC + interleave):
+		// submode label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Thor{Thor: &pb.ThorParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
 		}}}
 	case "feldhell", "slowhell", "hellx5", "hellx9", "hell80":
@@ -217,7 +236,7 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 			Tones: uint32(get("tones", t)), BandwidthHz: uint32(get("bw", bw)),
 		}}}
 	case "afsk1200":
-		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: true}}}
+		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: get("tx", 1) != 0}}}
 	case "olivia":
 		return &pb.ModeParams{Params: &pb.ModeParams_Olivia{Olivia: &pb.OliviaParams{
 			Tones: uint32(get("tones", 32)), BandwidthHz: uint32(get("bw", 1000)),

@@ -35,6 +35,7 @@ use command::{Command, ConfigureAudioOk, ConfigureSpectrumOk};
 use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -707,7 +708,11 @@ fn transmit(
 
         interlock.begin_tx(&rig);
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: true });
-        let outcome = drive_tx_cycle(driver.as_mut(), sink, samples, rate, TX_POLL);
+        // The legacy raw-PCM cycle runs inline on the core thread (no worker),
+        // so there is no async cancel to honor — pass a never-set flag.
+        let outcome = drive_tx_cycle(
+            driver.as_mut(), sink, samples, rate, TX_POLL, &AtomicBool::new(false),
+        );
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: false });
         interlock.end_tx(&rig);
         Some(outcome)
@@ -718,7 +723,9 @@ fn transmit(
     let _ = telemetry.send(TelemetryEvent::TransmitComplete { channel, transmit_id: tx_id });
 
     match outcome {
-        None | Some(TxCycleOutcome::Done) => Ok(tx_id),
+        // Aborted is unreachable here (the legacy cancel flag is never set) but
+        // is a clean stop, so it maps to Ok alongside Done.
+        None | Some(TxCycleOutcome::Done) | Some(TxCycleOutcome::Aborted) => Ok(tx_id),
         Some(TxCycleOutcome::KeyFailed(e))
         | Some(TxCycleOutcome::SubmitFailed(e))
         | Some(TxCycleOutcome::UnkeyFailed(e)) => {
@@ -1452,6 +1459,98 @@ mod tests {
             configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
             // Worker gone -> manual key is allowed again.
             assert!(key_ptt_call(&core, ChannelId(0)).await.is_ok());
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    // GRA-279: reconfiguring a channel while a burst is on the air must stop that
+    // burst promptly (the mode-switch collision) — not let it drain to the end —
+    // and TX must still work afterward. A mode change from the client is a
+    // ConfigureChannel+ConfigureAudio+ConfigurePtt sequence; ConfigureAudio drops
+    // the running worker, which now aborts the in-flight cycle instead of playing
+    // it out.
+    #[test]
+    fn reconfigure_mid_tx_aborts_burst_and_tx_survives() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let mut tele_rx = core.telemetry.subscribe();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "psk31").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
+
+            // A long PSK31 message is tens of seconds of airtime; draining it
+            // would blow past the assertion below, so only a real abort passes.
+            let long = "CQ CQ CQ DE NW5W NW5W NW5W ".repeat(4).into_bytes();
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::Transmit { channel: ChannelId(0), payload: long, reply: tx })
+                .unwrap();
+            assert_eq!(rx.await.unwrap().unwrap(), TransmitId(1));
+
+            // Wait until the burst is actually on the air.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitStarted { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        assert_eq!(transmit_id, TransmitId(1));
+                        return;
+                    }
+                }
+            })
+            .await
+            .expect("TransmitStarted within timeout");
+
+            // Reconfigure audio mid-burst — the client's mode-switch step that
+            // drops and rebuilds the worker. The in-flight burst must abort now.
+            let t0 = std::time::Instant::now();
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitComplete { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        assert_eq!(transmit_id, TransmitId(1));
+                        return;
+                    }
+                }
+            })
+            .await
+            .expect("in-flight burst never completed after reconfigure");
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(3),
+                "burst drained instead of aborting: {:?}",
+                t0.elapsed(),
+            );
+
+            // Rebuild PTT (its driver was consumed by the aborted worker) and
+            // confirm TX is not left dead — a fresh transmit completes.
+            configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::Transmit { channel: ChannelId(0), payload: b"K".to_vec(), reply: tx })
+                .unwrap();
+            let id2 = rx.await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitComplete { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        if transmit_id == id2 {
+                            return;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("post-reconfigure transmit never completed");
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();

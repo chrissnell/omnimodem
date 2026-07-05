@@ -23,4 +23,5 @@ pub mod olivia;
 pub mod psk;
 pub mod psk31;
 pub mod rtty;
+pub mod thor;
 pub mod wspr;
