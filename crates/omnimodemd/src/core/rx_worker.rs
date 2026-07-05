@@ -9,7 +9,7 @@
 
 use crate::audio::backend::CaptureHandle;
 use crate::audio::AudioChunk;
-use crate::core::event::{FrameEvent, TelemetryEvent};
+use crate::core::event::{FrameEvent, RxImage, TelemetryEvent};
 use crate::core::spectrum::SpectrumControl;
 use crate::ids::{ChannelId, DeviceId};
 use crate::metrics::ChannelMetrics;
@@ -322,7 +322,22 @@ fn sync_spectrum_tap(
 }
 
 fn emit(frames: &broadcast::Sender<FrameEvent>, channel: ChannelId, payload: &FramePayload) {
-    let _ = frames.send(FrameEvent::RxFrame { channel, data: frame_bytes(payload), timestamp_ns: 0 });
+    let ev = match payload {
+        // Raster payloads travel in the typed image field; `data` stays empty.
+        FramePayload::Image { width, gray } => FrameEvent::RxFrame {
+            channel,
+            data: Vec::new(),
+            image: Some(RxImage { width: *width, gray: gray.clone() }),
+            timestamp_ns: 0,
+        },
+        other => FrameEvent::RxFrame {
+            channel,
+            data: frame_bytes(other),
+            image: None,
+            timestamp_ns: 0,
+        },
+    };
+    let _ = frames.send(ev);
 }
 
 /// Fold one decoded frame into the shared accumulator: count it good/bad by CRC,
@@ -360,22 +375,19 @@ fn emit_metrics(
     });
 }
 
-/// Flatten a decoded payload to the opaque bytes the proto `RxFrame.data`
-/// carries. Text/message decode to UTF-8; packets/vocoder pass through. Image
-/// rasters are encoded self-describingly (2-byte big-endian `width`, then the
-/// row-major gray bytes) so the receiver can reconstruct rows without a schema
-/// change; a structured proto `Image` message lands with the first facsimile
-/// mode (Phase 10), when the raster semantics are pinned down.
+/// Flatten a byte-like decoded payload to the opaque bytes the proto
+/// `RxFrame.data` carries. Text/message decode to UTF-8; packets/vocoder pass
+/// through. Raster (`Image`) payloads do NOT come here — they travel in the
+/// typed proto `Image` message (`emit` routes them), so a caller that reaches
+/// this arm with an `Image` is a bug.
 fn frame_bytes(p: &FramePayload) -> Vec<u8> {
     match p {
         FramePayload::Packet(b) | FramePayload::Vocoder(b) => b.clone(),
         FramePayload::Text(t) => t.clone().into_bytes(),
         FramePayload::Message77(m) => m.to_vec(),
-        FramePayload::Image { width, gray } => {
-            let mut out = Vec::with_capacity(2 + gray.len());
-            out.extend_from_slice(&width.to_be_bytes());
-            out.extend_from_slice(gray);
-            out
+        FramePayload::Image { .. } => {
+            debug_assert!(false, "Image payloads are emitted via the typed proto Image message");
+            Vec::new()
         }
     }
 }

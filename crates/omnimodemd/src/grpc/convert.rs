@@ -145,11 +145,12 @@ fn ptt_method_to_proto(m: &PttMethod) -> proto::PttMethod {
 /// Wrap a frame event as a proto `Event`.
 pub fn frame_event_to_proto(ev: FrameEvent) -> proto::Event {
     let kind = match ev {
-        FrameEvent::RxFrame { channel, data, timestamp_ns } => {
+        FrameEvent::RxFrame { channel, data, image, timestamp_ns } => {
             proto::event::Kind::RxFrame(proto::RxFrame {
                 channel: channel.0,
                 data,
                 timestamp_ns,
+                image: image.map(|i| proto::Image { width: i.width as u32, gray: i.gray }),
             })
         }
     };
@@ -266,6 +267,47 @@ mod tests {
             method: method as i32,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn raster_frame_travels_in_the_typed_image_field() {
+        use crate::core::event::RxImage;
+        use crate::ids::ChannelId;
+        // A Hell-style raster: 14-wide (column height), two on-air columns.
+        let ev = FrameEvent::RxFrame {
+            channel: ChannelId(3),
+            data: Vec::new(),
+            image: Some(RxImage { width: 14, gray: vec![0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255] }),
+            timestamp_ns: 42,
+        };
+        let proto::event::Kind::RxFrame(rf) =
+            frame_event_to_proto(ev).kind.expect("kind")
+        else {
+            panic!("expected RxFrame");
+        };
+        assert!(rf.data.is_empty(), "raster payloads must not flatten into data");
+        let img = rf.image.expect("typed image must be set");
+        assert_eq!(img.width, 14);
+        assert_eq!(img.gray.len(), 14);
+        assert_eq!(rf.channel, 3);
+    }
+
+    #[test]
+    fn byte_frame_leaves_image_unset() {
+        use crate::ids::ChannelId;
+        let ev = FrameEvent::RxFrame {
+            channel: ChannelId(0),
+            data: b"CQ".to_vec(),
+            image: None,
+            timestamp_ns: 0,
+        };
+        let proto::event::Kind::RxFrame(rf) =
+            frame_event_to_proto(ev).kind.expect("kind")
+        else {
+            panic!("expected RxFrame");
+        };
+        assert_eq!(rf.data, b"CQ");
+        assert!(rf.image.is_none());
     }
 
     #[test]

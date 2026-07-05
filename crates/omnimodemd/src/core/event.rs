@@ -7,13 +7,24 @@
 
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 
+/// A decoded raster payload (Hell, WEFAX, picture sub-protocols): `gray` is
+/// row-major 8-bit luminance, `gray.len() == width * rows`.
+#[derive(Debug, Clone)]
+pub struct RxImage {
+    pub width: u16,
+    pub gray: Vec<u8>,
+}
+
 /// LOSSLESS class. Carried on a dedicated broadcast; a subscriber that lags is
 /// disconnected rather than allowed to miss a frame.
 #[derive(Debug, Clone)]
 pub enum FrameEvent {
     RxFrame {
         channel: ChannelId,
+        /// Opaque/text bytes for non-raster payloads; empty when `image` is set.
         data: Vec<u8>,
+        /// Typed raster for facsimile modes; `None` for byte payloads.
+        image: Option<RxImage>,
         timestamp_ns: u64,
     },
 }
