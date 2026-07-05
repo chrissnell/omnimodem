@@ -222,6 +222,7 @@ const WHITE_THRESH: u8 = 188;
 const LPF_TAPS: usize = 63;
 const LPF_CUTOFF_HZ: f32 = 700.0;
 /// Group delay of the channel filter (samples), skipped when resampling lines.
+#[cfg(test)]
 const FILTER_DELAY: f32 = (LPF_TAPS as f32 - 1.0) / 2.0;
 
 pub struct WefaxDemod {

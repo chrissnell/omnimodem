@@ -96,6 +96,8 @@ message ModeParams {
     ContestiaParams contestia = 10;
     ThorParams thor = 11;
     Mt63Params mt63 = 12;
+    NavtexParams navtex = 13;
+    WefaxParams wefax = 14;
   }
 }
 
@@ -172,6 +174,19 @@ message ThorParams {
 message Mt63Params {
   string submode = 1;   // mt63::Mt63Variant label, e.g. "mt63_1000l"
   float  center_hz = 2; // audio center frequency
+}
+
+// NAVTEX / SITOR-B: 100-baud FSK maritime broadcast text with CCIR-476 FEC-B.
+message NavtexParams {
+  string submode = 1;   // navtex::NavtexVariant label ("navtex" | "sitorb")
+  float  center_hz = 2; // audio center frequency (default 1000 Hz)
+}
+
+// WEFAX: HF weather facsimile at IOC 576/288. A raster mode — RX emits an
+// Image, not text (see the Image message on RxFrame).
+message WefaxParams {
+  string submode = 1;   // wefax::WefaxVariant label ("wefax576" | "wefax288")
+  float  center_hz = 2; // audio carrier frequency (default 1900 Hz)
 }
 
 message Afsk1200Params {
