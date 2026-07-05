@@ -692,7 +692,7 @@ fn nx_rate_grid_loopback_and_awgn() {
 }
 
 /// The uncoded multi-carrier `nX_PSKnnn` grid (no FEC): plain differential BPSK
-/// + PSK31 Varicode over N carriers, through the decimating matched filter.
+/// with PSK31 Varicode over N carriers, through the decimating matched filter.
 /// Clean loopback plus a gentle AWGN pass — with no FEC the noise margin is thin
 /// (0.01, well below the FEC-bearing modes' 0.02+). PSK31 keeps the trailing
 /// `00`, so the full message round-trips.
@@ -726,5 +726,104 @@ fn nx_nonrobust_grid_loopback_and_awgn() {
         let mut rng = Rng::new(0x6600 + v.carriers() as u64);
         add_awgn(&mut noisy, 0.01, &mut rng);
         assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(msg), "{v:?} AWGN");
+    }
+}
+
+// --- Group 9: DominoEX family (IFK+ MFSK, fldigi parity) -----------------
+
+/// Bit-exact: omnimodem's DominoEX Varicode nibble stream, IFK+ tone sequence,
+/// and the whole primary alphabet's encode/decode round-trip reproduce fldigi's
+/// tables byte-for-byte. Provenance: `tests/vectors/dominoex_varicode.json`
+/// (fldigi 4.1.23 @ 61b97f413, driver `scratch/refvectors/build_dominoex_varicode.sh`).
+#[test]
+fn dominoex_varicode_and_ifk_match_fldigi_vector() {
+    use omnimodem_dsp::framing::dominoex_varicode::{decode_index, encode_char, Varidecoder};
+    use omnimodem_dsp::modes::dominoex::{text_nibbles, text_tones};
+
+    let raw = include_str!("vectors/dominoex_varicode.json");
+
+    // 1. Whole primary alphabet: nib / idx / dec columns, byte-for-byte.
+    let dec = Varidecoder::new();
+    for c in 0u16..256 {
+        let needle = format!("\"c\":{c},");
+        let row = raw.lines().find(|l| l.contains(&needle)).expect("primary row");
+        let field = |k: &str| {
+            let i = row.find(&needle).unwrap();
+            let j = row[i..].find(k).unwrap() + i + k.len();
+            row[j..].to_string()
+        };
+        let want_nib = {
+            let s = field("\"nib\":\"");
+            s[..s.find('"').unwrap()].to_string()
+        };
+        let want_idx: u16 =
+            field("\"idx\":")[..field("\"idx\":").find(&[',', '}'][..]).unwrap()].parse().unwrap();
+        let want_dec: i32 =
+            field("\"dec\":")[..field("\"dec\":").find(&[',', '}'][..]).unwrap()].parse().unwrap();
+
+        let nib = encode_char(c as u8, false);
+        let got_nib: String = nib.iter().map(|n| format!("{n:x}")).collect();
+        assert_eq!(got_nib, want_nib, "char {c} nibbles");
+        let idx = decode_index(&nib);
+        assert_eq!(idx, want_idx, "char {c} decode index");
+        assert_eq!(dec.decode(idx).map(|v| v as i32).unwrap_or(-1), want_dec, "char {c} decoded");
+    }
+
+    // 2. Per-message nibble + IFK+ tone streams.
+    for msg in ["CQ DE K1ABC", "The quick brown fox 0123456789"] {
+        let needle = format!("\"msg\":\"{msg}\"");
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("message line");
+        let nib_field = {
+            let k = "\"nibbles\":\"";
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let want_nib: Vec<u8> =
+            nib_field.chars().map(|ch| ch.to_digit(16).unwrap() as u8).collect();
+        assert_eq!(text_nibbles(msg), want_nib, "{msg:?} nibbles");
+
+        let k = "\"tones\":[";
+        let i = line.find(k).unwrap() + k.len();
+        let arr = &line[i..line[i..].find(']').unwrap() + i];
+        let want_tones: Vec<u32> = arr.split(',').map(|s| s.trim().parse().unwrap()).collect();
+        assert_eq!(text_tones(msg), want_tones, "{msg:?} IFK+ tones");
+    }
+}
+
+/// Every DominoEX submode round-trips a message TX→RX on a clean channel and
+/// under light AWGN (Goertzel tone detection + IFK+ inverse + Varicode framing).
+/// The submode grid is parametric; one message per submode.
+#[test]
+fn dominoex_submode_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::dominoex::{DominoDemod, DominoMod, DominoVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decode(v: DominoVariant, samples: &[f32]) -> String {
+        let mut rx = DominoDemod::new(v, 1500.0);
+        let mut f = rx.feed(samples);
+        f.extend(rx.flush());
+        texts(&f)
+    }
+
+    let msg = "CQ DE K1ABC/7";
+    for (i, &v) in DominoVariant::all().iter().enumerate() {
+        let clean = DominoMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(decode(v, &clean), msg, "{} clean loopback", v.label());
+
+        let mut noisy = DominoMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xD0E0 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
     }
 }

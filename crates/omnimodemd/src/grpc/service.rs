@@ -374,6 +374,14 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
                 None => mode,
             }
         }
+        Params::Dominoex(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
         Params::Olivia(o) => {
             ModeConfig::Olivia { tones: o.tones as u16, bandwidth_hz: o.bandwidth_hz as u16 }
                 .to_mode_string()
@@ -422,5 +430,16 @@ mod tests {
             params: Some(proto::mode_params::Params::Psk31(proto::Psk31Params { center_hz: 1000.0 })),
         };
         assert_eq!(effective_mode("ignored".into(), Some(legacy)), "psk31:center=1000");
+    }
+
+    #[test]
+    fn effective_mode_encodes_dominoex_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Dominoex(proto::DominoParams {
+                submode: "dominoex16".into(),
+                center_hz: 1500.0,
+            })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "dominoex16:center=1500");
     }
 }

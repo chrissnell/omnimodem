@@ -20,6 +20,8 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"psk125rc4", "psk125rc5", "psk125rc10", "psk125rc12", "psk125rc16",
 		"psk250rc2", "psk250rc3", "psk250rc5", "psk250rc6", "psk250rc7", "psk500rc2", "psk500rc3", "psk500rc4",
 		"psk125c12", "psk250c6", "psk500c2", "psk500c4", "psk1000c2",
+		"dominoexmicro", "dominoex4", "dominoex5", "dominoex8", "dominoex11",
+		"dominoex16", "dominoex22", "dominoex44", "dominoex88",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
@@ -74,6 +76,25 @@ func TestPskModeParams(t *testing.T) {
 	// QPSK routes through the same PskParams oneof, carrying its own submode.
 	if q := modeParamsFor("qpsk250", nil).GetPsk(); q == nil || q.GetSubmode() != "qpsk250" {
 		t.Fatalf("qpsk250 must carry PskParams with submode qpsk250")
+	}
+}
+
+// The DominoEX family carries its submode label and center through the dedicated
+// DominoParams oneof, not the PSK arm.
+func TestDominoExModeParams(t *testing.T) {
+	mp := modeParamsFor("dominoex16", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("dominoex16 must produce typed ModeParams")
+	}
+	d := mp.GetDominoex()
+	if d == nil {
+		t.Fatalf("expected DominoParams, got %T", mp.GetParams())
+	}
+	if d.GetSubmode() != "dominoex16" || d.GetCenterHz() != 1200 {
+		t.Fatalf("domino params = %q / %v, want dominoex16 / 1200", d.GetSubmode(), d.GetCenterHz())
+	}
+	if def := modeParamsFor("dominoex4", nil).GetDominoex(); def.GetCenterHz() != 1500 {
+		t.Fatalf("dominoex4 default center = %v, want 1500", def.GetCenterHz())
 	}
 }
 

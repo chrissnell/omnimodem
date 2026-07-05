@@ -7,6 +7,7 @@ use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
     cw::{CwDemod, CwMod},
+    dominoex::{DominoDemod, DominoMod, DominoVariant},
     fst4::{Fst4Demod, Fst4Mod},
     ft4::{Ft4Demod, Ft4Mod},
     ft8::{Ft8Demod, Ft8Mod},
@@ -50,6 +51,10 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             let v = PskVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(PskDemod::new(v, *center_hz)))
         }
+        ModeConfig::DominoEx { submode, center_hz } => {
+            let v = DominoVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(DominoDemod::new(v, *center_hz)))
+        }
         ModeConfig::Ft8 => windowed(Box::new(Ft8Demod::new())),
         ModeConfig::Ft4 => windowed(Box::new(Ft4Demod::new())),
         ModeConfig::Jt65 => windowed(Box::new(Jt65Demod::new())),
@@ -85,6 +90,10 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Psk { submode, center_hz } => {
             let v = PskVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(PskMod::new(v, *center_hz)))
+        }
+        ModeConfig::DominoEx { submode, center_hz } => {
+            let v = DominoVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(DominoMod::new(v, *center_hz)))
         }
         ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
         ModeConfig::Ft4 => Some(Box::new(Ft4Mod::new())),
@@ -161,6 +170,25 @@ mod tests {
         assert_eq!(ModeConfig::parse("fst4"), Some(ModeConfig::Fst4 { tr_s: 15 }));
         assert_eq!(ModeConfig::parse("fst4:tr=120"), Some(ModeConfig::Fst4 { tr_s: 120 }));
         assert_eq!(ModeConfig::Fst4 { tr_s: 60 }.to_mode_string(), "fst4:tr=60");
+    }
+
+    #[test]
+    fn dominoex_family_is_streaming_with_modulators() {
+        for label in ["dominoexmicro", "dominoex4", "dominoex16", "dominoex88"] {
+            let cfg = ModeConfig::DominoEx { submode: label.into(), center_hz: 1500.0 };
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{label} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), None);
+        }
+        // The native RX rate follows the submode (8 kHz vs 11.025 kHz).
+        assert_eq!(
+            native_rate(&ModeConfig::DominoEx { submode: "dominoex16".into(), center_hz: 1500.0 }),
+            Some(8000)
+        );
+        assert_eq!(
+            native_rate(&ModeConfig::DominoEx { submode: "dominoex22".into(), center_hz: 1500.0 }),
+            Some(11025)
+        );
     }
 
     #[test]
