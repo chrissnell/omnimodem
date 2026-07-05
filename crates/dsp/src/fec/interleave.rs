@@ -181,9 +181,117 @@ impl DiagInterleaver<u8> {
     }
 }
 
+/// fldigi's MFSK diagonal (de)interleaver — the `size`-parametric generalisation
+/// of [`DiagInterleaver`] (which is this with `size == 2`, PSK-R). One instance
+/// holds a `size × size × depth` table of delay cells; each `symbols` call shifts
+/// every `depth` block left one column, inserts the input as the new last column,
+/// and reads out the forward anti-diagonal (`tab(k,i,size-i-1)`) or reverse main
+/// diagonal (`tab(k,i,i)`). The MFSK family sets `size == symbits` (3/4/5) and
+/// `depth` per submode (5/10/20/400/800). A forward→reverse round-trip recovers
+/// the input delayed by the interleaver's fill latency. Generic over the cell
+/// type so TX runs on hard bits (`u8`) and a soft RX could run on LLRs (`f32`).
+/// ref: fldigi src/mfsk/interleave.cxx:57-90, src/include/interleave.h:41-43.
+pub struct MfskInterleaver<T: Copy> {
+    size: usize,
+    depth: usize,
+    fwd: bool,
+    table: Vec<T>, // size*size*depth, indexed [k][i][j] = size*size*k + size*i + j
+}
+
+impl<T: Copy> MfskInterleaver<T> {
+    /// `fill` seeds the delay cells (fldigi: 0 for TX, PUNCTURE for RX). `fwd`
+    /// selects interleave (TX) vs de-interleave (RX).
+    pub fn new(size: usize, depth: usize, fwd: bool, fill: T) -> Self {
+        MfskInterleaver { size, depth, fwd, table: vec![fill; size * size * depth] }
+    }
+
+    /// Interleave (or de-interleave) one column of `size` symbols in place.
+    /// ref: interleave::symbols (interleave.cxx:57-76).
+    pub fn symbols(&mut self, psyms: &mut [T]) {
+        let size = self.size;
+        debug_assert_eq!(psyms.len(), size);
+        for k in 0..self.depth {
+            let base = k * size * size;
+            // Shift each of the `size` rows left one column.
+            for i in 0..size {
+                let row = base + i * size;
+                for j in 0..size - 1 {
+                    self.table[row + j] = self.table[row + j + 1];
+                }
+            }
+            // Insert the input as the new last column.
+            for i in 0..size {
+                self.table[base + i * size + (size - 1)] = psyms[i];
+            }
+            // Read out on the (forward) anti-diagonal / (reverse) main diagonal.
+            for i in 0..size {
+                let col = if self.fwd { size - i - 1 } else { i };
+                psyms[i] = self.table[base + i * size + col];
+            }
+        }
+    }
+}
+
+impl MfskInterleaver<u8> {
+    /// Interleave the low `size` bits of `pbits` (bit `size-1` = MSB … bit 0 =
+    /// LSB) in place, matching fldigi `interleave::bits`. ref: interleave.cxx:78-90.
+    pub fn bits(&mut self, pbits: &mut u32) {
+        let size = self.size;
+        let mut syms = vec![0u8; size];
+        for (i, s) in syms.iter_mut().enumerate() {
+            *s = ((*pbits >> (size - i - 1)) & 1) as u8;
+        }
+        self.symbols(&mut syms);
+        *pbits = 0;
+        for &s in &syms {
+            *pbits = (*pbits << 1) | s as u32;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bit-exact: `MfskInterleaver` reproduces fldigi's `interleave(symbits,depth)`
+    /// symbol stream. Re-derives the golden `symbols` field from the golden `coded`
+    /// bits for every representative submode, isolating the interleaver from the
+    /// varicode/FEC/gray stages. Provenance: `tests/vectors/mfsk.json` (fldigi
+    /// 4.1.23 @ 61b97f413, driver `scratch/refvectors/build_mfsk.sh`).
+    #[test]
+    fn mfsk_interleaver_matches_fldigi_vector() {
+        let raw = include_str!("../../tests/vectors/mfsk.json");
+        for line in raw.lines().filter(|l| l.contains("\"tones\"")) {
+            let field = |k: &str| {
+                let i = line.find(k).unwrap() + k.len();
+                line[i..line[i..].find('"').unwrap() + i].to_string()
+            };
+            let num = |k: &str| -> usize {
+                let i = line.find(k).unwrap() + k.len();
+                line[i..].split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap()
+            };
+            let symbits = num("\"symbits\":");
+            let depth = num("\"depth\":");
+            let coded: Vec<u8> = field("\"coded\":\"").bytes().map(|c| c - b'0').collect();
+            let want: Vec<u32> =
+                field("\"symbols\":\"").split(' ').map(|s| s.parse().unwrap()).collect();
+
+            let mut il = MfskInterleaver::new(symbits, depth, true, 0u8);
+            let mut got = Vec::new();
+            let (mut shreg, mut state) = (0u32, 0usize);
+            for &cb in &coded {
+                shreg = (shreg << 1) | cb as u32;
+                state += 1;
+                if state == symbits {
+                    il.bits(&mut shreg);
+                    got.push(shreg);
+                    shreg = 0;
+                    state = 0;
+                }
+            }
+            assert_eq!(got, want, "mfsk interleaver differs from fldigi (symbits={symbits})");
+        }
+    }
 
     /// Bit-exact: `DiagInterleaver` forward output reproduces fldigi's
     /// `interleave(2, 40, FWD).bits()` sequence byte-for-byte, and a
