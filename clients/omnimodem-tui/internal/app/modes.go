@@ -160,6 +160,7 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 	case "rtty":
 		return &pb.ModeParams{Params: &pb.ModeParams_Rtty{Rtty: &pb.RttyParams{
 			Baud: float32(get("baud", 45.45)), ShiftHz: float32(get("shift", 170)),
+			CenterHz: float32(get("center", 0)), Reverse: get("reverse", 0) != 0,
 		}}}
 	case "psk31", "psk63", "psk125", "psk250", "psk500", "psk1000",
 		"qpsk31", "qpsk63", "qpsk125", "qpsk250", "qpsk500",
@@ -223,7 +224,7 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 			Tones: uint32(get("tones", t)), BandwidthHz: uint32(get("bw", bw)),
 		}}}
 	case "afsk1200":
-		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: true}}}
+		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: get("tx", 1) != 0}}}
 	case "olivia":
 		return &pb.ModeParams{Params: &pb.ModeParams_Olivia{Olivia: &pb.OliviaParams{
 			Tones: uint32(get("tones", 32)), BandwidthHz: uint32(get("bw", 1000)),

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
@@ -36,6 +37,7 @@ const (
 	fCall
 	fGrid
 	fMode
+	fSettings
 	fRx
 	fTx
 	fPtt
@@ -48,6 +50,7 @@ const (
 type cfgSig struct {
 	name      string
 	modeIdx   int
+	modeSig   string // the current mode's settings, serialized for change detection
 	rxID      string
 	txID      string
 	pttID     string
@@ -60,6 +63,7 @@ type configView struct {
 	call      textinput.Model
 	grid      textinput.Model
 	modeIdx   int
+	settings  *ui.SettingsForm // the current mode's editable settings
 	rx        list.Model
 	tx        list.Model
 	ptt       list.Model
@@ -69,6 +73,7 @@ type configView struct {
 	methodIdx int
 	focus     cfgFocus
 	picking   bool   // a device-picker modal is open over the form
+	editing   bool   // the mode-settings modal is open over the form
 	saved     cfgSig // last state CONFIRMED persisted to the daemon
 	applying  bool   // a save pipeline is in flight (serializes auto-apply)
 	inflight  cfgSig // the sig the in-flight pipeline is persisting
@@ -128,10 +133,25 @@ func newConfigView(m *Model) *configView {
 	} else {
 		v.name.SetValue(defaultChannelName(m))
 	}
+	// Build the settings form for the preloaded mode so its params are ready to
+	// edit and to seed the change-detection baseline. It opens at the mode's
+	// DEFAULTS, not the saved values: the snapshot's ChannelInfo carries the mode
+	// label but not its typed ModeParams, so there's nothing to reload yet. Until
+	// ChannelInfo gains mode_params (daemon-side change), edited settings persist
+	// within a session but revert to defaults on reopen — see GRA follow-up. Do
+	// not "fix" this by seeding from stale local state; seed from the daemon once
+	// it reports the saved params.
+	v.settings = newModeSettingsForm(v.modeLabel(), nil)
 	// Seed the change-detection baseline with the preloaded values so opening
 	// the form doesn't spuriously re-persist what's already saved.
 	v.saved = v.sig()
 	return v
+}
+
+// rebuildSettings swaps in a fresh settings form for the current mode. Called
+// when the mode changes, so the form always matches the selected mode's params.
+func (v *configView) rebuildSettings() {
+	v.settings = newModeSettingsForm(v.modeLabel(), nil)
 }
 
 // defaultChannelName picks the first "VFO-<letter>" not already taken by another
@@ -207,11 +227,35 @@ func (v *configView) sig() cfgSig {
 	return cfgSig{
 		name:      v.name.Value(),
 		modeIdx:   v.modeIdx,
+		modeSig:   v.modeSig(),
 		rxID:      v.rxID,
 		txID:      v.txID,
 		pttID:     v.pttID,
 		methodIdx: v.methodIdx,
 	}
+}
+
+// modeSig serializes the current mode's settings into a stable string so a
+// changed knob (e.g. RTTY shift) is detected and auto-applied like any other
+// field. Keys are sorted for determinism.
+func (v *configView) modeSig() string {
+	if v.settings == nil {
+		return ""
+	}
+	vals := v.settings.Values()
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(vals[k])
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 // maybePersist auto-applies the form when a field has changed since the last
@@ -262,7 +306,7 @@ func (v *configView) persistAll() tea.Cmd {
 		Channel:    ch,
 		Name:       v.name.Value(),
 		Mode:       v.modeLabel(),
-		ModeParams: modeParamsFor(v.modeLabel(), nil),
+		ModeParams: modeParamsFor(v.modeLabel(), modeValsFrom(v.settings)),
 	}
 	audioReq := &pb.ConfigureAudioRequest{
 		Channel: ch, DeviceId: v.rxID, SampleRate: 48000, TxDeviceId: v.txID,
@@ -335,6 +379,22 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 		// Refresh live state so the channel list underneath reflects the save.
 		return v, snapshotCmd(v.m.c)
 	case tea.KeyMsg:
+		// The mode-settings modal is open: it captures all keys. Esc closes it and
+		// flushes any change through the auto-apply pipeline; every other key drives
+		// the settings form, and a real edit auto-applies immediately.
+		if v.editing {
+			if msg.String() == "esc" {
+				v.editing = false
+				return v, v.maybePersist()
+			}
+			changed, cmd := v.settings.Update(msg)
+			if changed {
+				if pc := v.maybePersist(); pc != nil {
+					return v, tea.Batch(cmd, pc)
+				}
+			}
+			return v, cmd
+		}
 		// A device-picker modal is open: it captures all keys. Enter records the
 		// highlighted device and closes the modal; esc cancels and closes. While
 		// the list's own filter is active, hand keys straight to it (so esc clears
@@ -461,6 +521,7 @@ func (v *configView) cycle(d int) {
 	switch v.focus {
 	case fMode:
 		v.modeIdx = (v.modeIdx + d + len(modes)) % len(modes)
+		v.rebuildSettings() // the new mode exposes a different set of settings
 	case fMethod:
 		v.methodIdx = (v.methodIdx + d + len(pttMethods)) % len(pttMethods)
 	}
@@ -472,6 +533,11 @@ func (v *configView) commit() (View, tea.Cmd) {
 	switch v.focus {
 	case fRx, fTx, fPtt:
 		v.picking = true
+	case fSettings:
+		// Open the mode-settings editor, unless the mode has nothing to tune.
+		if v.settings != nil && v.settings.HasFields() {
+			v.editing = true
+		}
 	}
 	return v, nil
 }
@@ -517,7 +583,8 @@ func (v *configView) Render(w, h int) string {
 	b.WriteString(field(fGrid, "Grid", v.grid.View()) + "\n\n")
 
 	b.WriteString(ui.Title.Render("MODE") + "\n")
-	b.WriteString(field(fMode, "Mode", "‹ "+v.modeLabel()+" ›"+cyc) + "\n\n")
+	b.WriteString(field(fMode, "Mode", "‹ "+v.modeLabel()+" ›"+cyc) + "\n")
+	b.WriteString(field(fSettings, "Settings", v.settingsSummary()) + "\n\n")
 
 	b.WriteString(ui.Title.Render("AUDIO") + "\n")
 	b.WriteString(field(fRx, "RX Device", chosen(v.rxID)) + "\n")
@@ -527,6 +594,20 @@ func (v *configView) Render(w, h int) string {
 
 	b.WriteString(v.saveHint() + "\n")
 
+	// The mode-settings editor is a modal over the form: it surfaces every knob
+	// the selected mode exposes, drawn by the reusable ui.SettingsForm.
+	if v.editing {
+		modalW := w
+		if modalW > 64 {
+			modalW = 64
+		}
+		body := v.settings.View(modalW - 4)
+		box := ui.Modal(
+			v.modeLabel()+" settings  ‹↑/↓› field · ‹←/→/space› change · ‹esc› done",
+			body, modalW)
+		b.WriteString("\n" + lipgloss.PlaceHorizontal(w, lipgloss.Center, box))
+		return b.String()
+	}
 	// The device picker is a modal: it appears only while a device field is being
 	// chosen, and disappears once a device is selected (or the pick is cancelled).
 	if !v.picking {
@@ -568,9 +649,25 @@ func txDeviceLabel(txID, rxID string) string {
 	return ui.Dim.Render("(same as RX)")
 }
 
+// settingsSummary renders the Settings row's value: a one-line digest of the
+// mode's current knobs, with an ‹enter› cue when there's something to open.
+func (v *configView) settingsSummary() string {
+	sum := modeSettingsSummary(v.modeLabel(), v.settings)
+	if v.settings != nil && v.settings.HasFields() {
+		return sum + "  " + ui.Dim.Render("‹enter›")
+	}
+	return ui.Dim.Render(sum)
+}
+
 func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }
 
 func (v *configView) Hints() []ui.Hint {
+	if v.editing {
+		return []ui.Hint{
+			{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "change"},
+			{Key: "space", Action: "toggle"}, {Key: "esc", Action: "done"},
+		}
+	}
 	if v.picking {
 		return []ui.Hint{
 			{Key: "↑/↓", Action: "device"}, {Key: "enter", Action: "choose"},
