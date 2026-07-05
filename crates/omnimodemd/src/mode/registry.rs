@@ -11,6 +11,7 @@ use omnimodem_dsp::modes::{
     fst4::{Fst4Demod, Fst4Mod},
     ft4::{Ft4Demod, Ft4Mod},
     ft8::{Ft8Demod, Ft8Mod},
+    hell::{HellDemod, HellMod, HellVariant},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     olivia::{OliviaDemod, OliviaMod},
@@ -55,6 +56,10 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             let v = DominoVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(DominoDemod::new(v, *center_hz)))
         }
+        ModeConfig::Hell { submode, center_hz } => {
+            let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(HellDemod::new(v, *center_hz)))
+        }
         ModeConfig::Ft8 => windowed(Box::new(Ft8Demod::new())),
         ModeConfig::Ft4 => windowed(Box::new(Ft4Demod::new())),
         ModeConfig::Jt65 => windowed(Box::new(Jt65Demod::new())),
@@ -94,6 +99,10 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::DominoEx { submode, center_hz } => {
             let v = DominoVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(DominoMod::new(v, *center_hz)))
+        }
+        ModeConfig::Hell { submode, center_hz } => {
+            let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(HellMod::new(v, *center_hz)))
         }
         ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
         ModeConfig::Ft4 => Some(Box::new(Ft4Mod::new())),
@@ -189,6 +198,17 @@ mod tests {
             native_rate(&ModeConfig::DominoEx { submode: "dominoex22".into(), center_hz: 1500.0 }),
             Some(11025)
         );
+    }
+
+    #[test]
+    fn hell_family_is_streaming_with_modulators() {
+        for label in ["feldhell", "slowhell", "hellx5", "hellx9", "hell80"] {
+            let cfg = ModeConfig::Hell { submode: label.into(), center_hz: 1500.0 };
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{label} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), None);
+            assert_eq!(native_rate(&cfg), Some(8000));
+        }
     }
 
     #[test]
