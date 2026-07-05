@@ -61,6 +61,9 @@ pub struct TxWorkerCfg {
     /// Channel's shared spectrum control. While transmitting (the RX tap is
     /// muted) the worker feeds the operate waterfall the transmitted audio.
     pub spectrum: SpectrumControl,
+    /// When set, prepend the active mode's RSID burst ahead of each transmission:
+    /// `(rsid_table_key, audio_offset_hz)`. `None` disables the RSID preamble.
+    pub rsid: Option<(String, f32)>,
 }
 
 /// Handle to a running TX worker.
@@ -156,6 +159,20 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             Resampler::new(native, cfg.rate, 16).process(&samples)
         } else {
             samples
+        };
+        // Prepend the mode's RSID identifier burst (at the playback rate) when
+        // enabled, so a receiver can auto-identify the mode before the data.
+        let samples = match &cfg.rsid {
+            Some((key, center)) if cfg.rate > 0 => {
+                match omnimodem_dsp::frontend::rsid::burst_for_mode(key, *center, cfg.rate) {
+                    Some(mut burst) => {
+                        burst.extend_from_slice(&samples);
+                        burst
+                    }
+                    None => samples,
+                }
+            }
+            _ => samples,
         };
         // Apply runtime TX gain before the i16 conversion; the clamp stays after
         // the multiply so boosting can hit the rails but never overflow i16.
@@ -333,6 +350,7 @@ mod tests {
             slot_s: None,
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
+            rsid: None,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -388,6 +406,7 @@ mod tests {
             slot_s: None,
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
+            rsid: None,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("E"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -414,6 +433,63 @@ mod tests {
         assert!(
             played >= raw_len * 5,
             "expected ~6x resample of {raw_len} native samples, played {played}",
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn rsid_preamble_is_prepended_and_detectable() {
+        use omnimodem_dsp::frontend::rsid::RsidDetector;
+        // A psk31 worker with RSID TX enabled must prepend the BPSK31 identifier
+        // burst; running the detector over the played audio must recover it.
+        let backend = FileBackend::from_samples(vec![], 8_000);
+        let sink = backend.open_playback(8_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 8_000,
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk {
+                submode: "psk31".into(),
+                center_hz: 1000.0,
+            })
+            .unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
+            rsid: Some(("psk31".to_string(), 1000.0)),
+        });
+        worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            let mut completed = false;
+            for _ in 0..400 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    if let TelemetryEvent::TransmitComplete { .. } = ev {
+                        completed = true;
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(completed, "no TransmitComplete");
+        });
+
+        let played: Vec<f32> =
+            backend.played.lock().unwrap().iter().map(|&s| s as f32 / 32768.0).collect();
+        let mut det = RsidDetector::new(8_000, 1);
+        let found = det.feed(&played);
+        assert!(
+            found.iter().any(|d| d.tag == "BPSK31"),
+            "RSID preamble not detected in TX audio: {found:?}"
         );
         worker.shutdown();
     }
@@ -457,6 +533,7 @@ mod tests {
             slot_s: None,
             gain: gain.clone(),
             spectrum: SpectrumControl::default(),
+            rsid: None,
         });
         worker.enqueue(TxJob { frame: DspFrame::packet(bytes), transmit_id: TransmitId(1) }).unwrap();
 
@@ -517,6 +594,7 @@ mod tests {
             slot_s: None,
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
+            rsid: None,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -574,6 +652,7 @@ mod tests {
             slot_s: None,
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
+            rsid: None,
         });
         worker
             .enqueue(TxJob { frame: DspFrame::text("CQ CQ CQ DE NW5W"), transmit_id: TransmitId(1) })
@@ -663,6 +742,7 @@ mod tests {
             slot_s: None,
             gain: crate::core::AudioGain::default(),
             spectrum,
+            rsid: None,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("TEST"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -724,6 +804,7 @@ mod tests {
             slot_s: None,
             gain: crate::core::AudioGain::default(),
             spectrum,
+            rsid: None,
         });
         // A valid FT8 message (standard call/grid exchange).
         worker

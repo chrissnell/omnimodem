@@ -15,6 +15,8 @@ pub enum Command {
         id: ChannelId,
         name: String,
         mode: String,
+        rsid_tx: bool,
+        rsid_rx: bool,
         reply: oneshot::Sender<Result<(), CoreError>>,
     },
     Transmit {

@@ -54,6 +54,16 @@ pub enum TelemetryEvent {
         dcd: bool,
         last_decoder: Option<String>,
     },
+    /// A received RSID burst was identified (lossy: advisory annotation). `tag`
+    /// is the fldigi RSID tag (always known); `mode` is the omnimodem mode string
+    /// (empty if unported); `freq_hz` is the detected audio offset.
+    RsidDetected {
+        channel: ChannelId,
+        tag: String,
+        mode: String,
+        freq_hz: f32,
+        extended: bool,
+    },
     /// One waterfall line (lossy: a dropped line is invisible). `bins` is uint8
     /// dBFS over `[db_floor, db_ceiling]`, low→high frequency.
     SpectrumFrame {

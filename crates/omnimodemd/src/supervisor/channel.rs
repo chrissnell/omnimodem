@@ -24,6 +24,10 @@ pub struct ChannelConfig {
     pub tx_sample_rate: u32,
     /// PTT binding; `None` until ConfigurePtt.
     pub ptt: Option<PttConfig>,
+    /// Prepend the active mode's RSID burst ahead of each transmission.
+    pub rsid_tx: bool,
+    /// Run the RSID detector over received audio, surfacing matches as events.
+    pub rsid_rx: bool,
 }
 
 /// Live channel state: its config plus whether the (stub) pipeline is running.

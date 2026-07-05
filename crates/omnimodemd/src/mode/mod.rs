@@ -161,6 +161,57 @@ impl ModeConfig {
             other => other.label().to_string(),
         }
     }
+    /// The RSID table key for this mode — the exact `mode` string an
+    /// `omnimodem_dsp::frontend::rsid` table entry carries — or `None` when the
+    /// mode has no assigned RSID. Used to pick the burst to prepend on TX.
+    pub fn rsid_key(&self) -> Option<String> {
+        match self {
+            ModeConfig::Psk { submode, .. }
+            | ModeConfig::DominoEx { submode, .. }
+            | ModeConfig::Thor { submode, .. }
+            | ModeConfig::Hell { submode, .. }
+            | ModeConfig::Mfsk { submode, .. }
+            | ModeConfig::Mt63 { submode, .. } => Some(submode.clone()),
+            ModeConfig::Cw { .. } => Some("cw".to_string()),
+            ModeConfig::Jt65 => Some("jt65".to_string()),
+            ModeConfig::Contestia { tones, bandwidth_hz } => {
+                Some(format!("contestia{tones}_{bandwidth_hz}"))
+            }
+            ModeConfig::Olivia { tones, bandwidth_hz } => {
+                Some(format!("olivia:tones={tones},bw={bandwidth_hz}"))
+            }
+            ModeConfig::Rtty { baud, .. } => {
+                // Only the three Baudot RTTY shifts fldigi assigns an RSID.
+                if (*baud - 50.0).abs() < 0.5 {
+                    Some("rtty:baud=50,shift=170".to_string())
+                } else if (*baud - 75.0).abs() < 0.5 {
+                    Some("rtty:baud=75,shift=850".to_string())
+                } else if (*baud - 45.45).abs() < 1.0 {
+                    Some("rtty".to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The audio offset (Hz) at which this mode's RSID burst is transmitted —
+    /// the mode's carrier where it has one, else a sensible default.
+    pub fn rsid_center_hz(&self) -> f32 {
+        match self {
+            ModeConfig::Psk { center_hz, .. }
+            | ModeConfig::DominoEx { center_hz, .. }
+            | ModeConfig::Thor { center_hz, .. }
+            | ModeConfig::Hell { center_hz, .. }
+            | ModeConfig::Mfsk { center_hz, .. }
+            | ModeConfig::Mt63 { center_hz, .. }
+            | ModeConfig::Rtty { center_hz, .. } => *center_hz,
+            ModeConfig::Cw { tone_hz, .. } => *tone_hz,
+            _ => 1500.0,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             ModeConfig::None => "none",
@@ -254,6 +305,34 @@ impl omnimodem_dsp::mode::Modulator for NullMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_rsid_mode_string_parses_and_round_trips() {
+        use omnimodem_dsp::frontend::rsid::{TABLE1, TABLE2};
+        // Each RSID ID that maps to an omnimodem mode must resolve via
+        // ModeConfig::parse, and that config's rsid_key must point back at the
+        // same RSID entry — so a detected burst names a mode we can actually run,
+        // and an active mode announces the right RSID on TX.
+        for e in TABLE1.iter().chain(TABLE2.iter()) {
+            let Some(mode) = e.mode else { continue };
+            let cfg = ModeConfig::parse(mode)
+                .unwrap_or_else(|| panic!("RSID {} maps to unparseable mode {mode:?}", e.tag));
+            let key = cfg
+                .rsid_key()
+                .unwrap_or_else(|| panic!("{} ({mode}) has no rsid_key", e.tag));
+            assert_eq!(
+                omnimodem_dsp::frontend::rsid::tx_for_mode(&key)
+                    .map(|tx| match tx {
+                        omnimodem_dsp::frontend::rsid::RsidTx::Primary(c)
+                        | omnimodem_dsp::frontend::rsid::RsidTx::Extended(c) => c,
+                    }),
+                Some(e.code),
+                "rsid_key {key:?} for {} does not round-trip to code {}",
+                e.tag,
+                e.code
+            );
+        }
+    }
 
     #[test]
     fn parse_resolves_phase4_modes_with_defaults() {
