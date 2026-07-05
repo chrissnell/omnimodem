@@ -105,10 +105,11 @@ const BLACK_SECS: f32 = 0.5;
 /// Phasing lines before the image (fldigi's `m_tx_phasing_lin`, wefax.cxx:1239).
 const TX_PHASING_LINES: usize = 20;
 
-/// One pixel's TX baseband value `v ∈ [0,1]` → carrier-relative frequency.
+/// One pixel's TX baseband value `v ∈ [0,1]` → absolute frequency around
+/// `carrier` (black = carrier−dev, white = carrier+dev). ref: wefax.cxx:1986.
 #[inline]
-fn pixel_to_freq(v: f32) -> f32 {
-    CARRIER_HZ + 2.0 * (v - 0.5) * DEVIATION_HZ
+fn pixel_to_freq(carrier: f32, v: f32) -> f32 {
+    carrier + 2.0 * (v - 0.5) * DEVIATION_HZ
 }
 
 pub struct WefaxMod {
@@ -138,7 +139,7 @@ impl WefaxMod {
         for s in 0..n {
             let src = ((s as f32 / spl) * values.len() as f32) as usize;
             let v = values[src.min(values.len() - 1)];
-            let dp = TAU * pixel_to_freq(v) / WEFAX_RATE as f32;
+            let dp = TAU * pixel_to_freq(self.center_hz, v) / WEFAX_RATE as f32;
             *phase += dp;
             if *phase > TAU {
                 *phase -= TAU;
@@ -209,7 +210,6 @@ impl Modulator for WefaxMod {
             &[0.0f32],
             BLACK_SECS * WEFAX_RATE as f32,
         );
-        let _ = self.center_hz;
         Ok(out)
     }
 }
@@ -235,7 +235,6 @@ pub struct WefaxDemod {
     /// `(rate/shift)/2π` — scales phase advance to a pixel fraction.
     deviation_ratio: f32,
     pixels: Vec<u8>,
-    started: bool,
 }
 
 impl WefaxDemod {
@@ -245,13 +244,12 @@ impl WefaxDemod {
         WefaxDemod {
             variant,
             center_hz,
-            nco: DownConverter::new(CARRIER_HZ, rate),
+            nco: DownConverter::new(center_hz, rate),
             lpf_i: Fir::new(taps.clone()),
             lpf_q: Fir::new(taps),
             disc: FmDiscriminator::new(),
             deviation_ratio: (rate / SHIFT_HZ) / TAU,
             pixels: Vec::new(),
-            started: false,
         }
     }
 
@@ -370,7 +368,6 @@ impl Demodulator for WefaxDemod {
     }
 
     fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
-        self.started = true;
         for &x in samples {
             let p = self.demod(x);
             self.pixels.push(p);
