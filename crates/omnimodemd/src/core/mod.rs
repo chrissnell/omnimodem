@@ -35,6 +35,7 @@ use command::{Command, ConfigureAudioOk, ConfigureSpectrumOk};
 use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -250,7 +251,23 @@ fn handle_command(
             // string remains the persisted form (gRPC proto unchanged); it is
             // resolved to a `ModeConfig` at use.
             let res = match crate::mode::ModeConfig::parse(&mode) {
-                Some(_) => supervisor.configure_channel(id, name, mode).map_err(Into::into),
+                Some(new_mode) => {
+                    // Capture the mode this channel is leaving so a genuine
+                    // switch can stop any transmission already on the air.
+                    let prev_mode = supervisor.channel_mode(id);
+                    supervisor.configure_channel(id, name, mode).map(|()| {
+                        // A real mode change makes the running TX worker's
+                        // modulator stale, and its in-flight burst would keep
+                        // keying the rig under the new mode's slot — the
+                        // cross-mode collision the operator hit. Drop the worker:
+                        // its `Drop` cancels the cycle, which flushes the sink and
+                        // releases PTT at once. The following ConfigureAudio
+                        // rebuilds it against the new mode.
+                        if new_mode != prev_mode {
+                            live.tx_workers.remove(&id);
+                        }
+                    }).map_err(Into::into)
+                }
                 None => Err(CoreError::UnknownMode(mode)),
             };
             if res.is_ok() {
@@ -707,7 +724,11 @@ fn transmit(
 
         interlock.begin_tx(&rig);
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: true });
-        let outcome = drive_tx_cycle(driver.as_mut(), sink, samples, rate, TX_POLL);
+        // The legacy raw-PCM cycle runs inline on the core thread (no worker),
+        // so there is no async cancel to honor — pass a never-set flag.
+        let outcome = drive_tx_cycle(
+            driver.as_mut(), sink, samples, rate, TX_POLL, &AtomicBool::new(false),
+        );
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: false });
         interlock.end_tx(&rig);
         Some(outcome)
@@ -718,7 +739,9 @@ fn transmit(
     let _ = telemetry.send(TelemetryEvent::TransmitComplete { channel, transmit_id: tx_id });
 
     match outcome {
-        None | Some(TxCycleOutcome::Done) => Ok(tx_id),
+        // Aborted is unreachable here (the legacy cancel flag is never set) but
+        // is a clean stop, so it maps to Ok alongside Done.
+        None | Some(TxCycleOutcome::Done) | Some(TxCycleOutcome::Aborted) => Ok(tx_id),
         Some(TxCycleOutcome::KeyFailed(e))
         | Some(TxCycleOutcome::SubmitFailed(e))
         | Some(TxCycleOutcome::UnkeyFailed(e)) => {

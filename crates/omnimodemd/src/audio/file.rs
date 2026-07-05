@@ -70,7 +70,9 @@ impl AudioBackend for FileBackend {
                 played.lock().unwrap().extend_from_slice(&buf);
             }
         });
-        Ok(PlaybackHandle::new(tx, submitted, drained, self.rate))
+        // The file sink records everything submitted for test assertions and
+        // "plays" it instantly, so there is nothing to discard on flush.
+        Ok(PlaybackHandle::new(tx, submitted, drained, self.rate, Arc::new(|| {})))
     }
 
     fn device_id(&self) -> DeviceId {

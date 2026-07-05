@@ -217,7 +217,12 @@ impl AudioBackend for CpalBackend {
             })
             .map_err(|e| AudioError::Io(e.to_string()))?;
 
-        Ok(PlaybackHandle::new(tx, submitted, drained, rate))
+        // Flush drops every sample still queued for the DAC callback, so an
+        // aborted transmission (e.g. a mode change mid-burst) stops keying the
+        // air within a callback period instead of playing the whole buffer out.
+        let qflush = queue.clone();
+        let flush = Arc::new(move || qflush.lock().unwrap().clear());
+        Ok(PlaybackHandle::new(tx, submitted, drained, rate, flush))
     }
 
     fn device_id(&self) -> DeviceId {
