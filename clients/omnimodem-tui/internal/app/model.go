@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/config"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,16 +44,36 @@ type Model struct {
 	stack     []View
 	toast     *ui.Toast
 	// Operator station identity, used by FT8 sequencing and macros. Set on the
-	// Configure screen.
-	myCall string
-	myGrid string
+	// Configure screen and persisted to the client config file (the daemon has
+	// no station-identity field). savedCall/savedGrid track the last values
+	// written so persistIdentity only touches disk on a real change.
+	myCall    string
+	myGrid    string
+	savedCall string
+	savedGrid string
 }
 
 func New(c client.ModemClient, addr string) *Model {
+	id := config.Load()
 	return &Model{
 		c: c, addr: addr, version: "dev", live: map[uint32]*chanLive{},
-		myCall: "N0CALL", myGrid: "AA00",
+		myCall: id.Call, myGrid: id.Grid,
+		savedCall: id.Call, savedGrid: id.Grid,
 	}
+}
+
+// persistIdentity writes the operator call/grid to the client config file when
+// they've changed since the last save. Best-effort: a write failure surfaces as
+// a toast but never blocks the UI, and the values stay live for the session.
+func (m *Model) persistIdentity() {
+	if m.myCall == m.savedCall && m.myGrid == m.savedGrid {
+		return
+	}
+	if err := config.Save(config.Identity{Call: m.myCall, Grid: m.myGrid}); err != nil {
+		m.toast = ui.NewToast("could not save station identity: "+err.Error(), ui.SeverityWarn)
+		return
+	}
+	m.savedCall, m.savedGrid = m.myCall, m.myGrid
 }
 
 func (m *Model) Init() tea.Cmd { return connectCmd(m.c) }

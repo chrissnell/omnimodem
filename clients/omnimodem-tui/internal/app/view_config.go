@@ -431,6 +431,9 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			// nothing in flight do we pop immediately. This is what makes a quick
 			// "pick devices, hit esc" persist all of RX, TX, and PTT.
 			v.closing = true
+			// Call/Grid aren't part of the daemon channel config, so they ride
+			// their own client-side save rather than maybePersist's RPC pipeline.
+			v.m.persistIdentity()
 			if cmd := v.maybePersist(); cmd != nil {
 				return v, cmd
 			}
@@ -444,13 +447,16 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 				v.focus++
 			}
 			v.syncFocus()
-			// Commit-on-blur: a name edit persists when focus moves off it.
+			// Commit-on-blur: a name edit persists when focus moves off it, and
+			// a call/grid edit persists to the client config file.
+			v.m.persistIdentity()
 			return v, v.maybePersist()
 		case "shift+tab", "up":
 			if v.focus > fName {
 				v.focus--
 			}
 			v.syncFocus()
+			v.m.persistIdentity()
 			return v, v.maybePersist()
 		}
 		// Text fields take every other key (so values may hold 'a', spaces, etc.);

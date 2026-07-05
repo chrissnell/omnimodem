@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,6 +66,9 @@ func TestConfigArrowsTraverseFields(t *testing.T) {
 
 // The Grid field exists and edits the operator's station locator (uppercased).
 func TestConfigGridFieldSetsStationGrid(t *testing.T) {
+	// Editing identity can trigger persistIdentity; keep the write off the real
+	// user config dir so the test stays hermetic even if it grows a blur/esc.
+	t.Setenv("OMNIMODEM_TUI_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	m := New(&client.Fake{}, "x")
 	v := newConfigView(m)
 	v.Update(tea.KeyMsg{Type: tea.KeyDown}) // -> Call
