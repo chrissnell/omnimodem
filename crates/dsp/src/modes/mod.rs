@@ -19,6 +19,7 @@ pub mod jt65;
 pub mod jt9;
 pub mod mfsk;
 pub mod mt63;
+pub mod navtex;
 pub mod olivia;
 pub mod psk;
 pub mod psk31;
