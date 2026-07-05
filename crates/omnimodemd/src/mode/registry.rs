@@ -6,6 +6,7 @@ use super::{ModeConfig, NullMode};
 use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
+    contestia::{ContestiaDemod, ContestiaMod},
     cw::{CwDemod, CwMod},
     dominoex::{DominoDemod, DominoMod, DominoVariant},
     fst4::{Fst4Demod, Fst4Mod},
@@ -14,6 +15,7 @@ use omnimodem_dsp::modes::{
     hell::{HellDemod, HellMod, HellVariant},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
+    mfsk::{MfskDemod, MfskMod, MfskVariant},
     olivia::{OliviaDemod, OliviaMod},
     psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
@@ -65,6 +67,13 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(HellDemod::new(v, *center_hz)))
         }
+        ModeConfig::Mfsk { submode, center_hz } => {
+            let v = MfskVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(MfskDemod::new(v, *center_hz)))
+        }
+        ModeConfig::Contestia { tones, bandwidth_hz } => {
+            DemodKind::Streaming(Box::new(ContestiaDemod::new(*tones, *bandwidth_hz)))
+        }
         ModeConfig::Ft8 => windowed(Box::new(Ft8Demod::new())),
         ModeConfig::Ft4 => windowed(Box::new(Ft4Demod::new())),
         ModeConfig::Jt65 => windowed(Box::new(Jt65Demod::new())),
@@ -112,6 +121,13 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(HellMod::new(v, *center_hz)))
+        }
+        ModeConfig::Mfsk { submode, center_hz } => {
+            let v = MfskVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(MfskMod::new(v, *center_hz)))
+        }
+        ModeConfig::Contestia { tones, bandwidth_hz } => {
+            Some(Box::new(ContestiaMod::new(*tones, *bandwidth_hz)))
         }
         ModeConfig::Ft8 => Some(Box::new(Ft8Mod::new())),
         ModeConfig::Ft4 => Some(Box::new(Ft4Mod::new())),
@@ -236,6 +252,35 @@ mod tests {
             assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
             assert_eq!(tx_slot_s(&cfg), None);
             assert_eq!(native_rate(&cfg), Some(8000));
+        }
+    }
+
+    #[test]
+    fn mfsk_family_is_streaming_with_modulators() {
+        for label in ["mfsk4", "mfsk8", "mfsk16", "mfsk31", "mfsk128", "mfsk64l"] {
+            let cfg = ModeConfig::Mfsk { submode: label.into(), center_hz: 1500.0 };
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{label} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), None);
+        }
+        // The native RX rate follows the submode (8 kHz vs 11.025 kHz).
+        assert_eq!(
+            native_rate(&ModeConfig::Mfsk { submode: "mfsk16".into(), center_hz: 1500.0 }),
+            Some(8000)
+        );
+        assert_eq!(
+            native_rate(&ModeConfig::Mfsk { submode: "mfsk11".into(), center_hz: 1500.0 }),
+            Some(11025)
+        );
+    }
+
+    #[test]
+    fn contestia_grid_is_streaming_with_modulators() {
+        for (t, bw) in [(4u16, 250u16), (8, 500), (16, 1000), (32, 1000), (64, 2000)] {
+            let cfg = ModeConfig::Contestia { tones: t, bandwidth_hz: bw };
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{t}/{bw} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {t}/{bw}");
+            assert_eq!(tx_slot_s(&cfg), None);
         }
     }
 

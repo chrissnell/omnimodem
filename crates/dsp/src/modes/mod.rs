@@ -7,6 +7,7 @@
 //! `ModeConfig` onto these constructors; nothing else learns mode specifics.
 
 pub mod afsk1200;
+pub mod contestia;
 pub mod cw;
 pub mod dominoex;
 pub mod hell;
@@ -16,6 +17,7 @@ pub mod ft4;
 pub mod fst4;
 pub mod jt65;
 pub mod jt9;
+pub mod mfsk;
 pub mod olivia;
 pub mod psk;
 pub mod psk31;

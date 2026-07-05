@@ -88,6 +88,38 @@ var modes = []modeInfo{
 	{"hellx5", "image", 0, []modeParam{{"center", 1500}}},
 	{"hellx9", "image", 0, []modeParam{{"center", 1500}}},
 	{"hell80", "image", 0, []modeParam{{"center", 1500}}},
+	// The fldigi MFSK family: M-ary FSK + K=7 conv + interleave + MFSK Varicode.
+	{"mfsk4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk8", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk11", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk16", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk22", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk31", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk32", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk64", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk128", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk64l", "chat", 0, []modeParam{{"center", 1500}}},
+	{"mfsk128l", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi Contestia grid (Olivia's 32-chip-Walsh sibling): tones/bandwidth.
+	{"contestia4_125", "chat", 0, []modeParam{{"tones", 4}, {"bw", 125}}},
+	{"contestia4_250", "chat", 0, []modeParam{{"tones", 4}, {"bw", 250}}},
+	{"contestia4_500", "chat", 0, []modeParam{{"tones", 4}, {"bw", 500}}},
+	{"contestia4_1000", "chat", 0, []modeParam{{"tones", 4}, {"bw", 1000}}},
+	{"contestia4_2000", "chat", 0, []modeParam{{"tones", 4}, {"bw", 2000}}},
+	{"contestia8_125", "chat", 0, []modeParam{{"tones", 8}, {"bw", 125}}},
+	{"contestia8_250", "chat", 0, []modeParam{{"tones", 8}, {"bw", 250}}},
+	{"contestia8_500", "chat", 0, []modeParam{{"tones", 8}, {"bw", 500}}},
+	{"contestia8_1000", "chat", 0, []modeParam{{"tones", 8}, {"bw", 1000}}},
+	{"contestia8_2000", "chat", 0, []modeParam{{"tones", 8}, {"bw", 2000}}},
+	{"contestia16_250", "chat", 0, []modeParam{{"tones", 16}, {"bw", 250}}},
+	{"contestia16_500", "chat", 0, []modeParam{{"tones", 16}, {"bw", 500}}},
+	{"contestia16_1000", "chat", 0, []modeParam{{"tones", 16}, {"bw", 1000}}},
+	{"contestia16_2000", "chat", 0, []modeParam{{"tones", 16}, {"bw", 2000}}},
+	{"contestia32_1000", "chat", 0, []modeParam{{"tones", 32}, {"bw", 1000}}},
+	{"contestia32_2000", "chat", 0, []modeParam{{"tones", 32}, {"bw", 2000}}},
+	{"contestia64_500", "chat", 0, []modeParam{{"tones", 64}, {"bw", 500}}},
+	{"contestia64_1000", "chat", 0, []modeParam{{"tones", 64}, {"bw", 1000}}},
+	{"contestia64_2000", "chat", 0, []modeParam{{"tones", 64}, {"bw", 2000}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -162,6 +194,33 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		// The fldigi Feld Hell facsimile family: submode label + audio center.
 		return &pb.ModeParams{Params: &pb.ModeParams_Hell{Hell: &pb.HellParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
+		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l":
+		// The fldigi MFSK family: submode label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Mfsk{Mfsk: &pb.MfskParams{
+			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
+		"contestia8_125", "contestia8_250", "contestia8_500", "contestia8_1000", "contestia8_2000",
+		"contestia16_250", "contestia16_500", "contestia16_1000", "contestia16_2000",
+		"contestia32_1000", "contestia32_2000",
+		"contestia64_500", "contestia64_1000", "contestia64_2000":
+		// The fldigi Contestia grid: tones + bandwidth carried in typed params.
+		mi := modeByLabel(label)
+		t, bw := 8.0, 500.0
+		if mi != nil {
+			for _, p := range mi.params {
+				if p.key == "tones" {
+					t = p.def
+				}
+				if p.key == "bw" {
+					bw = p.def
+				}
+			}
+		}
+		return &pb.ModeParams{Params: &pb.ModeParams_Contestia{Contestia: &pb.ContestiaParams{
+			Tones: uint32(get("tones", t)), BandwidthHz: uint32(get("bw", bw)),
 		}}}
 	case "afsk1200":
 		return &pb.ModeParams{Params: &pb.ModeParams_Afsk1200{Afsk1200: &pb.Afsk1200Params{Tx: true}}}

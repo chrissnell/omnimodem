@@ -390,6 +390,18 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
                 None => mode,
             }
         }
+        Params::Mfsk(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Contestia(c) => {
+            ModeConfig::Contestia { tones: c.tones as u16, bandwidth_hz: c.bandwidth_hz as u16 }
+                .to_mode_string()
+        }
         Params::Thor(p) => {
             // A known submode encodes canonically; an unknown one falls back to
             // the bare `mode` string (which `ModeConfig::parse` then validates).

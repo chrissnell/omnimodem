@@ -92,7 +92,9 @@ message ModeParams {
     PskParams psk = 6;
     DominoParams dominoex = 7;
     HellParams hell = 8;
-    ThorParams thor = 9;
+    MfskParams mfsk = 9;
+    ContestiaParams contestia = 10;
+    ThorParams thor = 11;
   }
 }
 
@@ -138,6 +140,21 @@ message DominoParams {
 message HellParams {
   string submode = 1;   // hell::HellVariant label, e.g. "feldhell"
   float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi MFSK family (mfsk4/8/11/16/22/31/32/64/128 + 64L/128L). M-ary FSK
+// with a K=7 conv code + diagonal interleaver + MFSK Varicode. `submode` is the
+// mode label; `center_hz` the audio carrier.
+message MfskParams {
+  string submode = 1;   // mfsk::MfskVariant label, e.g. "mfsk16"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi Contestia grid (Olivia's sibling; 32-chip Walsh). `tones` MFSK tones
+// over `bandwidth_hz` — e.g. 8 tones / 500 Hz.
+message ContestiaParams {
+  uint32 tones = 1;         // number of tones (4/8/16/32/64)
+  uint32 bandwidth_hz = 2;  // bandwidth in Hz (125..2000)
 }
 
 // The fldigi THOR family (thormicro/4/5/8/11/16/22/25x4/50x1/50x2/100). DominoEX's

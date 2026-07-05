@@ -35,6 +35,13 @@ pub enum ModeConfig {
     Jt65,
     Jt9,
     Wspr,
+    /// MFSK family (fldigi parity): `submode` is an `mfsk::MfskVariant` label
+    /// (`mfsk4`/…/`mfsk128`/`mfsk64l`/`mfsk128l`), `center_hz` the audio carrier.
+    /// M-ary FSK + K=7 conv + diagonal interleave + MFSK Varicode.
+    Mfsk { submode: String, center_hz: f32 },
+    /// Contestia grid (fldigi parity): Olivia's 32-chip-Walsh sibling, parametric
+    /// over `tones` × `bandwidth_hz`.
+    Contestia { tones: u16, bandwidth_hz: u16 },
     // Phase 5 fldigi breadth modes.
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
@@ -89,6 +96,16 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::mfsk::MfskVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Mfsk {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
+            m if omnimodem_dsp::modes::contestia::ContestiaVariant::from_label(m).is_some() => {
+                let v = omnimodem_dsp::modes::contestia::ContestiaVariant::from_label(m).unwrap();
+                Some(ModeConfig::Contestia { tones: v.tones, bandwidth_hz: v.bandwidth_hz })
+            }
             m if omnimodem_dsp::modes::psk::PskVariant::from_label(m).is_some() => {
                 // fldigi centres the higher rates at 1500 Hz; psk31 keeps its
                 // historical 1000 Hz default so existing configs are unchanged.
@@ -123,6 +140,9 @@ impl ModeConfig {
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Thor { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            // The tones/bw live in the Contestia label itself (contestia8_500).
+            ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
@@ -155,6 +175,12 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("hell")
             }
+            ModeConfig::Mfsk { submode, .. } => {
+                omnimodem_dsp::modes::mfsk::MfskVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("mfsk")
+            }
+            ModeConfig::Contestia { .. } => "contestia",
             ModeConfig::Ft4 => "ft4",
             ModeConfig::Jt65 => "jt65",
             ModeConfig::Jt9 => "jt9",
@@ -360,6 +386,47 @@ mod tests {
         let c = ModeConfig::Hell { submode: "hell80".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         assert_eq!(ModeConfig::parse("hellx99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_mfsk_family() {
+        // Every fldigi MFSK submode resolves, defaulting to a 1500 Hz carrier.
+        for label in [
+            "mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31", "mfsk32", "mfsk64", "mfsk128",
+            "mfsk64l", "mfsk128l",
+        ] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Mfsk { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("mfsk16:center=1200"),
+            Some(ModeConfig::Mfsk { submode: "mfsk16".into(), center_hz: 1200.0 })
+        );
+        let c = ModeConfig::Mfsk { submode: "mfsk32".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("mfsk99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_contestia_grid() {
+        // Every submode in the fldigi Contestia grid resolves; its tones/bw are
+        // carried in the label and round-trip through the canonical mode string.
+        for label in [
+            "contestia4_125", "contestia8_500", "contestia16_1000", "contestia32_1000",
+            "contestia64_2000",
+        ] {
+            let cfg = ModeConfig::parse(label).unwrap_or_else(|| panic!("{label} must parse"));
+            assert_eq!(ModeConfig::parse(&cfg.to_mode_string()), Some(cfg));
+        }
+        assert_eq!(
+            ModeConfig::parse("contestia8_500"),
+            Some(ModeConfig::Contestia { tones: 8, bandwidth_hz: 500 })
+        );
+        // Coordinates outside the grid are rejected.
+        assert_eq!(ModeConfig::parse("contestia16_125"), None);
+        assert_eq!(ModeConfig::parse("contestia99_999"), None);
     }
 
     #[test]

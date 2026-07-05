@@ -26,6 +26,13 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"thormicro", "thor4", "thor5", "thor8", "thor11", "thor16", "thor22",
 		"thor25x4", "thor50x1", "thor50x2", "thor100",
 		"feldhell", "slowhell", "hellx5", "hellx9", "hell80",
+		"mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
+		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l",
+		"contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
+		"contestia8_125", "contestia8_250", "contestia8_500", "contestia8_1000", "contestia8_2000",
+		"contestia16_250", "contestia16_500", "contestia16_1000", "contestia16_2000",
+		"contestia32_1000", "contestia32_2000",
+		"contestia64_500", "contestia64_1000", "contestia64_2000",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
@@ -149,6 +156,42 @@ func TestHellModeParams(t *testing.T) {
 		if def := modeParamsFor(label, nil).GetHell(); def == nil || def.GetCenterHz() != 1500 {
 			t.Fatalf("%s default center = %v, want 1500", label, def.GetCenterHz())
 		}
+	}
+}
+
+// The MFSK family carries its submode label and center through the dedicated
+// MfskParams oneof, not the PSK/DominoEX arm.
+func TestMfskModeParams(t *testing.T) {
+	mp := modeParamsFor("mfsk16", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("mfsk16 must produce typed ModeParams")
+	}
+	m := mp.GetMfsk()
+	if m == nil {
+		t.Fatalf("expected MfskParams, got %T", mp.GetParams())
+	}
+	if m.GetSubmode() != "mfsk16" || m.GetCenterHz() != 1200 {
+		t.Fatalf("mfsk params = %q / %v, want mfsk16 / 1200", m.GetSubmode(), m.GetCenterHz())
+	}
+	if def := modeParamsFor("mfsk64l", nil).GetMfsk(); def == nil || def.GetCenterHz() != 1500 {
+		t.Fatalf("mfsk64l default center = %v, want 1500", def.GetCenterHz())
+	}
+}
+
+// The Contestia grid carries tones + bandwidth through the dedicated
+// ContestiaParams oneof; defaults come from the submode's grid coordinates.
+func TestContestiaModeParams(t *testing.T) {
+	d := modeParamsFor("contestia8_500", nil).GetContestia()
+	if d == nil {
+		t.Fatal("contestia8_500 must produce typed ContestiaParams")
+	}
+	if d.GetTones() != 8 || d.GetBandwidthHz() != 500 {
+		t.Fatalf("contestia8_500 defaults = %d / %d, want 8 / 500", d.GetTones(), d.GetBandwidthHz())
+	}
+	// An operator override round-trips.
+	o := modeParamsFor("contestia32_1000", map[string]float64{"tones": 32, "bw": 2000}).GetContestia()
+	if o.GetTones() != 32 || o.GetBandwidthHz() != 2000 {
+		t.Fatalf("contestia override = %d / %d, want 32 / 2000", o.GetTones(), o.GetBandwidthHz())
 	}
 }
 

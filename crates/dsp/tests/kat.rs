@@ -1022,3 +1022,115 @@ fn hell_submode_grid_raster_loopback_and_awgn() {
         assert_eq!(&got[..want.len()], &want[..], "{} AWGN raster loopback", v.label());
     }
 }
+
+// --- Group 11: MFSK + Contestia families (fldigi parity) ------------------
+
+/// Bit-exact: omnimodem's MFSK TX chain (varicode → K=7 conv → interleave →
+/// grayencode) reproduces fldigi's `coded` bits, interleaved `symbols`, and
+/// gray `tones` byte-for-byte for every representative submode. Provenance:
+/// `tests/vectors/mfsk.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_mfsk.sh`).
+#[test]
+fn mfsk_tx_chain_matches_fldigi_vector() {
+    use omnimodem_dsp::framing::varicode::mfsk_encode;
+    use omnimodem_dsp::modes::mfsk::{text_tones, MfskVariant};
+
+    let raw = include_str!("vectors/mfsk.json");
+    for &v in MfskVariant::all() {
+        let needle = format!("\"mode\":\"{}\"", v.label());
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("submode line");
+        let field = |k: &str| {
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let msg = field("\"msg\":\"");
+        let want_tones: Vec<u32> =
+            field("\"tones\":\"").split(' ').map(|s| s.parse().unwrap()).collect();
+        assert_eq!(text_tones(v, &msg), want_tones, "{} tones", v.label());
+
+        // The varicode bits are the front of the chain — assert them too so a
+        // break localises to the varicode vs the FEC/interleave/gray stages.
+        let want_vari: Vec<u8> = field("\"varicode\":\"").bytes().map(|c| c - b'0').collect();
+        assert_eq!(mfsk_encode(&msg), want_vari, "{} varicode", v.label());
+    }
+}
+
+/// Every MFSK submode round-trips a message TX→RX on a clean channel and under
+/// light AWGN (Goertzel tone detection + gray/interleave inverse + streaming
+/// Viterbi + MFSK Varicode framing). Parametric grid; one message per submode.
+#[test]
+fn mfsk_submode_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::mfsk::{MfskDemod, MfskMod, MfskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn decode(v: MfskVariant, samples: &[f32]) -> String {
+        let mut rx = MfskDemod::new(v, 1500.0);
+        rx.feed(samples)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC 73";
+    // The deep-interleave 64L/128L modes have very long latency (and 8000-sample
+    // symbols for 64L); the shallow reps of each symbits width carry the grid.
+    for (i, &v) in [
+        MfskVariant::M4,
+        MfskVariant::M8,
+        MfskVariant::M16,
+        MfskVariant::M31,
+        MfskVariant::M32,
+        MfskVariant::M64,
+        MfskVariant::M128,
+        MfskVariant::M11,
+        MfskVariant::M22,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let clean = MfskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(decode(v, &clean), msg, "{} clean loopback", v.label());
+
+        let mut noisy = MfskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x11F5 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
+    }
+}
+
+/// Every Contestia submode round-trips a message TX→RX on a clean channel and
+/// under light AWGN (MFSK tone bank + 32-chip Walsh soft decode). Parametric
+/// grid; one message per submode.
+#[test]
+fn contestia_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::contestia::{ContestiaDemod, ContestiaMod, ContestiaVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn decode(v: ContestiaVariant, samples: &[f32]) -> String {
+        let mut rx = ContestiaDemod::new(v.tones, v.bandwidth_hz);
+        rx.feed(samples)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC 2024";
+    for (i, &v) in ContestiaVariant::all().iter().enumerate() {
+        let clean = ContestiaMod::new(v.tones, v.bandwidth_hz).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(decode(v, &clean), msg, "{} clean loopback", v.label());
+
+        let mut noisy =
+            ContestiaMod::new(v.tones, v.bandwidth_hz).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xC047 + i as u64);
+        add_awgn(&mut noisy, 0.015, &mut rng);
+        assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
+    }
+}
