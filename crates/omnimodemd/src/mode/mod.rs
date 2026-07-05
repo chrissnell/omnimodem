@@ -22,6 +22,10 @@ pub enum ModeConfig {
     /// label (`dominoex4`/…/`dominoex88`/`dominoexmicro`), `center_hz` the audio
     /// carrier. 18-tone IFK+ MFSK.
     DominoEx { submode: String, center_hz: f32 },
+    /// Hellschreiber family (fldigi parity): `submode` is a `hell::HellVariant`
+    /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
+    /// audio carrier. A facsimile mode — RX emits an image raster, not text.
+    Hell { submode: String, center_hz: f32 },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
     Jt65,
@@ -69,6 +73,12 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::hell::HellVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Hell {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
             m if omnimodem_dsp::modes::psk::PskVariant::from_label(m).is_some() => {
                 // fldigi centres the higher rates at 1500 Hz; psk31 keeps its
                 // historical 1000 Hz default so existing configs are unchanged.
@@ -101,6 +111,7 @@ impl ModeConfig {
             }
             ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
@@ -122,6 +133,11 @@ impl ModeConfig {
                 omnimodem_dsp::modes::dominoex::DominoVariant::from_label(submode)
                     .map(|v| v.label())
                     .unwrap_or("dominoex")
+            }
+            ModeConfig::Hell { submode, .. } => {
+                omnimodem_dsp::modes::hell::HellVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("hell")
             }
             ModeConfig::Ft4 => "ft4",
             ModeConfig::Jt65 => "jt65",
@@ -287,6 +303,25 @@ mod tests {
         let c = ModeConfig::DominoEx { submode: "dominoex8".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         assert_eq!(ModeConfig::parse("dominoex99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_hell_family() {
+        // Every Feld Hell submode resolves, defaulting to a 1500 Hz carrier.
+        for label in ["feldhell", "slowhell", "hellx5", "hellx9", "hell80"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Hell { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("feldhell:center=1000"),
+            Some(ModeConfig::Hell { submode: "feldhell".into(), center_hz: 1000.0 })
+        );
+        // Round-trips through the canonical mode string.
+        let c = ModeConfig::Hell { submode: "hell80".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("hellx99"), None);
     }
 
     #[test]

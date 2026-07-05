@@ -827,3 +827,76 @@ fn dominoex_submode_grid_loopback_and_awgn() {
         assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
     }
 }
+
+/// Bit-exact: omnimodem's Feld Hell font (`hellfont::glyph_columns`) and on-air
+/// column raster (`hellfont::on_air_columns`) reproduce fldigi's tables and
+/// `tx_char` framing byte-for-byte, for every printable glyph and both test
+/// messages. Provenance: `tests/vectors/feldhell.json` (fldigi 4.1.23 @
+/// 61b97f413, driver `scratch/refvectors/build_feldhell.sh`, feldfontnbr 4).
+#[test]
+fn feldhell_font_and_raster_match_fldigi_vector() {
+    use omnimodem_dsp::framing::hellfont::{glyph_columns, on_air_columns, DEFAULT_XMT_WIDTH};
+
+    let raw = include_str!("vectors/feldhell.json");
+
+    // Parse the `"cols":[a,b,c]` array from a vector line.
+    fn cols_of(line: &str) -> Vec<u16> {
+        let k = "\"cols\":[";
+        let i = line.find(k).unwrap() + k.len();
+        let arr = &line[i..line[i..].find(']').unwrap() + i];
+        if arr.trim().is_empty() {
+            return Vec::new();
+        }
+        arr.split(',').map(|s| s.trim().parse().unwrap()).collect()
+    }
+
+    // 1. Every printable glyph's trimmed column raster.
+    for c in b' '..=b'~' {
+        let needle = format!("\"kind\":\"glyph\",\"c\":{},", c);
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("glyph row");
+        assert_eq!(glyph_columns(c), cols_of(line), "glyph {c}");
+    }
+
+    // 2. Both on-air column streams (leading/trailing null-column framing).
+    for msg in ["CQ DE K1ABC", "The quick brown fox 0123456789"] {
+        let needle = format!("\"kind\":\"stream\",\"msg\":\"{msg}\"");
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("stream row");
+        assert_eq!(on_air_columns(msg, DEFAULT_XMT_WIDTH), cols_of(line), "{msg:?} stream");
+    }
+}
+
+/// Every Feld Hell submode round-trips a message TX→RX as a raster on a clean
+/// channel and under light AWGN: the decoded image columns reproduce the
+/// bit-exact on-air glyph columns (the facsimile loopback gate, Doctrine §3 —
+/// audio is never asserted bit-exact).
+#[test]
+fn hell_submode_grid_raster_loopback_and_awgn() {
+    use omnimodem_dsp::framing::hellfont::{on_air_columns, DEFAULT_XMT_WIDTH};
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::hell::{image_columns, HellDemod, HellMod, HellVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn raster(v: HellVariant, samples: &[f32]) -> Vec<u16> {
+        let mut rx = HellDemod::new(v, 1500.0);
+        rx.feed(samples);
+        let frames = rx.flush();
+        match &frames[0].payload {
+            FramePayload::Image { width, gray } => image_columns(*width, gray),
+            _ => panic!("expected Image payload"),
+        }
+    }
+
+    let msg = "CQ DE K1ABC";
+    let want = on_air_columns(msg, DEFAULT_XMT_WIDTH);
+    for (i, &v) in HellVariant::all().iter().enumerate() {
+        let clean = HellMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let got = raster(v, &clean);
+        assert_eq!(&got[..want.len()], &want[..], "{} clean raster loopback", v.label());
+
+        let mut noisy = HellMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xFE1D + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        let got = raster(v, &noisy);
+        assert_eq!(&got[..want.len()], &want[..], "{} AWGN raster loopback", v.label());
+    }
+}

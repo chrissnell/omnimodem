@@ -13,6 +13,7 @@
 //! map honest.
 pub mod varicode;
 pub mod dominoex_varicode;
+pub mod hellfont;
 pub mod baudot;
 pub mod morse;
 pub mod hdlc;

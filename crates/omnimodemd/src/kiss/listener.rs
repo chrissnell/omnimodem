@@ -201,7 +201,7 @@ mod tests {
 
         let payload = vec![0x82, 0xA0, 0xC0]; // arbitrary bytes incl. a FEND to exercise escaping
         core.frames
-            .send(FrameEvent::RxFrame { channel: ChannelId(0), data: payload.clone(), timestamp_ns: 0 })
+            .send(FrameEvent::RxFrame { channel: ChannelId(0), data: payload.clone(), image: None, timestamp_ns: 0 })
             .unwrap();
 
         let mut got = vec![0u8; 64];
@@ -224,7 +224,7 @@ mod tests {
 
         // A frame on a different channel must NOT reach this listener's client.
         core.frames
-            .send(FrameEvent::RxFrame { channel: ChannelId(7), data: vec![1, 2, 3], timestamp_ns: 0 })
+            .send(FrameEvent::RxFrame { channel: ChannelId(7), data: vec![1, 2, 3], image: None, timestamp_ns: 0 })
             .unwrap();
         let mut got = vec![0u8; 16];
         let r = tokio::time::timeout(Duration::from_millis(300), client.read(&mut got)).await;

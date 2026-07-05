@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
+	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 )
 
 // Guard against daemon↔TUI mode drift: every mode the daemon can run must be
@@ -22,6 +23,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"psk125c12", "psk250c6", "psk500c2", "psk500c4", "psk1000c2",
 		"dominoexmicro", "dominoex4", "dominoex5", "dominoex8", "dominoex11",
 		"dominoex16", "dominoex22", "dominoex44", "dominoex88",
+		"feldhell", "slowhell", "hellx5", "hellx9", "hell80",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
@@ -95,6 +97,59 @@ func TestDominoExModeParams(t *testing.T) {
 	}
 	if def := modeParamsFor("dominoex4", nil).GetDominoex(); def.GetCenterHz() != 1500 {
 		t.Fatalf("dominoex4 default center = %v, want 1500", def.GetCenterHz())
+	}
+}
+
+// The Feld Hell family carries its submode label and center through the dedicated
+// HellParams oneof, and every submode uses the facsimile "image" shape.
+func TestHellModeParams(t *testing.T) {
+	mp := modeParamsFor("feldhell", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("feldhell must produce typed ModeParams")
+	}
+	h := mp.GetHell()
+	if h == nil {
+		t.Fatalf("expected HellParams, got %T", mp.GetParams())
+	}
+	if h.GetSubmode() != "feldhell" || h.GetCenterHz() != 1200 {
+		t.Fatalf("hell params = %q / %v, want feldhell / 1200", h.GetSubmode(), h.GetCenterHz())
+	}
+	for _, label := range []string{"feldhell", "slowhell", "hellx5", "hellx9", "hell80"} {
+		mi := modeByLabel(label)
+		if mi == nil || mi.shape != "image" {
+			t.Fatalf("%s must use the image shape, got %v", label, mi)
+		}
+		if def := modeParamsFor(label, nil).GetHell(); def == nil || def.GetCenterHz() != 1500 {
+			t.Fatalf("%s default center = %v, want 1500", label, def.GetCenterHz())
+		}
+	}
+}
+
+// The image shape (Hell) attaches a raster surface — not a chat transcript — and
+// folds received Image frames into a scrolling raster it renders.
+func TestHellImageShapeRendersRaster(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "feldhell"}
+	m.sel = 0
+	v := newOperateView(m)
+	if v.raster == nil {
+		t.Fatal("feldhell should attach a raster surface")
+	}
+	if v.seq != nil || v.beacon {
+		t.Fatal("feldhell must not be a sequencer/beacon")
+	}
+	// A received Image frame (14-tall column with an all-on column) folds in and
+	// renders a block glyph.
+	on := make([]byte, 14)
+	for i := range on {
+		on[i] = 255
+	}
+	v.raster.push(&pb.Image{Width: 14, Gray: on})
+	if got := v.raster.render(80); !strings.Contains(got, "#") {
+		t.Fatalf("raster should render on-pixels as blocks, got %q", got)
+	}
+	if got := v.Render(80, 24); !strings.Contains(got, "FELDHELL") {
+		t.Fatalf("raster header should name the mode, got %q", firstLine(got))
 	}
 }
 

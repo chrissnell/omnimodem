@@ -34,9 +34,10 @@ type operateView struct {
 	theirCall  string
 	rst        string
 	seq        *ft8Seq
-	beacon     bool    // beacon monitor (WSPR): no ladder/compose; enter keys a beacon
-	modeLabel  string  // active mode label, for the surface header
-	slotSecs   float64 // T/R slot length for sequencer/beacon modes
+	beacon     bool       // beacon monitor (WSPR): no ladder/compose; enter keys a beacon
+	raster     *rasterBuf // facsimile raster (Hell): received image column stream
+	modeLabel  string     // active mode label, for the surface header
+	slotSecs   float64    // T/R slot length for sequencer/beacon modes
 	qlog       qsoLog
 }
 
@@ -56,6 +57,10 @@ func newOperateView(m *Model) *operateView {
 				v.seq = newFT8Seq(v.myCall, v.myGrid)
 			case "beacon":
 				v.beacon = true
+			case "image":
+				// Facsimile (Hell): a scrolling raster RX surface. TX still composes
+				// text — the mode paints it as a pixel raster on the wire.
+				v.raster = &rasterBuf{}
 			}
 		}
 	}
@@ -79,7 +84,11 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			}
 		}
 		if rf := msg.ev.GetRxFrame(); rf != nil && rf.GetChannel() == v.m.sel {
-			v.appendRx(string(rf.GetData()))
+			if v.raster != nil {
+				v.raster.push(rf.GetImage()) // facsimile: accumulate the raster columns
+			} else {
+				v.appendRx(string(rf.GetData()))
+			}
 		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
@@ -313,6 +322,18 @@ func (v *operateView) Render(w, h int) string {
 		}
 		b.WriteString(fmt.Sprintf("%s beacon · slot %.0f/%gs · spots: %d",
 			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs, len(v.transcript)))
+		return b.String()
+	}
+	if v.raster != nil {
+		// Facsimile: a scrolling raster of the received image columns, then the
+		// text compose line (the mode paints typed text into pixels on TX).
+		b.WriteString(fmt.Sprintf("%s · facsimile raster · %d cols\n\n",
+			strings.ToUpper(v.modeLabel), len(v.raster.cols)))
+		b.WriteString(v.raster.render(w) + "\n\n")
+		b.WriteString("› " + v.compose)
+		if v.tx.active() {
+			b.WriteString("   " + ui.Accent.Render("[TX]"))
+		}
 		return b.String()
 	}
 	for _, l := range v.transcript {

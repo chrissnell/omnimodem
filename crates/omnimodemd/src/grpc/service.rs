@@ -382,6 +382,14 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
                 None => mode,
             }
         }
+        Params::Hell(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
         Params::Olivia(o) => {
             ModeConfig::Olivia { tones: o.tones as u16, bandwidth_hz: o.bandwidth_hz as u16 }
                 .to_mode_string()

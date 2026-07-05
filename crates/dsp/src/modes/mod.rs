@@ -9,6 +9,7 @@
 pub mod afsk1200;
 pub mod cw;
 pub mod dominoex;
+pub mod hell;
 pub mod ft8;
 pub mod fsk_util;
 pub mod ft4;

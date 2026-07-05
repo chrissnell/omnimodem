@@ -91,6 +91,7 @@ message ModeParams {
     Afsk1200Params afsk1200 = 5;
     PskParams psk = 6;
     DominoParams dominoex = 7;
+    HellParams hell = 8;
   }
 }
 
@@ -127,6 +128,14 @@ message OliviaParams {
 // MFSK. `submode` is the mode label; `center_hz` the audio carrier.
 message DominoParams {
   string submode = 1;   // dominoex::DominoVariant label, e.g. "dominoex16"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi Hellschreiber family (feldhell/slowhell/hellx5/hellx9/hell80). A
+// facsimile mode: RX emits an image raster (see RxFrame.image), not text.
+// `submode` is the mode label; `center_hz` the audio carrier.
+message HellParams {
+  string submode = 1;   // hell::HellVariant label, e.g. "feldhell"
   float  center_hz = 2; // audio center frequency
 }
 
@@ -226,12 +235,25 @@ message TransmitComplete {
   uint64 transmit_id = 2;
 }
 
-// A decoded RX frame. No DSP exists in Phase 1, so this is emitted only by
-// tests/tools; it is defined now to pin the LOSSLESS backpressure contract.
+// A decoded RX frame. Text/packet/message payloads travel in `data` (UTF-8 or
+// opaque bytes). Facsimile/raster modes (Hell, and later WEFAX + the picture
+// sub-protocols) instead populate the typed `image` field and leave `data`
+// empty — a receiver picks whichever is set.
 message RxFrame {
   uint32 channel = 1;
   bytes data = 2;
   uint64 timestamp_ns = 3;
+  Image image = 4;   // set for raster modes; `data` empty when this is present
+}
+
+// A decoded raster. `gray` is row-major 8-bit luminance, `gray.len() == width *
+// rows` (rows = gray.len() / width). Designed against Hell's continuous column
+// stream — each successive `width`-byte row is one on-air column (14 rows tall)
+// — and reused by WEFAX (Phase 12) and the picture sub-protocols (Phase 15),
+// which append rows/columns incrementally.
+message Image {
+  uint32 width = 1;  // pixels per row (Hell: 14, the column height)
+  bytes  gray = 2;   // row-major 8-bit luminance
 }
 
 message AudioLevel {
