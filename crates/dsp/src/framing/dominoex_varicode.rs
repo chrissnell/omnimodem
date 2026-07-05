@@ -167,7 +167,12 @@ impl Varidecoder {
 /// completes the character accumulated so far). ref: dominoex.cxx:368-395.
 pub struct Framer {
     dec: Varidecoder,
+    // The newest ≤ `MAX_VARICODE_LEN` nibbles of the in-progress character, in
+    // send order (fldigi's `symbolbuf` shift register). `count` is the total
+    // nibbles seen since the last start (clamped), so an over-long character is
+    // *dropped* rather than truncated — see `push`.
     buf: Vec<u8>,
+    count: usize,
     started: bool,
 }
 
@@ -179,30 +184,44 @@ impl Default for Framer {
 
 impl Framer {
     pub fn new() -> Self {
-        Framer { dec: Varidecoder::new(), buf: Vec::with_capacity(MAX_VARICODE_LEN), started: false }
+        Framer {
+            dec: Varidecoder::new(),
+            buf: Vec::with_capacity(MAX_VARICODE_LEN),
+            count: 0,
+            started: false,
+        }
     }
 
     /// Push one varicode nibble. Returns `Some(char_value)` when a preceding
     /// character completes (i.e. `nib`'s MSB is clear and a character was already
-    /// in progress). Mirrors `decodeDomino`'s "complete on new-char start" rule.
+    /// in progress). Mirrors `decodeDomino` (dominoex.cxx:372-395): a start nibble
+    /// completes the accumulated character, but only if it was `<= MAX_VARICODE_LEN`
+    /// nibbles long — an over-long run (only reachable on noisy/malformed input) is
+    /// dropped, exactly as fldigi's `symcounter <= MAX_VARICODE_LEN` guard does.
     pub fn push(&mut self, nib: u8) -> Option<u16> {
         let mut done = None;
         if nib & 0x8 == 0 {
-            if self.started && !self.buf.is_empty() {
+            if self.started && (1..=MAX_VARICODE_LEN).contains(&self.count) {
                 let idx = decode_index(&self.buf);
                 done = self.dec.decode(idx);
             }
             self.buf.clear();
+            self.count = 0;
             self.started = true;
         }
-        if self.buf.len() < MAX_VARICODE_LEN {
-            self.buf.push(nib);
+        // Keep the newest `MAX_VARICODE_LEN` nibbles (shift register); the drop of
+        // an over-long character is governed by `count`, not by this cap.
+        self.buf.push(nib);
+        if self.buf.len() > MAX_VARICODE_LEN {
+            self.buf.remove(0);
         }
+        self.count = (self.count + 1).min(MAX_VARICODE_LEN + 1);
         done
     }
 
     pub fn reset(&mut self) {
         self.buf.clear();
+        self.count = 0;
         self.started = false;
     }
 }
@@ -274,5 +293,23 @@ mod tests {
         assert_eq!(out, vec![b'A' as u16]);
         // flushing (a fresh start nibble) completes B.
         assert_eq!(f.push(0), Some(b'B' as u16));
+    }
+
+    #[test]
+    fn framer_drops_over_long_characters() {
+        // fldigi's decodeDomino only decodes when symcounter <= MAX_VARICODE_LEN;
+        // a run of >3 nibbles before a start nibble (only reachable on noisy input)
+        // is dropped, not truncated. ref: dominoex.cxx:372-395.
+        let mut f = Framer::new();
+        // start nibble, then four continuation nibbles = 5 nibbles total (> 3).
+        assert_eq!(f.push(1), None); // start
+        for n in [0x8, 0x9, 0xA, 0xB] {
+            assert_eq!(f.push(n), None);
+        }
+        // The start nibble that ends the over-long run drops it (no mis-decode)...
+        assert_eq!(f.push(0), None, "over-long run must be dropped, not truncated");
+        // ...and the framer resumes correctly: the single-nibble character just
+        // started (tone 0 = space) frames cleanly on the next start.
+        assert_eq!(f.push(0), Some(b' ' as u16));
     }
 }
