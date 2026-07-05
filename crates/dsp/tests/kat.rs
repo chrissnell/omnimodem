@@ -925,10 +925,19 @@ fn thor_submode_grid_loopback_and_awgn() {
             .collect()
     }
 
+    // Preamble detection is deferred, so the RX emits a short, bounded startup
+    // transient before the framer locks (see modes::thor docs); assert the strong
+    // invariant — the message arrives intact at the tail after ≤8 bytes of smear —
+    // rather than a loose `contains` that would hide tail corruption or drops.
+    fn assert_recovers(v: ThorVariant, msg: &str, got: &str, ch: &str) {
+        assert!(got.ends_with(msg), "{} {ch} lost the message tail: {got:?}", v.label());
+        assert!(got.len() - msg.len() <= 8, "{} {ch} transient too long: {got:?}", v.label());
+    }
+
     let msg = "CQ DE K1ABC/7";
     for (i, &v) in ThorVariant::all().iter().enumerate() {
         let clean = ThorMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
-        assert!(decode(v, &clean).contains(msg), "{} clean loopback", v.label());
+        assert_recovers(v, msg, &decode(v, &clean), "clean loopback");
 
         // The K=15 modes carry a much longer Viterbi; keep the noise pass to the
         // K=7 family to bound test time (still the whole low-speed grid).
@@ -936,7 +945,7 @@ fn thor_submode_grid_loopback_and_awgn() {
             let mut noisy = ThorMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
             let mut rng = Rng::new(0x7407 + i as u64);
             add_awgn(&mut noisy, 0.02, &mut rng);
-            assert!(decode(v, &noisy).contains(msg), "{} AWGN loopback", v.label());
+            assert_recovers(v, msg, &decode(v, &noisy), "AWGN loopback");
         }
     }
 }

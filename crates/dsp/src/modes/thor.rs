@@ -24,6 +24,14 @@
 //! refinements of real THOR are deferred (the loopback is the gate, fldigi
 //! cross-decode the `#[ignore]` nightly gate). The picture sub-protocol
 //! (`thor-pic.cxx`) belongs to Phase 15.
+//!
+//! Because preamble detection (fldigi's `preambledetect`/`softflushrx`) is
+//! deferred, the RX has no way to suppress the brief transient the Viterbi +
+//! interleaver emit before the varicode framer locks: on a clean channel the
+//! decoded stream is a short (≤ a few chars), message-independent startup smear
+//! followed by the intact message. fldigi hides this with preamble detection; the
+//! loopback tests assert the message arrives intact at the tail with a bounded
+//! leading transient. Wiring preamble detection here would eliminate the smear.
 
 use crate::fec::conv::{ConvCode, ConvEncoder, StreamingViterbi};
 use crate::fec::interleave::MfskInterleaver;
@@ -235,7 +243,9 @@ fn encode_chars(v: ThorVariant, chars: impl Iterator<Item = u8>, secondary: bool
 fn frame_pad(v: ThorVariant) -> usize {
     // Each idle char is 11 varicode bits → 22 code bits → ~5 symbols; size the
     // pad in characters to cover the traceback (in data bits) plus the size²·depth
-    // interleaver fill, with margin.
+    // interleaver fill, with margin. The formula is a conservative upper bound, not
+    // an exact latency; validated empirically to prime and drain every submode
+    // (including idepth=50 / K=15) by the loopback grid in `tests/kat.rs`.
     let p = v.params();
     let data_bits = v.traceback() + INTERLEAVE_SIZE * INTERLEAVE_SIZE * p.idepth;
     (data_bits / 11) + 8
@@ -379,9 +389,12 @@ impl ThorDemod {
 }
 
 /// A decoded THOR varicode value as a frame. Primary values (`0..=255`) are the
-/// character; secondary values (`0x100..=0x1FF`) are the second-stream text —
-/// both surfaced as text (fldigi routes secondary to a status line; here NUL is
-/// dropped as idle). ref: thor.cxx:438-462 (recvchar).
+/// character; secondary values (`0x100..=0x1FF`) carry fldigi's second live-text
+/// stream, which it routes to a separate status line. We do not emit secondary
+/// text on its own channel this phase (and nothing here transmits it), so a
+/// secondary value would surface only its low byte as text; the `0xB80` decode
+/// floor keeps primary and secondary codewords from colliding. NUL is dropped as
+/// idle. ref: thor.cxx:438-462 (recvchar).
 fn push_char(out: &mut Vec<Frame>, val: u16) {
     let ch = (val & 0xFF) as u8;
     if ch == 0 {
@@ -527,11 +540,31 @@ mod tests {
             .collect()
     }
 
+    /// Assert a loopback recovered `msg`. The streaming demod has no preamble
+    /// detection yet (deferred, like DominoEX's sync — see the module doc), so the
+    /// Viterbi + interleaver startup emits a short, message-independent transient
+    /// before the varicode framer locks; the message then arrives intact at the
+    /// tail. We assert the strong invariants rather than a loose `contains`: the
+    /// decoded stream **ends with** the message (so any dropped/corrupted/truncated
+    /// character fails) **and** the leading transient stays bounded (so a
+    /// regression that grows or garbles it also fails). Empirically the transient
+    /// is ≤5 bytes across every submode; the bound gives a little margin.
+    const MAX_STARTUP_TRANSIENT: usize = 8;
+    fn assert_recovers(v: ThorVariant, msg: &str, got: &str) {
+        assert!(got.ends_with(msg), "submode {} lost the message tail: {got:?}", v.label());
+        let prefix = got.len() - msg.len();
+        assert!(
+            prefix <= MAX_STARTUP_TRANSIENT,
+            "submode {} startup transient too long ({prefix} bytes): {got:?}",
+            v.label()
+        );
+    }
+
     #[test]
     fn loopback_recovers_text_k7_submodes() {
         // The K=7 (low-speed) family, through varicode → FEC → interleave → IFK+
-        // and back. The decoded stream contains the message contiguously (idle
-        // preamble/flush frame it).
+        // and back. The message arrives intact at the tail after a bounded
+        // startup transient (idle preamble/flush frame it).
         let msg = "CQ DE K1ABC/7 2026";
         for &v in &[
             ThorVariant::Micro,
@@ -540,8 +573,7 @@ mod tests {
             ThorVariant::T16,
             ThorVariant::T22,
         ] {
-            let got = loopback(v, msg);
-            assert!(got.contains(msg), "submode {} recovered {got:?}", v.label());
+            assert_recovers(v, msg, &loopback(v, msg));
         }
     }
 
@@ -549,14 +581,12 @@ mod tests {
     fn loopback_recovers_text_k15_submode() {
         // Exercise the K=15 long-constraint-length path end-to-end.
         let msg = "THOR 100 TEST";
-        let got = loopback(ThorVariant::T100, msg);
-        assert!(got.contains(msg), "thor100 recovered {got:?}");
+        assert_recovers(ThorVariant::T100, msg, &loopback(ThorVariant::T100, msg));
     }
 
     #[test]
     fn loopback_recovers_punctuation_and_case() {
         let msg = "The quick brown fox! (73) $5 @ 90%";
-        let got = loopback(ThorVariant::T16, msg);
-        assert!(got.contains(msg), "recovered {got:?}");
+        assert_recovers(ThorVariant::T16, msg, &loopback(ThorVariant::T16, msg));
     }
 }
