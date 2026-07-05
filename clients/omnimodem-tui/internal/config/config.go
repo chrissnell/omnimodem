@@ -53,7 +53,10 @@ func Load() Identity {
 		return id
 	}
 	// Keep the defaults for any field the stored file left blank, so a
-	// half-written config never shows an empty callsign.
+	// half-written config never shows an empty callsign. This also means an
+	// intentionally-cleared callsign reverts to the placeholder on next launch
+	// rather than persisting as empty -- deliberate, since the modes can't build
+	// a valid message without one.
 	if stored.Call != "" {
 		id.Call = stored.Call
 	}
