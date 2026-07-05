@@ -109,7 +109,7 @@ fn framed(text: &str, intlv: Interleave) -> Vec<u8> {
     let d = intlv.depth();
     let mut v = vec![0u8; d];
     v.extend(text.bytes().map(|b| b & 0x7f)); // 7-bit ASCII (mt63.cxx:133)
-    v.extend(std::iter::repeat(0u8).take(flush_tail(intlv)));
+    v.extend(std::iter::repeat_n(0u8, flush_tail(intlv)));
     v
 }
 

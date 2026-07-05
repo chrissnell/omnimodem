@@ -1174,7 +1174,7 @@ fn mt63_encoder_and_txvect_match_fldigi_vector() {
         let (enc_line, tx_line) = mt63_config_lines(cfg);
         let intlv = if cfg.ends_with('l') { Interleave::Long } else { Interleave::Short };
         let bw: u32 =
-            cfg.trim_start_matches("mt63_").trim_end_matches(|c| c == 's' || c == 'l').parse().unwrap();
+            cfg.trim_start_matches("mt63_").trim_end_matches(['s', 'l']).parse().unwrap();
 
         // encoder bits
         let want_enc: Vec<Vec<u8>> = {

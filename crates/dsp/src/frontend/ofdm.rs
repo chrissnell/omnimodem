@@ -326,8 +326,8 @@ fn phase_init(geo: &Mt63Geometry) -> ([i32; DATA_CARRIERS], [i32; DATA_CARRIERS]
     let mut phase_corr = [0i32; DATA_CARRIERS];
     // TxVect init: step/incr quadratic ramp.
     let (mut step, incr, mut p) = (0i32, 1i32, 0i32);
-    for i in 0..DATA_CARRIERS {
-        tx_vect[i] = p;
+    for slot in tx_vect.iter_mut() {
+        *slot = p;
         step += incr;
         p = (p + step) & PHASE_MASK;
     }
@@ -335,8 +335,8 @@ fn phase_init(geo: &Mt63Geometry) -> ([i32; DATA_CARRIERS], [i32; DATA_CARRIERS]
     // SymbolSepar*DataCarrSepar.
     let incr = ((SYMBOL_SEPAR * DATA_CARR_SEPAR) as i32) & PHASE_MASK;
     let mut p = ((SYMBOL_SEPAR as i32) * geo.first_data_carr) & PHASE_MASK;
-    for i in 0..DATA_CARRIERS {
-        phase_corr[i] = p;
+    for slot in phase_corr.iter_mut() {
+        *slot = p;
         p = (p + incr) & PHASE_MASK;
     }
     (tx_vect, phase_corr)
@@ -505,12 +505,12 @@ impl Mt63Modem {
         let (mut pr, mut pi) = ((wk * abs_n0 as f64).cos(), -(wk * abs_n0 as f64).sin());
         let (ec, es) = (wk.cos(), -wk.sin());
         let (mut ar, mut ai) = (0.0f64, 0.0f64);
-        for m in 0..self.win_len {
+        for (m, &wm) in win.iter().enumerate() {
             let idx = local + m;
             if idx >= audio.len() {
                 break;
             }
-            let s = (win[m] * audio[idx]) as f64;
+            let s = (wm * audio[idx]) as f64;
             ar += s * pr;
             ai += s * pi;
             let npr = pr * ec - pi * es;
@@ -553,8 +553,8 @@ impl Mt63Modem {
         let mut out = Vec::new();
         for k in 0..n_sym {
             let mut cur = [Cplx::new(0.0, 0.0); DATA_CARRIERS];
-            for i in 0..DATA_CARRIERS {
-                cur[i] = self.carrier_corr(audio, 0, &win, k * self.sym_len, i);
+            for (i, slot) in cur.iter_mut().enumerate() {
+                *slot = self.carrier_corr(audio, 0, &win, k * self.sym_len, i);
             }
             if let Some(p) = &prev {
                 out.push(dec.process(&Self::soft_from(&cur, p)));
@@ -601,8 +601,8 @@ impl Mt63Rx {
                 break;
             }
             let mut cur = [Cplx::new(0.0, 0.0); DATA_CARRIERS];
-            for i in 0..DATA_CARRIERS {
-                cur[i] = self.modem.carrier_corr(&self.buf, self.abs0, &self.win, k_start, i);
+            for (i, slot) in cur.iter_mut().enumerate() {
+                *slot = self.modem.carrier_corr(&self.buf, self.abs0, &self.win, k_start, i);
             }
             if let Some(p) = &self.prev {
                 out.push(self.dec.process(&Mt63Modem::soft_from(&cur, p)));
@@ -655,7 +655,13 @@ pub static LONG_INTLV_PATT: [i32; DATA_CARRIERS] = [
 /// SymbolShape[512] — MT63 symbol/window shape, transcribed verbatim from
 /// fldigi/src/mt63/symbol.dat (fldigi 4.1.23 @61b97f413): "taken directly from
 /// the MT63ASC code for the EVM56K" — a precomputed shape, not a closed form.
+///
+/// The literals are the reference's `double` values kept verbatim for provenance;
+/// the compiler rounds each to the nearest `f32` (the extra digits change no bit
+/// of the stored value), so the `excessive_precision` lint is silenced rather
+/// than lossily truncating the transcription.
 #[rustfmt::skip]
+#[allow(clippy::excessive_precision)]
 pub static SYMBOL_SHAPE: [f32; SYMBOL_LEN] = [
     -0.00000000f32, 0.00000665f32, 0.00002657f32, 0.00005975f32, 0.00010613f32, 0.00016562f32,
     0.00023810f32, 0.00032341f32, 0.00042134f32, 0.00053162f32, 0.00065389f32, 0.00078773f32,
@@ -822,7 +828,7 @@ mod tests {
         }
     }
     fn bandwidth_for(cfg: &str) -> u32 {
-        cfg.trim_start_matches("mt63_").trim_end_matches(|c| c == 's' || c == 'l').parse().unwrap()
+        cfg.trim_start_matches("mt63_").trim_end_matches(['s', 'l']).parse().unwrap()
     }
 
     /// Bit-exact: the ported `Mt63Encoder` output reproduces fldigi's
@@ -884,7 +890,7 @@ mod tests {
         let d = intlv.depth();
         let mut v = vec![0u8; d];
         v.extend(text.bytes());
-        v.extend(std::iter::repeat(0u8).take(2 * d + 8));
+        v.extend(std::iter::repeat_n(0u8, 2 * d + 8));
         v
     }
 
