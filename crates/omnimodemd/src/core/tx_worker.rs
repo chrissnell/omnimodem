@@ -219,7 +219,7 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             cfg.telemetry.clone(),
             cancel.clone(),
         );
-        let outcome = drive_tx_cycle(cfg.driver.as_mut(), &cfg.sink, pcm, cfg.rate, TX_POLL);
+        let outcome = drive_tx_cycle(cfg.driver.as_mut(), &cfg.sink, pcm, cfg.rate, TX_POLL, &cancel);
         if let Some(h) = tx_spectrum {
             let _ = h.join();
         }
@@ -230,8 +230,10 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             transmit_id: job.transmit_id,
         });
 
+        // `Aborted` (a mode change flushed the burst) and any PTT error both stop
+        // the worker: the core has evicted or is replacing it, so there is nothing
+        // more to send. Only a clean `Done` keeps the drain loop alive.
         if !matches!(outcome, TxCycleOutcome::Done) {
-            // PTT error: stop the worker; the core evicts on the next command.
             break;
         }
     }
@@ -542,6 +544,81 @@ mod tests {
         });
         assert!(backend.played.lock().unwrap().is_empty(), "lease-blocked job played audio");
         worker.shutdown();
+    }
+
+    // Dropping a worker mid-burst (what a mode change does to the old worker)
+    // must stop the transmission promptly — unkey PTT and complete — rather than
+    // playing the queued audio out. This is the cross-mode collision fix: the
+    // old THOR burst has to leave the air before the new mode transmits.
+    #[test]
+    fn dropping_worker_aborts_the_in_flight_burst() {
+        // PSK31 "CQ CQ CQ" is several seconds of airtime; the abort must land far
+        // sooner than that.
+        let backend = FileBackend::from_samples(vec![], 8_000);
+        let sink = backend.open_playback(8_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 8_000,
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Psk {
+                submode: "psk31".into(),
+                center_hz: 1000.0,
+            })
+            .unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
+        });
+        worker
+            .enqueue(TxJob { frame: DspFrame::text("CQ CQ CQ DE NW5W"), transmit_id: TransmitId(1) })
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            // Wait until the burst is on the air (PTT keyed).
+            let mut worker = Some(worker);
+            let mut keyed = false;
+            for _ in 0..200 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    if let TelemetryEvent::PttKeyed { keyed: true, .. } = ev {
+                        keyed = true;
+                    }
+                }
+                if keyed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(keyed, "burst never keyed PTT");
+
+            // Drop the worker mid-burst and time how long until it unkeys.
+            let start = std::time::Instant::now();
+            drop(worker.take());
+            let mut unkeyed = false;
+            for _ in 0..200 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    if let TelemetryEvent::PttKeyed { keyed: false, .. } = ev {
+                        unkeyed = true;
+                    }
+                }
+                if unkeyed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(unkeyed, "dropped worker never unkeyed PTT");
+            assert!(
+                start.elapsed() < Duration::from_millis(500),
+                "abort took {:?}; it must not drain the whole burst",
+                start.elapsed(),
+            );
+        });
     }
 
     #[test]

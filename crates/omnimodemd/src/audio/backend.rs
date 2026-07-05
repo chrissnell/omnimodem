@@ -37,6 +37,11 @@ pub struct PlaybackHandle {
     submitted: Arc<AtomicUsize>,
     drained: Arc<AtomicUsize>,
     pub sample_rate: u32,
+    /// Discards samples buffered in the backend but not yet played, so an
+    /// in-flight transmission can be aborted mid-burst (e.g. on a mode change)
+    /// instead of draining to the DAC. Backends with no discardable buffer
+    /// supply a no-op.
+    flush: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl PlaybackHandle {
@@ -45,8 +50,9 @@ impl PlaybackHandle {
         submitted: Arc<AtomicUsize>,
         drained: Arc<AtomicUsize>,
         sample_rate: u32,
+        flush: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
-        PlaybackHandle { tx, submitted, drained, sample_rate }
+        PlaybackHandle { tx, submitted, drained, sample_rate, flush }
     }
 
     /// Queue samples for playback. Returns the cumulative submitted watermark.
@@ -60,6 +66,16 @@ impl PlaybackHandle {
     /// Cumulative samples the DAC callback has consumed.
     pub fn drained_samples(&self) -> usize {
         self.drained.load(Ordering::Relaxed)
+    }
+
+    /// Abort playback: drop any buffered-but-unplayed samples so the air goes
+    /// quiet promptly, then reconcile the drain watermark to the submitted total.
+    /// The discarded samples never reach the DAC, so counting them as drained
+    /// keeps the cumulative submitted/drained contract intact for the next burst
+    /// (otherwise every later `drive_tx_cycle` would wait out its full timeout).
+    pub fn flush(&self) {
+        (self.flush)();
+        self.drained.store(self.submitted.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 }
 
@@ -105,7 +121,9 @@ impl AudioBackend for NullBackend {
                 d2.fetch_add(buf.len(), Ordering::Relaxed);
             }
         });
-        Ok(PlaybackHandle::new(tx, submitted, drained, self.rate))
+        // Nothing is buffered (the drain thread consumes instantly), so flush
+        // is a no-op beyond the watermark reconcile PlaybackHandle::flush does.
+        Ok(PlaybackHandle::new(tx, submitted, drained, self.rate, Arc::new(|| {})))
     }
 
     fn device_id(&self) -> DeviceId {
