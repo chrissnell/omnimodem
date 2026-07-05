@@ -42,7 +42,9 @@ const (
 	fTx
 	fPtt
 	fMethod
-	fLast = fMethod
+	fRsidTx
+	fRsidRx
+	fLast = fRsidRx
 )
 
 // cfgSig is the persistable slice of the form. It drives change detection so
@@ -55,6 +57,8 @@ type cfgSig struct {
 	txID      string
 	pttID     string
 	methodIdx int
+	rsidTx    bool
+	rsidRx    bool
 }
 
 type configView struct {
@@ -71,6 +75,8 @@ type configView struct {
 	txID      string
 	pttID     string
 	methodIdx int
+	rsidTx    bool // prepend the mode's RSID burst before each TX
+	rsidRx    bool // run the RSID detector over received audio
 	focus     cfgFocus
 	picking   bool   // a device-picker modal is open over the form
 	editing   bool   // the mode-settings modal is open over the form
@@ -130,6 +136,8 @@ func newConfigView(m *Model) *configView {
 		v.txID = cl.txDeviceID
 		v.pttID = cl.pttDeviceID
 		v.methodIdx = methodIdxOf(cl.pttMethod)
+		v.rsidTx = cl.rsidTx
+		v.rsidRx = cl.rsidRx
 	} else {
 		v.name.SetValue(defaultChannelName(m))
 	}
@@ -232,6 +240,8 @@ func (v *configView) sig() cfgSig {
 		txID:      v.txID,
 		pttID:     v.pttID,
 		methodIdx: v.methodIdx,
+		rsidTx:    v.rsidTx,
+		rsidRx:    v.rsidRx,
 	}
 }
 
@@ -307,6 +317,8 @@ func (v *configView) persistAll() tea.Cmd {
 		Name:       v.name.Value(),
 		Mode:       v.modeLabel(),
 		ModeParams: modeParamsFor(v.modeLabel(), modeValsFrom(v.settings)),
+		RsidTx:     v.rsidTx,
+		RsidRx:     v.rsidRx,
 	}
 	audioReq := &pb.ConfigureAudioRequest{
 		Channel: ch, DeviceId: v.rxID, SampleRate: 48000, TxDeviceId: v.txID,
@@ -524,6 +536,10 @@ func (v *configView) cycle(d int) {
 		v.rebuildSettings() // the new mode exposes a different set of settings
 	case fMethod:
 		v.methodIdx = (v.methodIdx + d + len(pttMethods)) % len(pttMethods)
+	case fRsidTx:
+		v.rsidTx = !v.rsidTx // boolean toggle; direction is irrelevant
+	case fRsidRx:
+		v.rsidRx = !v.rsidRx
 	}
 }
 
@@ -538,6 +554,12 @@ func (v *configView) commit() (View, tea.Cmd) {
 		if v.settings != nil && v.settings.HasFields() {
 			v.editing = true
 		}
+	case fRsidTx:
+		v.rsidTx = !v.rsidTx
+		return v, v.maybePersist()
+	case fRsidRx:
+		v.rsidRx = !v.rsidRx
+		return v, v.maybePersist()
 	}
 	return v, nil
 }
@@ -591,6 +613,16 @@ func (v *configView) Render(w, h int) string {
 	b.WriteString(field(fTx, "TX Device", txDeviceLabel(v.txID, v.rxID)) + "\n")
 	b.WriteString(field(fPtt, "PTT Device", chosen(v.pttID)) + "\n")
 	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n\n")
+
+	onOff := func(b bool) string {
+		if b {
+			return ui.Accent.Render("on")
+		}
+		return ui.Dim.Render("off")
+	}
+	b.WriteString(ui.Title.Render("RSID") + "\n")
+	b.WriteString(field(fRsidTx, "TX ident", onOff(v.rsidTx)+"  "+ui.Dim.Render("(space)")) + "\n")
+	b.WriteString(field(fRsidRx, "RX detect", onOff(v.rsidRx)+"  "+ui.Dim.Render("(space)")) + "\n\n")
 
 	b.WriteString(v.saveHint() + "\n")
 
