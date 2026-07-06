@@ -147,6 +147,10 @@ var modes = []modeInfo{
 	{"throbx1", "chat", 0, []modeParam{{"center", 1500}}},
 	{"throbx2", "chat", 0, []modeParam{{"center", 1500}}},
 	{"throbx4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"navtex", "chat", 0, []modeParam{{"center", 1000}}},
+	{"sitorb", "chat", 0, []modeParam{{"center", 1000}}},
+	{"wefax576", "image", 0, []modeParam{{"center", 1900}}},
+	{"wefax288", "image", 0, []modeParam{{"center", 1900}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -250,6 +254,16 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		// The fldigi Throb / ThrobX family: submode label + audio center (1500 Hz).
 		return &pb.ModeParams{Params: &pb.ModeParams_Throb{Throb: &pb.ThrobParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "navtex", "sitorb":
+		// NAVTEX / SITOR-B: submode label + audio center (1000 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Navtex{Navtex: &pb.NavtexParams{
+			Submode: label, CenterHz: float32(get("center", 1000)),
+		}}}
+	case "wefax576", "wefax288":
+		// WEFAX facsimile: submode label + audio carrier (1900 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Wefax{Wefax: &pb.WefaxParams{
+			Submode: label, CenterHz: float32(get("center", 1900)),
 		}}}
 	case "contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
 		"contestia8_125", "contestia8_250", "contestia8_500", "contestia8_1000", "contestia8_2000",
