@@ -74,7 +74,13 @@ pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig
         DeviceId::parse(&req.device_id)
             .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?
     };
-    Ok(PttConfig { device_id, method, invert: req.invert })
+    Ok(PttConfig {
+        device_id,
+        method,
+        invert: req.invert,
+        tx_delay_ms: req.tx_delay_ms,
+        tx_tail_ms: req.tx_tail_ms,
+    })
 }
 
 /// Build a proto `ModemState` from a snapshot.
@@ -98,6 +104,12 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
                 Some(p) => (ptt_device_for_proto(p), ptt_method_to_proto(&p.method) as i32),
                 None => (String::new(), proto::PttMethod::Unspecified as i32),
             };
+            // Surface the per-channel PTT timing so a reopening client preloads
+            // the saved values instead of zeroing them on the next Apply.
+            let (ptt_tx_delay_ms, ptt_tx_tail_ms) = match &c.ptt {
+                Some(p) => (p.tx_delay_ms, p.tx_tail_ms),
+                None => (0, 0),
+            };
             proto::ChannelInfo {
                 channel: c.id.0,
                 name: c.name.clone(),
@@ -107,6 +119,10 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
                 tx_device_id,
                 ptt_device_id,
                 ptt_method,
+                rsid_tx: c.rsid_tx,
+                rsid_rx: c.rsid_rx,
+                ptt_tx_delay_ms,
+                ptt_tx_tail_ms,
             }
         })
         .collect();
@@ -237,6 +253,15 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             bins,
             transmit,
         }),
+        TelemetryEvent::RsidDetected { channel, tag, mode, freq_hz, extended } => {
+            Kind::RsidDetected(proto::RsidDetected {
+                channel: channel.0,
+                tag,
+                mode,
+                freq_hz,
+                extended,
+            })
+        }
     };
     proto::Event { kind: Some(kind) }
 }
@@ -346,6 +371,8 @@ mod tests {
             tx_device_id: tx,
             tx_sample_rate: 0,
             ptt,
+            rsid_tx: false,
+            rsid_rx: false,
         }
     }
 
@@ -356,7 +383,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Serial { by_id: "usb-FTDI-if00".into() },
             method: PttMethod::SerialRts { node: "/dev/ttyUSB0".into() },
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), tx.clone(), Some(ptt))],
@@ -375,7 +402,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Placeholder { tag: "ptt-deviceless".into() },
             method: PttMethod::Vox,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
@@ -396,7 +423,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Placeholder { tag: "BlackHole 2ch".into() },
             method: PttMethod::Vox,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
@@ -415,7 +442,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Serial { by_id: "usb-FTDI-if00".into() },
             method: PttMethod::Vox,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],

@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn noise_stays_squelched() {
-        let mut rng = crate::testutil::Rng::new(0x5170_5B);
+        let mut rng = crate::testutil::Rng::new(0x0051_705B);
         let mut noise = vec![0.0f32; NAVTEX_RATE as usize];
         crate::testutil::add_awgn(&mut noise, 0.3, &mut rng);
         let mut rx = NavtexDemod::new(NavtexVariant::SitorB, CENTER_HZ);

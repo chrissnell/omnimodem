@@ -79,6 +79,13 @@ message ConfigureChannelRequest {
   // When present, its oneof variant selects the mode and its values; `mode` is
   // then ignored. Absent ⇒ the `mode` string is used as-is (backward compatible).
   ModeParams mode_params = 4;
+  // RSID (Reed-Solomon Identifier). When set, the daemon prepends the active
+  // mode's RSID burst ahead of each transmission (`rsid_tx`) and/or runs an RSID
+  // detector over the received audio, surfacing matches as RsidDetected events
+  // (`rsid_rx`). Both default off; proto3 scalars have no presence, so a client
+  // that reconfigures a channel should resend the current values.
+  bool rsid_tx = 5;
+  bool rsid_rx = 6;
 }
 
 // Typed per-mode parameters. The set oneof variant selects the mode.
@@ -96,8 +103,10 @@ message ModeParams {
     ContestiaParams contestia = 10;
     ThorParams thor = 11;
     Mt63Params mt63 = 12;
-    NavtexParams navtex = 13;
-    WefaxParams wefax = 14;
+    IfkpParams ifkp = 13;
+    FsqParams fsq = 14;
+    NavtexParams navtex = 15;
+    WefaxParams wefax = 16;
   }
 }
 
@@ -176,6 +185,26 @@ message Mt63Params {
   float  center_hz = 2; // audio center frequency
 }
 
+// The fldigi IFKP family (ifkp / ifkp-slow / ifkp-fast). 33-tone IFK MFSK with
+// the self-framing IFKP Varicode. `speed` is the mode label; `center_hz` the
+// audio carrier.
+message IfkpParams {
+  string speed = 1;     // ifkp::IfkpSpeed label, e.g. "ifkp-slow"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi FSQ / FSQCALL family (fsq-1.5 / fsq-2 / fsq / fsq-4.5 / fsq-6).
+// 33-tone IFK with a CRC8-keyed directed protocol. `speed` is the mode label;
+// `center_hz` the audio carrier; `mycall` the operator callsign in the directed
+// header; `directed` whether to send the CRC8 directed header + selective-call
+// framing (off ⇒ raw keyboard mode).
+message FsqParams {
+  string speed = 1;     // fsq::FsqSpeed label, e.g. "fsq" (= fsq-3)
+  float  center_hz = 2; // audio center frequency
+  string mycall = 3;    // operator callsign for the directed header
+  bool   directed = 4;  // append the CRC8 directed header + FSQEOT framing
+}
+
 // NAVTEX / SITOR-B: 100-baud FSK maritime broadcast text with CCIR-476 FEC-B.
 message NavtexParams {
   string submode = 1;   // navtex::NavtexVariant label ("navtex" | "sitorb")
@@ -227,6 +256,10 @@ message ChannelInfo {
   string tx_device_id = 6;     // TX (playback) device; empty == same as RX
   string ptt_device_id = 7;    // PTT device; empty when deviceless (None/Vox) or unset
   PttMethod ptt_method = 8;    // configured PTT method (UNSPECIFIED if unset)
+  bool rsid_tx = 9;            // prepend the mode's RSID burst before each TX
+  bool rsid_rx = 10;           // run the RSID detector over received audio
+  uint32 ptt_tx_delay_ms = 11; // per-channel PTT keying lead-in (ms)
+  uint32 ptt_tx_tail_ms = 12;  // per-channel PTT keying tail/hold (ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +281,18 @@ message Event {
     ClockOffset clock_offset = 11;      // LOSSY
     ChannelMetrics channel_metrics = 12; // LOSSY
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
+    RsidDetected rsid_detected = 14;     // LOSSY class
   }
+}
+
+// A received RSID burst was identified. LOSSY class — advisory, the operator
+// (or a client auto-switch) acts on the identified mode + audio offset.
+message RsidDetected {
+  uint32 channel   = 1;
+  string tag       = 2;   // fldigi RSID tag, always known (e.g. "MFSK16")
+  string mode      = 3;   // omnimodem mode string, empty if the mode is unported
+  float  freq_hz   = 4;   // detected audio offset of the burst
+  bool   extended  = 5;   // true: from the extended (ESCAPE-prefixed) table
 }
 
 // One waterfall line: a magnitude spectrum over the channel's audio passband.
@@ -366,6 +410,13 @@ message ConfigurePttRequest {
   string node = 4;            // resolved node / chip path (serial/cm108/gpio)
   uint32 pin_or_line = 5;     // cm108 GPIO pin (1-8) or gpiochip line offset
   bool invert = 6;
+  // Per-channel PTT keying timing. TX delay is a keyed-but-silent lead-in
+  // before audio starts (lets the rig's PTT close); TX tail holds the key
+  // asserted after audio drains before releasing. Both apply to every mode
+  // on this channel. A full ConfigurePtt replaces the binding, so clients
+  // should always send the current values (0 is a valid explicit setting).
+  uint32 tx_delay_ms = 7;
+  uint32 tx_tail_ms = 8;
 }
 
 message ConfigurePttResponse {}

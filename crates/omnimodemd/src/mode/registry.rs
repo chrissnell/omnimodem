@@ -9,10 +9,12 @@ use omnimodem_dsp::modes::{
     contestia::{ContestiaDemod, ContestiaMod},
     cw::{CwDemod, CwMod},
     dominoex::{DominoDemod, DominoMod, DominoVariant},
+    fsq::{FsqDemod, FsqMod, FsqSpeed},
     fst4::{Fst4Demod, Fst4Mod},
     ft4::{Ft4Demod, Ft4Mod},
     ft8::{Ft8Demod, Ft8Mod},
     hell::{HellDemod, HellMod, HellVariant},
+    ifkp::{IfkpDemod, IfkpMod, IfkpSpeed},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     mfsk::{MfskDemod, MfskMod, MfskVariant},
@@ -65,6 +67,14 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Thor { submode, center_hz } => {
             let v = ThorVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(ThorDemod::new(v, *center_hz)))
+        }
+        ModeConfig::Ifkp { speed, center_hz } => {
+            let s = IfkpSpeed::from_label(speed).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(IfkpDemod::new(s, *center_hz)))
+        }
+        ModeConfig::Fsq { speed, center_hz, mycall, .. } => {
+            let s = FsqSpeed::from_label(speed).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(FsqDemod::new(s, *center_hz, mycall.clone())))
         }
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
@@ -132,6 +142,14 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Thor { submode, center_hz } => {
             let v = ThorVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(ThorMod::new(v, *center_hz)))
+        }
+        ModeConfig::Ifkp { speed, center_hz } => {
+            let s = IfkpSpeed::from_label(speed).expect("validated by ModeConfig::parse");
+            Some(Box::new(IfkpMod::new(s, *center_hz)))
+        }
+        ModeConfig::Fsq { speed, center_hz, mycall, directed } => {
+            let s = FsqSpeed::from_label(speed).expect("validated by ModeConfig::parse");
+            Some(Box::new(FsqMod::new(s, *center_hz, mycall.clone(), *directed)))
         }
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
@@ -249,6 +267,43 @@ mod tests {
         assert_eq!(
             native_rate(&ModeConfig::DominoEx { submode: "dominoex22".into(), center_hz: 1500.0 }),
             Some(11025)
+        );
+    }
+
+    #[test]
+    fn ifkp_family_is_streaming_with_modulators() {
+        for label in ["ifkp", "ifkp-slow", "ifkp-fast"] {
+            let cfg = ModeConfig::parse(label).expect("ifkp parses");
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{label} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), None);
+            assert_eq!(native_rate(&cfg), Some(16000));
+        }
+        assert_eq!(
+            ModeConfig::parse("ifkp"),
+            Some(ModeConfig::Ifkp { speed: "ifkp".into(), center_hz: 1500.0 })
+        );
+    }
+
+    #[test]
+    fn fsq_family_is_streaming_with_modulators() {
+        for label in ["fsq", "fsq-1.5", "fsq-2", "fsq-4.5", "fsq-6"] {
+            let cfg = ModeConfig::parse(label).expect("fsq parses");
+            assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "{label} not streaming");
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), None);
+            assert_eq!(native_rate(&cfg), Some(12000));
+        }
+        // The directed header params parse and round-trip.
+        let cfg = ModeConfig::parse("fsq:mycall=k1abc,directed=true").expect("fsq parses");
+        assert_eq!(
+            cfg,
+            ModeConfig::Fsq {
+                speed: "fsq".into(),
+                center_hz: 1500.0,
+                mycall: "k1abc".into(),
+                directed: true,
+            }
         );
     }
 

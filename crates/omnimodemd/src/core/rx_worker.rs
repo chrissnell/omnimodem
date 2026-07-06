@@ -15,6 +15,7 @@ use crate::ids::{ChannelId, DeviceId};
 use crate::metrics::ChannelMetrics;
 use crate::ptt::interlock::RxTxInterlock;
 use omnimodem_dsp::frontend::resample::Resampler;
+use omnimodem_dsp::frontend::rsid::{RsidDetection, RsidDetector};
 use omnimodem_dsp::frontend::spectrum::{half_spectrum_dbfs, SpectrumPlan, SpectrumSetup};
 use omnimodem_dsp::frontend::stft::Stft;
 use omnimodem_dsp::mode::{BlockDemodulator, Demodulator};
@@ -57,6 +58,7 @@ impl RxWorker {
         metrics: SharedMetrics,
         gain: crate::core::AudioGain,
         spectrum: SpectrumControl,
+        rsid_rx: bool,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -67,6 +69,9 @@ impl RxWorker {
             .spawn(move || {
                 let mut resampler =
                     (in_rate != native).then(|| Resampler::new(in_rate, native, 16));
+                // RSID detector tap (built only when enabled); runs over the same
+                // post-gain samples the demod sees, surfacing matches as telemetry.
+                let mut rsid = rsid_rx.then(|| RsidDetector::new(native, 1));
                 let mut tap: Option<SpectrumTap> = None;
                 let mut tap_gen = u64::MAX; // force first reconcile
                 loop {
@@ -91,6 +96,11 @@ impl RxWorker {
                             sync_spectrum_tap(&spectrum, &mut tap, &mut tap_gen, channel, native);
                             if let Some(t) = tap.as_mut() {
                                 t.process(&samples, &telemetry);
+                            }
+                            if let Some(d) = rsid.as_mut() {
+                                for det in d.feed(&samples) {
+                                    emit_rsid(&telemetry, channel, det);
+                                }
                             }
                             let mut produced = false;
                             for f in demod.feed(&samples) {
@@ -140,6 +150,7 @@ impl RxWorker {
         window_s: f32,
         gain: crate::core::AudioGain,
         spectrum: SpectrumControl,
+        rsid_rx: bool,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -151,6 +162,7 @@ impl RxWorker {
             .spawn(move || {
                 let mut resampler =
                     (in_rate != native).then(|| Resampler::new(in_rate, native, 16));
+                let mut rsid = rsid_rx.then(|| RsidDetector::new(native, 1));
                 let mut buf: Vec<Sample> = Vec::with_capacity(win_samples);
                 let mut muted_window = false;
                 let mut tap: Option<SpectrumTap> = None;
@@ -178,6 +190,11 @@ impl RxWorker {
                             sync_spectrum_tap(&spectrum, &mut tap, &mut tap_gen, channel, native);
                             if let (Some(t), false) = (tap.as_mut(), muted) {
                                 t.process(&chunk_samples, &telemetry);
+                            }
+                            if let (Some(d), false) = (rsid.as_mut(), muted) {
+                                for det in d.feed(&chunk_samples) {
+                                    emit_rsid(&telemetry, channel, det);
+                                }
                             }
                             buf.extend_from_slice(&chunk_samples);
                             while buf.len() >= win_samples {
@@ -340,6 +357,17 @@ fn emit(frames: &broadcast::Sender<FrameEvent>, channel: ChannelId, payload: &Fr
     let _ = frames.send(ev);
 }
 
+/// Publish an identified RSID on the lossy telemetry broadcast.
+fn emit_rsid(telemetry: &broadcast::Sender<TelemetryEvent>, channel: ChannelId, det: RsidDetection) {
+    let _ = telemetry.send(TelemetryEvent::RsidDetected {
+        channel,
+        tag: det.tag.to_string(),
+        mode: det.mode.unwrap_or("").to_string(),
+        freq_hz: det.freq_hz,
+        extended: det.extended,
+    });
+}
+
 /// Fold one decoded frame into the shared accumulator: count it good/bad by CRC,
 /// remember the decoder, and absorb whatever signal-quality fields the DSP layer
 /// measured.
@@ -458,6 +486,7 @@ mod tests {
             test_metrics(),
             gain,
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         worker.join();
 
@@ -486,6 +515,7 @@ mod tests {
             test_metrics(),
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         worker.join();
         let observed = *peak.lock().unwrap();
@@ -510,6 +540,7 @@ mod tests {
             test_metrics(),
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         // Worker is blocked in recv_timeout with no data. stop() joins it.
         let start = std::time::Instant::now();
@@ -543,6 +574,7 @@ mod tests {
             test_metrics(),
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         worker.join();
 
@@ -584,6 +616,7 @@ mod tests {
             test_metrics(),
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         worker.join();
         assert!(rx_b.try_recv().is_err(), "muted worker emitted a frame");
@@ -611,6 +644,7 @@ mod tests {
             FT8_WINDOW_S,
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         worker.join();
 
@@ -650,6 +684,7 @@ mod tests {
             metrics.clone(),
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
+            false,
         );
         worker.join();
 
@@ -663,6 +698,71 @@ mod tests {
             }
         }
         assert!(saw, "no ChannelMetrics telemetry emitted");
+    }
+
+    #[test]
+    fn rx_worker_detects_rsid_and_emits_event_when_enabled() {
+        // Replay an RSID burst for MFSK16 at 8 kHz with the detector tap enabled;
+        // the worker must surface a RsidDetected telemetry event with the tag.
+        let burst = omnimodem_dsp::frontend::rsid::burst_for_mode("mfsk16", 1500.0, 8_000).unwrap();
+        let mut audio = vec![0.0f32; 800];
+        audio.extend_from_slice(&burst);
+        audio.extend(std::iter::repeat_n(0.0, 800));
+        let backend = FileBackend::from_samples(to_i16(&audio), 8_000);
+        let capture = backend.open_capture(8_000).unwrap();
+
+        let (tele_tx, mut tele_rx) = broadcast::channel(256);
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(5),
+            DeviceId::placeholder(),
+            capture,
+            // The demod itself is irrelevant to the RSID tap; use a passthrough.
+            Box::new(PeakRecordingDemod { rate: 8_000, peak: Arc::new(Mutex::new(0.0)) }),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+            tele_tx,
+            test_metrics(),
+            crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
+            true, // rsid_rx enabled
+        );
+        worker.join();
+
+        let mut saw = None;
+        while let Ok(ev) = tele_rx.try_recv() {
+            if let TelemetryEvent::RsidDetected { channel, tag, mode, .. } = ev {
+                if channel == ChannelId(5) {
+                    saw = Some((tag, mode));
+                }
+            }
+        }
+        assert_eq!(saw, Some(("MFSK16".to_string(), "mfsk16".to_string())));
+    }
+
+    #[test]
+    fn rx_worker_no_rsid_event_when_disabled() {
+        // Same burst, detector tap OFF: no RsidDetected event may appear.
+        let burst = omnimodem_dsp::frontend::rsid::burst_for_mode("mfsk16", 1500.0, 8_000).unwrap();
+        let backend = FileBackend::from_samples(to_i16(&burst), 8_000);
+        let capture = backend.open_capture(8_000).unwrap();
+        let (tele_tx, mut tele_rx) = broadcast::channel(256);
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(6),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(PeakRecordingDemod { rate: 8_000, peak: Arc::new(Mutex::new(0.0)) }),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+            tele_tx,
+            test_metrics(),
+            crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
+            false, // rsid_rx disabled
+        );
+        worker.join();
+        let any_rsid = std::iter::from_fn(|| tele_rx.try_recv().ok())
+            .any(|ev| matches!(ev, TelemetryEvent::RsidDetected { .. }));
+        assert!(!any_rsid, "RSID event emitted while detector disabled");
     }
 
     #[test]
@@ -700,6 +800,7 @@ mod tests {
             test_metrics(),
             crate::core::AudioGain::default(),
             spectrum,
+            false,
         );
         worker.join();
 

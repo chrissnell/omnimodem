@@ -83,6 +83,19 @@ var modes = []modeInfo{
 	{"thor50x1", "chat", 0, []modeParam{{"center", 1500}}},
 	{"thor50x2", "chat", 0, []modeParam{{"center", 1500}}},
 	{"thor100", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi IFKP family: 33-tone IFK with the self-framing IFKP Varicode.
+	{"ifkp", "chat", 0, []modeParam{{"center", 1500}}},
+	{"ifkp-slow", "chat", 0, []modeParam{{"center", 1500}}},
+	{"ifkp-fast", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi FSQ / FSQCALL family: 33-tone IFK with a CRC8-keyed directed
+	// protocol. `directed` (0/1) keys the selective-call header; the operator
+	// callsign is taken from the station identity. Directed traffic surfaces in
+	// the chat view.
+	{"fsq", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-1.5", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-2", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-4.5", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-6", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
 	{"feldhell", "image", 0, []modeParam{{"center", 1500}}},
 	{"slowhell", "image", 0, []modeParam{{"center", 1500}}},
 	{"hellx5", "image", 0, []modeParam{{"center", 1500}}},
@@ -206,6 +219,18 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		// The fldigi Feld Hell facsimile family: submode label + audio center.
 		return &pb.ModeParams{Params: &pb.ModeParams_Hell{Hell: &pb.HellParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "ifkp", "ifkp-slow", "ifkp-fast":
+		// The fldigi IFKP family: speed label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Ifkp{Ifkp: &pb.IfkpParams{
+			Speed: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "fsq", "fsq-1.5", "fsq-2", "fsq-4.5", "fsq-6":
+		// The fldigi FSQ / FSQCALL family: speed label + audio center + directed
+		// flag. `mycall` is injected from the station identity at the call site
+		// (persistAll), since it is not a numeric setting.
+		return &pb.ModeParams{Params: &pb.ModeParams_Fsq{Fsq: &pb.FsqParams{
+			Speed: label, CenterHz: float32(get("center", 1500)), Directed: get("directed", 0) != 0,
 		}}}
 	case "mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
 		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l":

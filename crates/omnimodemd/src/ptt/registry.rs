@@ -7,14 +7,27 @@ use super::{PttDriver, PttError};
 use crate::ids::DeviceId;
 use std::collections::HashMap;
 
+/// Default PTT keying lead-in / tail applied to a new binding when the client
+/// does not specify otherwise. Gives most rigs time to key before audio and a
+/// short hold before releasing.
+pub const DEFAULT_TX_DELAY_MS: u32 = 300;
+pub const DEFAULT_TX_TAIL_MS: u32 = 50;
+
 /// How a channel's PTT is wired. The `device_id` is the durable key config is
 /// stored under; `node` is the resolved live path (e.g. /dev/ttyUSB0) supplied
 /// by the device cache at build time.
+///
+/// `tx_delay_ms` / `tx_tail_ms` are per-channel PTT keying timing applied to
+/// every mode on the channel: `tx_delay_ms` is a keyed-but-silent lead-in
+/// before audio starts, `tx_tail_ms` holds the key asserted after audio drains
+/// before releasing. Both are honored literally (0 means no wait).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PttConfig {
     pub device_id: DeviceId,
     pub method: PttMethod,
     pub invert: bool,
+    pub tx_delay_ms: u32,
+    pub tx_tail_ms: u32,
 }
 
 /// Supported PTT methods. Non-Linux construction fails closed (`Unsupported`).
@@ -120,7 +133,7 @@ mod tests {
         PttConfig {
             device_id: DeviceId::Serial { by_id: tag.into() },
             method: PttMethod::None,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         }
     }
 

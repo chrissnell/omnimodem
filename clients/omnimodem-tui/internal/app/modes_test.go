@@ -136,6 +136,59 @@ func TestThorModeParams(t *testing.T) {
 	}
 }
 
+// The IFKP family carries its speed label and center through the dedicated
+// IfkpParams oneof, and every speed uses the ragchew "chat" shape.
+func TestIfkpModeParams(t *testing.T) {
+	mp := modeParamsFor("ifkp-slow", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("ifkp-slow must produce typed ModeParams")
+	}
+	p := mp.GetIfkp()
+	if p == nil {
+		t.Fatalf("expected IfkpParams, got %T", mp.GetParams())
+	}
+	if p.GetSpeed() != "ifkp-slow" || p.GetCenterHz() != 1200 {
+		t.Fatalf("ifkp params = %q / %v, want ifkp-slow / 1200", p.GetSpeed(), p.GetCenterHz())
+	}
+	for _, label := range []string{"ifkp", "ifkp-slow", "ifkp-fast"} {
+		mi := modeByLabel(label)
+		if mi == nil || mi.shape != "chat" {
+			t.Fatalf("%s must use the chat shape, got %v", label, mi)
+		}
+		if def := modeParamsFor(label, nil).GetIfkp(); def == nil || def.GetCenterHz() != 1500 {
+			t.Fatalf("%s default center = %v, want 1500", label, def.GetCenterHz())
+		}
+	}
+}
+
+// The FSQ family carries its speed label, center, and directed flag through the
+// dedicated FsqParams oneof; every speed uses the "chat" shape. The mycall is
+// injected from the station identity at persist time, so it is empty here.
+func TestFsqModeParams(t *testing.T) {
+	mp := modeParamsFor("fsq", map[string]float64{"center": 1200, "directed": 1})
+	if mp == nil {
+		t.Fatal("fsq must produce typed ModeParams")
+	}
+	p := mp.GetFsq()
+	if p == nil {
+		t.Fatalf("expected FsqParams, got %T", mp.GetParams())
+	}
+	if p.GetSpeed() != "fsq" || p.GetCenterHz() != 1200 || !p.GetDirected() {
+		t.Fatalf("fsq params = %q / %v / %v, want fsq / 1200 / true",
+			p.GetSpeed(), p.GetCenterHz(), p.GetDirected())
+	}
+	for _, label := range []string{"fsq", "fsq-1.5", "fsq-2", "fsq-4.5", "fsq-6"} {
+		mi := modeByLabel(label)
+		if mi == nil || mi.shape != "chat" {
+			t.Fatalf("%s must use the chat shape, got %v", label, mi)
+		}
+		def := modeParamsFor(label, nil).GetFsq()
+		if def == nil || def.GetCenterHz() != 1500 || def.GetDirected() {
+			t.Fatalf("%s default = %v, want center 1500 / directed false", label, def)
+		}
+	}
+}
+
 // The Feld Hell family carries its submode label and center through the dedicated
 // HellParams oneof, and every submode uses the facsimile "image" shape.
 func TestHellModeParams(t *testing.T) {

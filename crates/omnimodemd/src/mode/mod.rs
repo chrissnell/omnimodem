@@ -26,6 +26,15 @@ pub enum ModeConfig {
     /// (`thor4`/…/`thor100`/`thormicro`), `center_hz` the audio carrier. DominoEX's
     /// IFK+ core with convolutional FEC + interleave + soft decode.
     Thor { submode: String, center_hz: f32 },
+    /// IFKP family (fldigi parity): `speed` is an `ifkp::IfkpSpeed` label (`ifkp`
+    /// / `ifkp-slow` / `ifkp-fast`), `center_hz` the audio carrier. 33-tone IFK
+    /// with the self-framing IFKP Varicode.
+    Ifkp { speed: String, center_hz: f32 },
+    /// FSQ / FSQCALL (fldigi parity): `speed` is an `fsq::FsqSpeed` label
+    /// (`fsq-1.5`/`fsq-2`/`fsq`/`fsq-4.5`/`fsq-6`), `center_hz` the audio carrier,
+    /// `mycall` the operator callsign in the directed header, `directed` whether
+    /// to append the CRC8 directed header + selective-call framing.
+    Fsq { speed: String, center_hz: f32, mycall: String, directed: bool },
     /// Hellschreiber family (fldigi parity): `submode` is a `hell::HellVariant`
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
@@ -102,6 +111,20 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::ifkp::IfkpSpeed::from_label(m).is_some() => {
+                Some(ModeConfig::Ifkp {
+                    speed: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
+            m if omnimodem_dsp::modes::fsq::FsqSpeed::from_label(m).is_some() => {
+                Some(ModeConfig::Fsq {
+                    speed: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                    mycall: kv.get("mycall").map(|s| s.to_string()).unwrap_or_default(),
+                    directed: b("directed"),
+                })
+            }
             m if omnimodem_dsp::modes::hell::HellVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Hell {
                     submode: m.to_string(),
@@ -169,6 +192,10 @@ impl ModeConfig {
             ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Thor { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Ifkp { speed, center_hz } => format!("{speed}:center={center_hz}"),
+            ModeConfig::Fsq { speed, center_hz, mycall, directed } => {
+                format!("{speed}:center={center_hz},mycall={mycall},directed={directed}")
+            }
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
@@ -183,6 +210,57 @@ impl ModeConfig {
             other => other.label().to_string(),
         }
     }
+    /// The RSID table key for this mode — the exact `mode` string an
+    /// `omnimodem_dsp::frontend::rsid` table entry carries — or `None` when the
+    /// mode has no assigned RSID. Used to pick the burst to prepend on TX.
+    pub fn rsid_key(&self) -> Option<String> {
+        match self {
+            ModeConfig::Psk { submode, .. }
+            | ModeConfig::DominoEx { submode, .. }
+            | ModeConfig::Thor { submode, .. }
+            | ModeConfig::Hell { submode, .. }
+            | ModeConfig::Mfsk { submode, .. }
+            | ModeConfig::Mt63 { submode, .. } => Some(submode.clone()),
+            ModeConfig::Cw { .. } => Some("cw".to_string()),
+            ModeConfig::Jt65 => Some("jt65".to_string()),
+            ModeConfig::Contestia { tones, bandwidth_hz } => {
+                Some(format!("contestia{tones}_{bandwidth_hz}"))
+            }
+            ModeConfig::Olivia { tones, bandwidth_hz } => {
+                Some(format!("olivia:tones={tones},bw={bandwidth_hz}"))
+            }
+            ModeConfig::Rtty { baud, .. } => {
+                // Only the three Baudot RTTY shifts fldigi assigns an RSID.
+                if (*baud - 50.0).abs() < 0.5 {
+                    Some("rtty:baud=50,shift=170".to_string())
+                } else if (*baud - 75.0).abs() < 0.5 {
+                    Some("rtty:baud=75,shift=850".to_string())
+                } else if (*baud - 45.45).abs() < 1.0 {
+                    Some("rtty".to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The audio offset (Hz) at which this mode's RSID burst is transmitted —
+    /// the mode's carrier where it has one, else a sensible default.
+    pub fn rsid_center_hz(&self) -> f32 {
+        match self {
+            ModeConfig::Psk { center_hz, .. }
+            | ModeConfig::DominoEx { center_hz, .. }
+            | ModeConfig::Thor { center_hz, .. }
+            | ModeConfig::Hell { center_hz, .. }
+            | ModeConfig::Mfsk { center_hz, .. }
+            | ModeConfig::Mt63 { center_hz, .. }
+            | ModeConfig::Rtty { center_hz, .. } => *center_hz,
+            ModeConfig::Cw { tone_hz, .. } => *tone_hz,
+            _ => 1500.0,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             ModeConfig::None => "none",
@@ -202,6 +280,16 @@ impl ModeConfig {
                 omnimodem_dsp::modes::thor::ThorVariant::from_label(submode)
                     .map(|v| v.label())
                     .unwrap_or("thor")
+            }
+            ModeConfig::Ifkp { speed, .. } => {
+                omnimodem_dsp::modes::ifkp::IfkpSpeed::from_label(speed)
+                    .map(|v| v.label())
+                    .unwrap_or("ifkp")
+            }
+            ModeConfig::Fsq { speed, .. } => {
+                omnimodem_dsp::modes::fsq::FsqSpeed::from_label(speed)
+                    .map(|v| v.label())
+                    .unwrap_or("fsq")
             }
             ModeConfig::Hell { submode, .. } => {
                 omnimodem_dsp::modes::hell::HellVariant::from_label(submode)
@@ -286,6 +374,34 @@ impl omnimodem_dsp::mode::Modulator for NullMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_rsid_mode_string_parses_and_round_trips() {
+        use omnimodem_dsp::frontend::rsid::{TABLE1, TABLE2};
+        // Each RSID ID that maps to an omnimodem mode must resolve via
+        // ModeConfig::parse, and that config's rsid_key must point back at the
+        // same RSID entry — so a detected burst names a mode we can actually run,
+        // and an active mode announces the right RSID on TX.
+        for e in TABLE1.iter().chain(TABLE2.iter()) {
+            let Some(mode) = e.mode else { continue };
+            let cfg = ModeConfig::parse(mode)
+                .unwrap_or_else(|| panic!("RSID {} maps to unparseable mode {mode:?}", e.tag));
+            let key = cfg
+                .rsid_key()
+                .unwrap_or_else(|| panic!("{} ({mode}) has no rsid_key", e.tag));
+            assert_eq!(
+                omnimodem_dsp::frontend::rsid::tx_for_mode(&key)
+                    .map(|tx| match tx {
+                        omnimodem_dsp::frontend::rsid::RsidTx::Primary(c)
+                        | omnimodem_dsp::frontend::rsid::RsidTx::Extended(c) => c,
+                    }),
+                Some(e.code),
+                "rsid_key {key:?} for {} does not round-trip to code {}",
+                e.tag,
+                e.code
+            );
+        }
+    }
 
     #[test]
     fn parse_resolves_phase4_modes_with_defaults() {
@@ -601,6 +717,13 @@ mod tests {
             ModeConfig::Psk { submode: "psk31".into(), center_hz: 1500.0 },
             ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 },
             ModeConfig::Wspr,
+            ModeConfig::Ifkp { speed: "ifkp-slow".into(), center_hz: 1500.0 },
+            ModeConfig::Fsq {
+                speed: "fsq".into(),
+                center_hz: 1500.0,
+                mycall: "k1abc".into(),
+                directed: true,
+            },
         ];
         for c in cases {
             assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c.clone()), "round-trip {c:?}");
