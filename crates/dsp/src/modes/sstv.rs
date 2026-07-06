@@ -373,53 +373,104 @@ pub mod modulator {
         ((v as i32) * (2300 - 1500) / 256 + 1500) as u16
     }
 
-    /// Per-line total scan window `tw` (ms) for the Scottie submodes. ref: Main.cpp:6620-6626
-    /// (`LineSCT(mp, 138.24 / 88.064 / 345.6)`).
-    pub fn scottie_tw(mode: SstvMode) -> Option<f64> {
+    /// The RGB-sequential family kind (Scottie / Martin / SC2), which fixes the per-line
+    /// sync + porch layout and channel order.
+    #[derive(Clone, Copy, PartialEq)]
+    pub enum RgbFamily {
+        Scottie,
+        Martin,
+        Sc2,
+    }
+
+    /// Per-submode RGB-sequential parameters: family, scan window `tw` (ms), and the sync
+    /// pulse length `s` (ms). ref: the TX dispatch Main.cpp:6620-6641.
+    pub fn rgb_params(mode: SstvMode) -> Option<(RgbFamily, f64, f64)> {
+        use RgbFamily::*;
         use SstvMode::*;
-        match mode {
-            Scottie1 => Some(138.24),
-            Scottie2 => Some(88.064),
-            ScottieDx => Some(345.6),
-            _ => None,
-        }
+        Some(match mode {
+            Scottie1 => (Scottie, 138.24, 9.0),
+            Scottie2 => (Scottie, 88.064, 9.0),
+            ScottieDx => (Scottie, 345.6, 9.0),
+            Martin1 => (Martin, 146.432, 4.862),
+            Martin2 => (Martin, 73.216, 4.862),
+            Sc2_180 => (Sc2, 235.0, 5.5437),
+            Sc2_120 => (Sc2, 156.5, 5.52248),
+            Sc2_60 => (Sc2, 78.128, 5.5006),
+            _ => return None,
+        })
+    }
+
+    /// Scan window `tw` (ms) for the wired RGB-sequential submodes; `None` otherwise.
+    pub fn scottie_tw(mode: SstvMode) -> Option<f64> {
+        rgb_params(mode).map(|(_, tw, _)| tw)
     }
 
     // The channel-tag flag bits the reference ORs into the porch/pixel frequency to select
-    // per-channel TX gain in CSSTVMOD::Do. ref: Main.cpp:6173 LineSCT.
+    // per-channel TX gain in CSSTVMOD::Do. ref: Main.cpp LineSCT/LineMRT/LineSC2180.
     const TAG_R: u16 = 0x1000;
     const TAG_G: u16 = 0x2000;
     const TAG_B: u16 = 0x3000;
 
-    /// One Scottie scan line for a 320-pixel row. ref: Main.cpp:6173 `TMmsstv::LineSCT`:
-    /// porch(G) · G · sep(B) · B · sync · sep(R) · R, channels tagged, pixels at `tw/320`.
-    pub fn scottie_line(out: &mut Vec<Symbol>, row: &[Rgb; 320], tw: f64) {
-        let dt = tw / 320.0;
-        out.push(Symbol { freq_hz: 1500 + TAG_G, ms: 1.5 });
-        for p in row.iter() {
-            out.push(Symbol { freq_hz: color_to_freq(p.g) + TAG_G, ms: dt });
-        }
-        out.push(Symbol { freq_hz: 1500 + TAG_B, ms: 1.5 });
-        for p in row.iter() {
-            out.push(Symbol { freq_hz: color_to_freq(p.b) + TAG_B, ms: dt });
-        }
-        out.push(Symbol { freq_hz: 1200, ms: 9.0 });
-        out.push(Symbol { freq_hz: 1500 + TAG_R, ms: 1.5 });
-        for p in row.iter() {
-            out.push(Symbol { freq_hz: color_to_freq(p.r) + TAG_R, ms: dt });
+    fn pixels(out: &mut Vec<Symbol>, vals: impl Iterator<Item = u8>, tag: u16, dt: f64) {
+        for v in vals {
+            out.push(Symbol { freq_hz: color_to_freq(v) + tag, ms: dt });
         }
     }
 
-    /// Full Scottie transmission: VIS header, then one `scottie_line` per image row, then the
-    /// Scottie leading 1200 Hz/9 ms sync (ref: Main.cpp:7124). `rows` supplies each scan
-    /// line's 320 pixels. Bit-exact against the golden harness symbol digest.
-    pub fn scottie_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
-        let tw = scottie_tw(mode)?;
-        let mut out = header(mode);
-        for row in rows {
-            scottie_line(&mut out, row, tw);
-        }
+    /// One Scottie scan line. ref: Main.cpp:6173 `LineSCT`:
+    /// porch(G)·G·sep(B)·B·sync·sep(R)·R, pixels at `tw/320`.
+    pub fn scottie_line(out: &mut Vec<Symbol>, row: &[Rgb; 320], tw: f64) {
+        let dt = tw / 320.0;
+        out.push(Symbol { freq_hz: 1500 + TAG_G, ms: 1.5 });
+        pixels(out, row.iter().map(|p| p.g), TAG_G, dt);
+        out.push(Symbol { freq_hz: 1500 + TAG_B, ms: 1.5 });
+        pixels(out, row.iter().map(|p| p.b), TAG_B, dt);
         out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        out.push(Symbol { freq_hz: 1500 + TAG_R, ms: 1.5 });
+        pixels(out, row.iter().map(|p| p.r), TAG_R, dt);
+    }
+
+    /// One Martin scan line. ref: Main.cpp:6195 `LineMRT`:
+    /// sync·porch(G)·G·porch(B)·B·porch(R)·R·porch, pixels at `tw/320`.
+    pub fn martin_line(out: &mut Vec<Symbol>, row: &[Rgb; 320], tw: f64) {
+        let dt = tw / 320.0;
+        out.push(Symbol { freq_hz: 1200, ms: 4.862 });
+        out.push(Symbol { freq_hz: 1500 + TAG_G, ms: 0.572 });
+        pixels(out, row.iter().map(|p| p.g), TAG_G, dt);
+        out.push(Symbol { freq_hz: 1500 + TAG_B, ms: 0.572 });
+        pixels(out, row.iter().map(|p| p.b), TAG_B, dt);
+        out.push(Symbol { freq_hz: 1500 + TAG_R, ms: 0.572 });
+        pixels(out, row.iter().map(|p| p.r), TAG_R, dt);
+        out.push(Symbol { freq_hz: 1500, ms: 0.572 });
+    }
+
+    /// One SC2 scan line. ref: Main.cpp:6218 `LineSC2180`:
+    /// sync(S)·porch(R)·R·G·B (no inter-channel porches), pixels at `tw/320`.
+    pub fn sc2_line(out: &mut Vec<Symbol>, row: &[Rgb; 320], s: f64, tw: f64) {
+        let dt = tw / 320.0;
+        out.push(Symbol { freq_hz: 1200, ms: s });
+        out.push(Symbol { freq_hz: 1500 + TAG_R, ms: 0.5 });
+        pixels(out, row.iter().map(|p| p.r), TAG_R, dt);
+        pixels(out, row.iter().map(|p| p.g), TAG_G, dt);
+        pixels(out, row.iter().map(|p| p.b), TAG_B, dt);
+    }
+
+    /// Full RGB-sequential transmission: VIS header, the Scottie leading 1200/9 sync (ref:
+    /// Main.cpp:7124; Scottie only), then one scan line per image row. Bit-exact against the
+    /// golden harness symbol digest.
+    pub fn rgb_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
+        let (fam, tw, s) = rgb_params(mode)?;
+        let mut out = header(mode);
+        if fam == RgbFamily::Scottie {
+            out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        }
+        for row in rows {
+            match fam {
+                RgbFamily::Scottie => scottie_line(&mut out, row, tw),
+                RgbFamily::Martin => martin_line(&mut out, row, tw),
+                RgbFamily::Sc2 => sc2_line(&mut out, row, s, tw),
+            }
+        }
         Some(out)
     }
 
@@ -539,14 +590,15 @@ pub mod audio {
     }
 }
 
-/// Scottie RX line reconstruction (plan T5, RGB-sequential family). Runs the FM
-/// discriminator, locates the 1200 Hz line-sync pulses, and samples the R/G/B channels at
-/// their emission offsets from the sync (ref: RX geometry Main.cpp:3800-3855; TX layout
-/// Main.cpp:6173). Scottie has no colour-difference math — each channel maps directly via
-/// the inverse of `ColorToFreq`. Sync-anchored so the discriminator group delay cancels.
-pub mod demod_scottie {
+/// RGB-sequential RX line reconstruction (plan T5) for the Scottie / Martin / SC2 families.
+/// Runs the FM discriminator, locates the 1200 Hz line-sync pulses, and samples the R/G/B
+/// channels at their per-family emission offsets from the sync (ref: TX layouts
+/// Main.cpp:6173/6195/6218, RX geometry Main.cpp:3800-3855). These families have no
+/// colour-difference math — each channel maps directly via the inverse of `ColorToFreq`.
+/// Sync-anchored so the discriminator group delay cancels.
+pub mod demod {
     use super::audio::Discriminator;
-    use super::modulator::Rgb;
+    use super::modulator::{rgb_params, Rgb, RgbFamily};
     use super::SAMPLE_RATE;
 
     /// Inverse of `ColorToFreq` (ref: ComLib.cpp:3491): scan frequency → 0–255 luminance.
@@ -602,21 +654,6 @@ pub mod demod_scottie {
         out
     }
 
-    /// Reconstruct one Scottie image row anchored on a line-sync centre. In the `LineSCT`
-    /// emission `[porchG][G][porchB][B][sync][porchR][R]`, G and B precede the sync (same
-    /// line) and R follows it. Offsets are relative to the sync centre (sync spans ±4.5 ms):
-    /// G at −(2·tw+6), B at −(tw+4.5), R at +6, each `tw` ms wide.
-    pub fn decode_line(freq: &[f32], sync_center: usize, tw_ms: f64) -> [Rgb; 320] {
-        let g = sample_channel(freq, sync_center, -(2.0 * tw_ms + 6.0), tw_ms);
-        let b = sample_channel(freq, sync_center, -(tw_ms + 4.5), tw_ms);
-        let r = sample_channel(freq, sync_center, 6.0, tw_ms);
-        let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
-        for (x, px) in row.iter_mut().enumerate() {
-            *px = Rgb { r: r[x], g: g[x], b: b[x] };
-        }
-        row
-    }
-
     /// Total VIS-header duration (ms) for a mode, from its `vis::header` symbols.
     fn header_ms(mode: super::SstvMode) -> f64 {
         super::vis::header(mode).iter().map(|s| s.ms).sum()
@@ -630,25 +667,95 @@ pub mod demod_scottie {
             .min_by_key(|&s| (s as i64 - target).abs())
     }
 
-    /// Decode a full Scottie frame from PCM to a row-major RGB raster (3 bytes/pixel).
+    /// Per-family RX geometry: channel windows (start offset ms, relative to a line-sync
+    /// centre), the line period, the first sync's position, and the minimum sync length to
+    /// detect. Derived from the TX layout of each family.
+    struct Layout {
+        tw: f64,
+        min_sync_ms: f64,
+        period_ms: f64,
+        first_sync_ms: f64,
+        r_off: f64,
+        g_off: f64,
+        b_off: f64,
+    }
+
+    fn layout(mode: super::SstvMode) -> Option<Layout> {
+        let (fam, tw, s) = rgb_params(mode)?;
+        let header = header_ms(mode);
+        Some(match fam {
+            // Sync mid-line (9 ms); G,B precede it, R follows. Leading 9 ms sync after VIS.
+            RgbFamily::Scottie => Layout {
+                tw,
+                min_sync_ms: 6.0,
+                period_ms: 3.0 * tw + 13.5,
+                first_sync_ms: header + 9.0 + 2.0 * tw + 7.5,
+                g_off: -(2.0 * tw + 6.0),
+                b_off: -(tw + 4.5),
+                r_off: 6.0,
+            },
+            // Sync at line start (4.862 ms); porch 0.572; order G,B,R after the sync.
+            RgbFamily::Martin => Layout {
+                tw,
+                min_sync_ms: 3.0,
+                period_ms: 3.0 * tw + 7.15,
+                first_sync_ms: header + 4.862 / 2.0,
+                g_off: 3.003,
+                b_off: tw + 3.575,
+                r_off: 2.0 * tw + 4.147,
+            },
+            // Sync at line start (S ms); porch 0.5; order R,G,B with no inter-channel porch.
+            RgbFamily::Sc2 => Layout {
+                tw,
+                min_sync_ms: 3.5,
+                period_ms: 3.0 * tw + s + 0.5,
+                first_sync_ms: header + s / 2.0,
+                r_off: s / 2.0 + 0.5,
+                g_off: s / 2.0 + 0.5 + tw,
+                b_off: s / 2.0 + 0.5 + 2.0 * tw,
+            },
+        })
+    }
+
+    fn decode_line(freq: &[f32], sync_center: usize, lay: &Layout) -> [Rgb; 320] {
+        let r = sample_channel(freq, sync_center, lay.r_off, lay.tw);
+        let g = sample_channel(freq, sync_center, lay.g_off, lay.tw);
+        let b = sample_channel(freq, sync_center, lay.b_off, lay.tw);
+        let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+        for (x, px) in row.iter_mut().enumerate() {
+            *px = Rgb { r: r[x], g: g[x], b: b[x] };
+        }
+        row
+    }
+
+    // Discriminator FIR group delay in samples ((31-1)/2). The discriminator output lags the
+    // audio by this much, so freq[] positions of true features sit this many samples later
+    // than their audio-timeline predictions; add it to the prediction fallback.
+    const DISC_GROUP_DELAY: i64 = 15;
+
+    /// Decode a full RGB-sequential frame from PCM to a row-major RGB raster (3 bytes/pixel).
     /// Predicts each line sync from the header + line period and snaps to the nearest
     /// detected sync ("predict & refine", the standard robust SSTV alignment). Returns
     /// `(width, rgb)`; rows beyond the captured audio decode to black.
     pub fn decode_frame(pcm: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
-        let tw = super::modulator::scottie_tw(mode)?;
+        let lay = layout(mode)?;
         let geom = mode.geometry();
         let freq = discriminate(pcm);
-        let all = find_sync_centers(&freq, 6.0);
-        let period = ms_to_samp(3.0 * tw + 13.5);
-        // First line sync ≈ header end (+ Scottie's 9 ms leading sync) + 2·tw porches into
-        // the line (G,B precede the sync), + half the 9 ms sync pulse.
-        let first = ms_to_samp(header_ms(mode) + 9.0) + ms_to_samp(2.0 * tw + 7.5);
+        // Only consider line syncs in the image region: the VIS stop pulse (1200/30 ms) abuts
+        // the first line sync for Martin/SC2, merging into one run whose centre is off — so
+        // reject any detected sync before the header ends and let line 0 fall back to
+        // prediction. ref: the VIS→image transition, Main.cpp:6975-7124.
+        let header_end = ms_to_samp(header_ms(mode)) as i64;
+        let all: Vec<usize> =
+            find_sync_centers(&freq, lay.min_sync_ms).into_iter().filter(|&s| s as i64 >= header_end).collect();
+        let period = ms_to_samp(lay.period_ms);
+        let first = ms_to_samp(lay.first_sync_ms) as i64 + DISC_GROUP_DELAY;
         let win = (period * 0.3) as i64;
         let mut rgb = Vec::with_capacity(geom.width as usize * geom.scan_lines as usize * 3);
         for k in 0..geom.scan_lines as usize {
-            let predicted = first as i64 + (k as f64 * period) as i64;
+            let predicted = first + (k as f64 * period) as i64;
             let sc = nearest(&all, predicted, win).unwrap_or_else(|| predicted.max(0) as usize);
-            for px in decode_line(&freq, sc, tw) {
+            for px in decode_line(&freq, sc, &lay) {
                 rgb.push(px.r);
                 rgb.push(px.g);
                 rgb.push(px.b);
@@ -658,13 +765,14 @@ pub mod demod_scottie {
     }
 }
 
-/// The Scottie family (`smSCT1/2/DX`) as omnimodem `Modulator` + `Demodulator`. TX takes a
+/// The RGB-sequential SSTV families (Scottie `smSCT1/2/DX`, Martin `smMRT1/2`, SC2
+/// `smSC2_180/120/60`) as omnimodem `Modulator` + `Demodulator`. TX takes a
 /// `FramePayload::ImageRgb` picture and renders it; RX buffers the capture and emits the
 /// reconstructed `ImageRgb` raster on flush (facsimile finalises at end-of-transmission,
-/// like Hell). Only Scottie is wired here; the other families reuse this scaffolding.
-pub mod scottie {
-    use super::modulator::{scottie_symbols, Rgb};
-    use super::{audio, demod_scottie, SstvMode, SAMPLE_RATE};
+/// like Hell). The colour-difference families (Robot/PD/MP/MR) get their own decode later.
+pub mod rgb {
+    use super::modulator::{rgb_params, rgb_symbols, Rgb};
+    use super::{audio, demod, SstvMode, SAMPLE_RATE};
     use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
     use crate::types::{Frame, FrameMeta, FramePayload, Sample};
 
@@ -678,24 +786,24 @@ pub mod scottie {
         }
     }
 
-    /// Resolve a label to a Scottie submode, but only the ones wired here
-    /// (`scottie1`/`scottie2`/`scottiedx`) — so the daemon never exposes an
-    /// unimplemented SSTV mode.
+    /// Resolve a label to an RGB-sequential submode, but only the wired ones
+    /// (`scottie1/2/dx`, `martin1/2`, `sc2-180/120/60`) — so the daemon never
+    /// exposes an unimplemented SSTV mode.
     pub fn from_label(s: &str) -> Option<SstvMode> {
         let m = SstvMode::from_label(s)?;
-        super::modulator::scottie_tw(m).map(|_| m)
+        rgb_params(m).map(|_| m)
     }
 
-    /// Scottie transmitter: an RGB picture → SSTV audio.
-    pub struct ScottieMod {
+    /// Transmitter: an RGB picture → SSTV audio.
+    pub struct RgbMod {
         mode: SstvMode,
     }
-    impl ScottieMod {
+    impl RgbMod {
         pub fn new(mode: SstvMode) -> Self {
-            ScottieMod { mode }
+            RgbMod { mode }
         }
     }
-    impl Modulator for ScottieMod {
+    impl Modulator for RgbMod {
         fn caps(&self) -> ModeCaps {
             caps()
         }
@@ -705,7 +813,7 @@ pub mod scottie {
                 _ => return Err(ModError::UnsupportedPayload("sstv needs an rgb image")),
             };
             if width != 320 {
-                return Err(ModError::Encode(format!("scottie needs width 320, got {width}")));
+                return Err(ModError::Encode(format!("sstv needs width 320, got {width}")));
             }
             let scan = self.mode.geometry().scan_lines as usize;
             let n = (rgb.len() / (320 * 3)).min(scan);
@@ -718,23 +826,23 @@ pub mod scottie {
                 }
                 rows.push(row);
             }
-            let syms = scottie_symbols(self.mode, &rows)
-                .ok_or(ModError::Encode("not a scottie submode".into()))?;
+            let syms = rgb_symbols(self.mode, &rows)
+                .ok_or(ModError::Encode("not an RGB-sequential submode".into()))?;
             Ok(audio::render(&syms, 0.5))
         }
     }
 
-    /// Scottie receiver: buffers the capture, emits the reconstructed `ImageRgb` on flush.
-    pub struct ScottieDemod {
+    /// Receiver: buffers the capture, emits the reconstructed `ImageRgb` on flush.
+    pub struct RgbDemod {
         mode: SstvMode,
         buf: Vec<Sample>,
     }
-    impl ScottieDemod {
+    impl RgbDemod {
         pub fn new(mode: SstvMode) -> Self {
-            ScottieDemod { mode, buf: Vec::new() }
+            RgbDemod { mode, buf: Vec::new() }
         }
     }
-    impl Demodulator for ScottieDemod {
+    impl Demodulator for RgbDemod {
         fn caps(&self) -> ModeCaps {
             caps()
         }
@@ -746,7 +854,7 @@ pub mod scottie {
             self.buf.clear();
         }
         fn flush(&mut self) -> Vec<Frame> {
-            let out = demod_scottie::decode_frame(&self.buf, self.mode).map(|(width, rgb)| Frame {
+            let out = demod::decode_frame(&self.buf, self.mode).map(|(width, rgb)| Frame {
                 payload: FramePayload::ImageRgb { width, rgb },
                 meta: FrameMeta { decoder: Some("sstv".into()), crc_ok: true, ..Default::default() },
             });
@@ -759,7 +867,7 @@ pub mod scottie {
 #[cfg(test)]
 mod tests {
     use super::audio::{render, Discriminator};
-    use super::modulator::{color_to_freq, scottie_symbols, symbol_digest, Rgb};
+    use super::modulator::{color_to_freq, rgb_symbols, symbol_digest, Rgb};
     use super::vis::{header, Symbol};
     use super::*;
 
@@ -877,29 +985,30 @@ mod tests {
     }
 
     /// The decisive bit-exact TX gate: the Scottie 1 modulator's FULL symbol stream (VIS +
-    /// 4 colour-bar lines + trailing sync) must hash identically to the golden vector
-    /// produced by the isolated MMSSTV harness (`sstv_scottie1_tx.json`, `symbol_fnv1a`).
+    /// leading sync + 4 colour-bar lines) must hash identically to the golden vector produced
+    /// by the isolated MMSSTV harness (`sstv_scottie1_tx.json`, `symbol_fnv1a`).
     #[test]
     fn scottie1_full_symbol_stream_matches_golden_digest() {
         let row = colorbar_row();
         let rows = [row; 4]; // harness nlines = 4
-        let syms = scottie_symbols(SstvMode::Scottie1, &rows).unwrap();
+        let syms = rgb_symbols(SstvMode::Scottie1, &rows).unwrap();
 
-        // Structure: VIS(13) + 4*(964) + trailing sync(1) = 3870 (harness symbol_count).
+        // Structure: VIS(13) + leading sync(1) + 4*(964) = 3870 (harness symbol_count).
         assert_eq!(syms.len(), 3870);
 
         // Bit-exact digest, matching the harness value in sstv_scottie1_tx.json.
-        const GOLDEN_SYMBOL_FNV1A: u64 = 0x2f8bedaff9db0041;
+        const GOLDEN_SYMBOL_FNV1A: u64 = 0x812e72b7fb4fbac1;
         assert_eq!(symbol_digest(&syms), GOLDEN_SYMBOL_FNV1A);
     }
 
     #[test]
     fn scottie_line_channel_order_and_tags() {
-        // Sanity on the transcribed layout: first line symbol is the green porch (1500+0x2000),
-        // and the sync pulse (1200/9) precedes the red channel.
+        // Sanity on the transcribed layout: after the 13-symbol VIS header and the leading
+        // 1200/9 sync, the first line's first symbol is the green porch (1500+0x2000), and the
+        // 1200/9 sync precedes the red channel.
         let rows = [colorbar_row(); 1];
-        let syms = scottie_symbols(SstvMode::Scottie1, &rows).unwrap();
-        let line0 = &syms[13..]; // after the 13-symbol VIS header
+        let syms = rgb_symbols(SstvMode::Scottie1, &rows).unwrap();
+        let line0 = &syms[14..]; // 13-symbol VIS header + 1 leading sync
         assert_eq!(line0[0], Symbol { freq_hz: 1500 + 0x2000, ms: 1.5 });
         // porch + 320 G + sepB + 320 B = index 642 is the 1200/9 sync.
         assert_eq!(line0[1 + 320 + 1 + 320], Symbol { freq_hz: 1200, ms: 9.0 });
@@ -935,39 +1044,50 @@ mod tests {
         }
     }
 
-    /// End-to-end loopback (plan T5): render a Scottie 1 colour-bar image to audio, then
-    /// recover it through the real RX chain (discriminate → find sync → sample R/G/B). The
-    /// reconstructed bar centres must match the transmitted colours. This exercises the
-    /// audio + sync + pixel-mapping path with no TX timing shared into the decoder.
-    #[test]
-    fn scottie1_audio_loopback_recovers_colorbars() {
-        use super::demod_scottie::{decode_line, discriminate, find_sync_centers};
+    /// End-to-end loopback (plan T5) for an RGB-sequential family: render `n_rows` colour-bar
+    /// lines to audio, recover the full frame through the real RX chain (discriminate → find
+    /// sync → sample R/G/B), and check the 8 bar centres on each decoded row. No TX timing is
+    /// shared into the decoder — it re-derives line positions from the header + line period.
+    fn assert_family_loopback(mode: SstvMode, n_rows: usize) {
         let src = colorbar_row();
-        let rows = [src; 6];
-        let syms = scottie_symbols(SstvMode::Scottie1, &rows).unwrap();
+        let rows = vec![src; n_rows];
+        let syms = rgb_symbols(mode, &rows).unwrap();
         let pcm = render(&syms, 16000.0);
 
-        let freq = discriminate(&pcm);
-        // Per-line 1200 Hz sync is 9 ms; require ≥6 ms to reject VIS's short breaks.
-        let syncs = find_sync_centers(&freq, 6.0);
-        assert!(syncs.len() >= 5, "expected per-line syncs, got {}", syncs.len());
-
-        // Decode a line from a mid-stream sync (well past the VIS header).
-        let sc = syncs[syncs.len() / 2];
-        let got = decode_line(&freq, sc, 138.24);
-
-        // Check the 8 bar centres (avoid edge smear from the discriminator's group delay).
-        // Colour bars are identical on every line, so any line reconstructs the same row.
-        for bar in 0..8 {
-            let x = bar * 40 + 20;
-            let (gr, gg, gb) = (got[x].r, got[x].g, got[x].b);
-            let (er, eg, eb) = (src[x].r, src[x].g, src[x].b);
-            let ok = |g: u8, e: u8| if e >= 128 { g >= 160 } else { g <= 95 };
-            assert!(
-                ok(gr, er) && ok(gg, eg) && ok(gb, eb),
-                "bar {bar} (x={x}): got ({gr},{gg},{gb}) want ~({er},{eg},{eb})"
-            );
+        let (w, out) = super::demod::decode_frame(&pcm, mode).unwrap();
+        assert_eq!(w, 320);
+        let ok = |g: u8, e: u8| if e >= 128 { g >= 160 } else { g <= 95 };
+        for row in 0..n_rows {
+            for bar in 0..8 {
+                let x = bar * 40 + 20;
+                let i = (row * 320 + x) * 3;
+                let (gr, gg, gb) = (out[i], out[i + 1], out[i + 2]);
+                let (er, eg, eb) = (src[x].r, src[x].g, src[x].b);
+                assert!(
+                    ok(gr, er) && ok(gg, eg) && ok(gb, eb),
+                    "{}: row {row} bar {bar}: got ({gr},{gg},{gb}) want ~({er},{eg},{eb})",
+                    mode.label()
+                );
+            }
         }
+    }
+
+    #[test]
+    fn scottie_audio_loopback_recovers_colorbars() {
+        assert_family_loopback(SstvMode::Scottie1, 8);
+        assert_family_loopback(SstvMode::Scottie2, 8);
+    }
+
+    #[test]
+    fn martin_audio_loopback_recovers_colorbars() {
+        assert_family_loopback(SstvMode::Martin1, 8);
+        assert_family_loopback(SstvMode::Martin2, 8);
+    }
+
+    #[test]
+    fn sc2_audio_loopback_recovers_colorbars() {
+        assert_family_loopback(SstvMode::Sc2_180, 8);
+        assert_family_loopback(SstvMode::Sc2_60, 8);
     }
 
     /// Full trait round-trip (T5 emission + the new `ImageRgb` payload): build a colour-bar
@@ -976,7 +1096,7 @@ mod tests {
     /// payload both ways end-to-end.
     #[test]
     fn scottie_modulator_demodulator_imagergb_roundtrip() {
-        use super::scottie::{ScottieDemod, ScottieMod};
+        use super::rgb::{RgbDemod, RgbMod};
         use crate::mode::{Demodulator, Modulator};
         use crate::types::{Frame, FrameMeta, FramePayload};
 
@@ -994,9 +1114,9 @@ mod tests {
             meta: FrameMeta::default(),
         };
 
-        let pcm = ScottieMod::new(SstvMode::Scottie1).modulate(&frame).unwrap();
+        let pcm = RgbMod::new(SstvMode::Scottie1).modulate(&frame).unwrap();
 
-        let mut demod = ScottieDemod::new(SstvMode::Scottie1);
+        let mut demod = RgbDemod::new(SstvMode::Scottie1);
         assert!(demod.feed(&pcm).is_empty(), "facsimile emits on flush, not feed");
         let frames = demod.flush();
         assert_eq!(frames.len(), 1);

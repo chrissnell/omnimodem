@@ -123,8 +123,8 @@ int main() {
     mod.InitTXBuf();
 
     emitVIS(&mod, visCode);
+    if (mode == smSCT1) W(&mod, 1200, 9.0);   // ref: Main.cpp:7124 Scottie leading sync (before line 1)
     for (int ln = 0; ln < nLines; ln++) { lineSCT(&mod, tw); mod.m_wLine++; }
-    if (mode == smSCT1) W(&mod, 1200, 9.0);   // ref: Main.cpp:7124 Scottie leading sync
 
     // Drain the linked tone renderer.
     std::vector<short> pcm;

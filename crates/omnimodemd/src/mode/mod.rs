@@ -31,8 +31,8 @@ pub enum ModeConfig {
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
     Hell { submode: String, center_hz: f32 },
     /// SSTV (MMSSTV parity): analog line-scan picture modes. `submode` is an
-    /// `sstv::SstvMode` label (currently the wired Scottie family:
-    /// `scottie1`/`scottie2`/`scottiedx`). A colour facsimile mode — RX emits an
+    /// `sstv::SstvMode` label (the wired RGB-sequential families: `scottie1/2/dx`,
+    /// `martin1/2`, `sc2-180/120/60`). A colour facsimile mode — RX emits an
     /// `ImageRgb` raster; the on-air frequencies are fixed by the SSTV standard.
     Sstv { submode: String },
     // Phase 5 WSJT-X breadth modes.
@@ -105,7 +105,7 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
-            m if omnimodem_dsp::modes::sstv::scottie::from_label(m).is_some() => {
+            m if omnimodem_dsp::modes::sstv::rgb::from_label(m).is_some() => {
                 Some(ModeConfig::Sstv { submode: m.to_string() })
             }
             m if omnimodem_dsp::modes::mfsk::MfskVariant::from_label(m).is_some() => {
@@ -195,7 +195,7 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("hell")
             }
-            ModeConfig::Sstv { submode } => omnimodem_dsp::modes::sstv::scottie::from_label(submode)
+            ModeConfig::Sstv { submode } => omnimodem_dsp::modes::sstv::rgb::from_label(submode)
                 .map(|v| v.label())
                 .unwrap_or("sstv"),
             ModeConfig::Mfsk { submode, .. } => {
@@ -418,19 +418,19 @@ mod tests {
 
     #[test]
     fn parse_resolves_wired_sstv_family() {
-        // The wired Scottie submodes resolve to a colour facsimile mode.
-        for label in ["scottie1", "scottie2", "scottiedx"] {
+        // The wired RGB-sequential submodes resolve to a colour facsimile mode.
+        for label in ["scottie1", "scottie2", "scottiedx", "martin1", "martin2", "sc2-180", "sc2-120", "sc2-60"] {
             assert_eq!(
                 ModeConfig::parse(label),
                 Some(ModeConfig::Sstv { submode: label.into() })
             );
         }
         // Canonical mode string round-trips.
-        let c = ModeConfig::Sstv { submode: "scottie1".into() };
+        let c = ModeConfig::Sstv { submode: "martin1".into() };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
-        // Unwired SSTV submodes (real modes, not yet ported) are not exposed.
-        assert_eq!(ModeConfig::parse("martin1"), None);
+        // Unwired SSTV submodes (colour-difference families, not yet ported) are not exposed.
         assert_eq!(ModeConfig::parse("robot36"), None);
+        assert_eq!(ModeConfig::parse("pd90"), None);
     }
 
     #[test]
