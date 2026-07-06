@@ -18,6 +18,11 @@ func Frame(title, body string, focused bool, w, h int) string {
 		Foreground(ColorFg).
 		Width(max(1, w-2)).
 		Height(max(1, h-2)).
+		// Cap the whole box (border included) at its allotted height h. For a
+		// correctly-sized body this is a no-op; it only bites if a body overfills,
+		// clipping its bottom rather than expanding the frame past h and scrolling
+		// the screen off the top.
+		MaxHeight(max(1, h)).
 		Padding(0, 1)
 	titled := Title.Background(ColorPanel).Render(" "+title+" ") + "\n" + body
 	return style.Render(titled)

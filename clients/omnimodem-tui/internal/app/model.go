@@ -218,14 +218,24 @@ func (m *Model) View() string {
 	v := m.top()
 	header := ui.Header(m.connected, m.addr, m.version, m.width)
 	footer := ui.Footer(v.Hints(), m.width)
-	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	// The toast is drawn as an extra line below the footer, so it eats into the
+	// body's height budget — otherwise a full-height view (e.g. the picture
+	// picker) plus a live toast renders taller than the terminal and scrolls the
+	// top off. Reserve its rows (the line plus the "\n" separator) up front.
+	var toastLine string
+	toastH := 0
+	if m.toast != nil {
+		toastLine = m.toast.Line()
+		toastH = lipgloss.Height(toastLine) + 1
+	}
+	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - toastH
 	if bodyH < 3 {
 		bodyH = 3
 	}
 	body := ui.Frame(v.Title(), v.Render(m.width-4, bodyH-2), true, m.width, bodyH)
 	out := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
-	if m.toast != nil {
-		out += "\n" + m.toast.Line()
+	if toastH > 0 {
+		out += "\n" + toastLine
 	}
 	return out
 }
