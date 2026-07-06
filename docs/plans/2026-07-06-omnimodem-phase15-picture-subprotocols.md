@@ -242,6 +242,23 @@ choice, luma weights, plane order, preamble, and RX sync FSM differ.
   four sub-protocols, upstream commit `61b97f413`, the shared picture block, the
   colour extension to the image framework, and the KAT/loopback evidence.
 
+## 6b. TUI display of pictures (and SSTV)
+
+Terminals can't blit bitmaps portably, so the picture surfaces render with the
+**Unicode upper-half-block `▀` + 24-bit-colour** technique: one character cell
+stacks two vertical pixels (top → glyph foreground, bottom → background), so a
+cell shows a roughly-square pixel pair and works in any truecolor terminal with
+no sixel/kitty protocol dependency. Implemented as
+`clients/omnimodem-tui/internal/app/renderImageHalfBlock` (`imgrender.go`) —
+nearest-neighbour scale-to-fit, raw ANSI escapes for deterministic output. This
+is distinct from Hell's existing column-scroll raster (`rasterBuf`): a picture /
+SSTV frame is a fixed W×H canvas **filled progressively** as scan lines arrive,
+scaled to the pane, not an infinite horizontal scroll. Sixel/kitty/iTerm2 inline
+images are a possible fidelity upgrade where the terminal advertises support,
+detected at runtime — a follow-up, not required. **SSTV** (GRA-289) reuses the
+same surface: its RGB scan lines land in the `Image` payload and render via the
+same half-block path, updating rows top-to-bottom as the ~8–114 s frame decodes.
+
 ## 7. Wiki
 
 On completion, add a "picture sub-protocols" page pointing future agents at
