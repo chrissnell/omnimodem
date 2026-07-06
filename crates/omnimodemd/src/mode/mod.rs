@@ -26,6 +26,15 @@ pub enum ModeConfig {
     /// (`thor4`/…/`thor100`/`thormicro`), `center_hz` the audio carrier. DominoEX's
     /// IFK+ core with convolutional FEC + interleave + soft decode.
     Thor { submode: String, center_hz: f32 },
+    /// IFKP family (fldigi parity): `speed` is an `ifkp::IfkpSpeed` label (`ifkp`
+    /// / `ifkp-slow` / `ifkp-fast`), `center_hz` the audio carrier. 33-tone IFK
+    /// with the self-framing IFKP Varicode.
+    Ifkp { speed: String, center_hz: f32 },
+    /// FSQ / FSQCALL (fldigi parity): `speed` is an `fsq::FsqSpeed` label
+    /// (`fsq-1.5`/`fsq-2`/`fsq`/`fsq-4.5`/`fsq-6`), `center_hz` the audio carrier,
+    /// `mycall` the operator callsign in the directed header, `directed` whether
+    /// to append the CRC8 directed header + selective-call framing.
+    Fsq { speed: String, center_hz: f32, mycall: String, directed: bool },
     /// Hellschreiber family (fldigi parity): `submode` is a `hell::HellVariant`
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
@@ -94,6 +103,20 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::ifkp::IfkpSpeed::from_label(m).is_some() => {
+                Some(ModeConfig::Ifkp {
+                    speed: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
+            m if omnimodem_dsp::modes::fsq::FsqSpeed::from_label(m).is_some() => {
+                Some(ModeConfig::Fsq {
+                    speed: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                    mycall: kv.get("mycall").map(|s| s.to_string()).unwrap_or_default(),
+                    directed: b("directed"),
+                })
+            }
             m if omnimodem_dsp::modes::hell::HellVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Hell {
                     submode: m.to_string(),
@@ -149,6 +172,10 @@ impl ModeConfig {
             ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Thor { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Ifkp { speed, center_hz } => format!("{speed}:center={center_hz}"),
+            ModeConfig::Fsq { speed, center_hz, mycall, directed } => {
+                format!("{speed}:center={center_hz},mycall={mycall},directed={directed}")
+            }
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
@@ -231,6 +258,16 @@ impl ModeConfig {
                 omnimodem_dsp::modes::thor::ThorVariant::from_label(submode)
                     .map(|v| v.label())
                     .unwrap_or("thor")
+            }
+            ModeConfig::Ifkp { speed, .. } => {
+                omnimodem_dsp::modes::ifkp::IfkpSpeed::from_label(speed)
+                    .map(|v| v.label())
+                    .unwrap_or("ifkp")
+            }
+            ModeConfig::Fsq { speed, .. } => {
+                omnimodem_dsp::modes::fsq::FsqSpeed::from_label(speed)
+                    .map(|v| v.label())
+                    .unwrap_or("fsq")
             }
             ModeConfig::Hell { submode, .. } => {
                 omnimodem_dsp::modes::hell::HellVariant::from_label(submode)
@@ -612,6 +649,13 @@ mod tests {
             ModeConfig::Psk { submode: "psk31".into(), center_hz: 1500.0 },
             ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 },
             ModeConfig::Wspr,
+            ModeConfig::Ifkp { speed: "ifkp-slow".into(), center_hz: 1500.0 },
+            ModeConfig::Fsq {
+                speed: "fsq".into(),
+                center_hz: 1500.0,
+                mycall: "k1abc".into(),
+                directed: true,
+            },
         ];
         for c in cases {
             assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c.clone()), "round-trip {c:?}");
