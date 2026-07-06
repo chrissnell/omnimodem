@@ -14,6 +14,8 @@
 pub mod varicode;
 pub mod dominoex_varicode;
 pub mod thor_varicode;
+pub mod ifkp_varicode;
+pub mod fsq_varicode;
 pub mod hellfont;
 pub mod baudot;
 pub mod morse;
