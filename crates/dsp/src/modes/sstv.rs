@@ -1,0 +1,455 @@
+//! SSTV (Slow-Scan Television): analog FM-subcarrier line-scan picture modes.
+//!
+//! Port of the MMSSTV DSP core (`n5ac/mmsstv`, LGPLv3, upstream commit `8060b5f`).
+//! SSTV is a self-contained analog modem: a VIS header identifies the submode, then
+//! each picture line is an FM-subcarrier scan where pixel luminance maps linearly to
+//! frequency (black 1500 Hz → white 2300 Hz, `ColorToFreq`, ref: ComLib.cpp:3491) with
+//! 1200 Hz sync and 1500 Hz porch/separator pulses. RX output is a raster
+//! (`FramePayload::Image`), never text.
+//!
+//! This module is the *foundation layer* (plan `docs/plans/2026-07-06-omnimodem-sstv.md`,
+//! task groups F1.2 + per-family T2): submode identity, picture geometry, colour model,
+//! and the VIS codec. The modulator (T4), demodulator (T5), sync (F1.3) and colour
+//! reconstruction (F1.4) build on these and are gated against the golden vectors under
+//! `crates/dsp/tests/vectors/sstv_*` produced by the isolated MMSSTV harness
+//! (`scratch/refvectors/build_sstv_{tx,rx}.sh`, which links the *unmodified* reference).
+//!
+//! Native sample rate is 11025 Hz (ref: Main.cpp:212); all reference timing is `ms`.
+//!
+//! Bit-exact domains (Doctrine §3): VIS byte codes, picture geometry, and the decoded
+//! pixel raster. FP-tolerance domain: the modulated audio (VCO + BPF). The VIS + timing
+//! constants here are transcribed verbatim from the reference with `// ref:` cites.
+
+/// Every MMSSTV submode, in the reference's `SSTVModeList[]` order (ref: sstv.cpp:493-503,
+/// enum `sm*` sstv.h:450-495). Parametric families share a decode/colour path; the enum is
+/// the identity used by the registry, TUI, and table-driven KATs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SstvMode {
+    // Robot
+    Robot36, Robot72, Robot24, Bw8, Bw12,
+    // AVT
+    Avt90,
+    // Scottie
+    Scottie1, Scottie2, ScottieDx,
+    // Martin
+    Martin1, Martin2,
+    // SC2
+    Sc2_180, Sc2_120, Sc2_60,
+    // PD
+    Pd50, Pd90, Pd120, Pd160, Pd180, Pd240, Pd290,
+    // Pasokon
+    P3, P5, P7,
+    // MMSSTV MR / ML (extended VIS)
+    Mr73, Mr90, Mr115, Mr140, Mr175,
+    Ml180, Ml240, Ml280, Ml320,
+    // MMSSTV MP (extended VIS)
+    Mp73, Mp115, Mp140, Mp175,
+    // Narrow-band MP-N / MC-N (N-VIS FSK)
+    Mn73, Mn110, Mn140, Mc110, Mc140, Mc180,
+}
+
+/// Colour/line reconstruction family. Determines how the per-line channel samples become
+/// RGB pixels (colour math ref: ComLib.cpp `YCtoRGB`:3475 / `GetRY`:3650).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorModel {
+    /// Sequential RGB channels per line (Scottie, Martin, SC2, MC-narrow, Pasokon P).
+    Rgb,
+    /// Robot colour-difference: Y then alternating R-Y / B-Y (R36/R24), or Y,R-Y,B-Y per
+    /// line (R72). ref: Main.cpp:3856-3947.
+    RobotColor,
+    /// PD/MP colour-difference: Y(odd), R-Y, B-Y, Y(even) — two picture rows per scan.
+    /// ref: Main.cpp:3948-4011.
+    PdColor,
+    /// MR/ML colour-difference: Y full-width + horizontally-compressed R-Y/B-Y.
+    MrColor,
+    /// Monochrome luminance only (B/W 8, B/W 12). ref: sstv.cpp:1015-1035.
+    Mono,
+    /// AVT 90: colour-difference with no sync pulses (special framing). ref: sstv.cpp:681-690.
+    Avt,
+}
+
+/// The VIS identifier form for a submode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vis {
+    /// Classic 8-bit VIS (LSB-first tone bits, 1=1100 Hz / 0=1300 Hz). ref: Main.cpp:6987-7092.
+    Standard(u8),
+    /// MMSSTV 16-bit extended VIS; low byte is the `0x23` marker (ref: mode.txt §1, RX
+    /// sstv.cpp:1993-2122). Sent as 16 LSB-first tone bits.
+    Extended(u16),
+    /// Narrow-band N-VIS: 24-bit FSK, 6-bit symbols (1=1900 Hz / 0=2100 Hz). The byte here
+    /// is the mode's N-VIS value `D2`; the full frame is `101101 010101 D2 (010101^D2)`.
+    /// ref: mode.txt §7, Main.cpp:6946-6969.
+    Narrow(u8),
+}
+
+/// Picture geometry: on-air pixels per line, displayed picture rows, and the number of
+/// transmitted scan lines (`m_L`). For PD/MP families two picture rows are produced per
+/// scan, so `rows == 2 * scan_lines` there. ref: sstv.cpp `GetBitmapSize`:607 /
+/// `GetPictureSize`:638 and the per-mode `m_L` in `SetSampFreq`:655-1161.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Geometry {
+    pub width: u16,
+    pub rows: u16,
+    pub scan_lines: u16,
+}
+
+impl SstvMode {
+    /// The VIS identifier. Table transcribed verbatim from Main.cpp:6987-7092 (standard +
+    /// extended) and the N-VIS switch Main.cpp:6946-6969 / mode.txt §4-7 (narrow).
+    pub fn vis(self) -> Vis {
+        use SstvMode::*;
+        use Vis::*;
+        match self {
+            Robot36 => Standard(0x88),
+            Robot72 => Standard(0x0c),
+            Robot24 => Standard(0x84),
+            Bw8 => Standard(0x82),
+            Bw12 => Standard(0x86),
+            Avt90 => Standard(0x44),
+            Scottie1 => Standard(0x3c),
+            Scottie2 => Standard(0xb8),
+            ScottieDx => Standard(0xcc),
+            Martin1 => Standard(0xac),
+            Martin2 => Standard(0x28),
+            Sc2_180 => Standard(0xb7),
+            Sc2_120 => Standard(0x3f),
+            Sc2_60 => Standard(0xbb),
+            Pd50 => Standard(0xdd),
+            Pd90 => Standard(0x63),
+            Pd120 => Standard(0x5f),
+            Pd160 => Standard(0xe2),
+            Pd180 => Standard(0x60),
+            Pd240 => Standard(0xe1),
+            Pd290 => Standard(0xde),
+            P3 => Standard(0x71),
+            P5 => Standard(0x72),
+            P7 => Standard(0xf3),
+            Mr73 => Extended(0x4523),
+            Mr90 => Extended(0x4623),
+            Mr115 => Extended(0x4923),
+            Mr140 => Extended(0x4a23),
+            Mr175 => Extended(0x4c23),
+            Ml180 => Extended(0x8523),
+            Ml240 => Extended(0x8623),
+            Ml280 => Extended(0x8923),
+            Ml320 => Extended(0x8a23),
+            Mp73 => Extended(0x2523),
+            Mp115 => Extended(0x2923),
+            Mp140 => Extended(0x2a23),
+            Mp175 => Extended(0x2c23),
+            Mn73 => Narrow(0x02),
+            Mn110 => Narrow(0x04),
+            Mn140 => Narrow(0x05),
+            Mc110 => Narrow(0x14),
+            Mc140 => Narrow(0x15),
+            Mc180 => Narrow(0x16),
+        }
+    }
+
+    /// Colour/line family. ref: the per-mode reconstruction switch Main.cpp:3800-4011.
+    pub fn color_model(self) -> ColorModel {
+        use ColorModel::*;
+        use SstvMode::*;
+        match self {
+            Scottie1 | Scottie2 | ScottieDx | Martin1 | Martin2
+            | Sc2_180 | Sc2_120 | Sc2_60 | P3 | P5 | P7
+            | Mc110 | Mc140 | Mc180 => Rgb,
+            Robot36 | Robot72 | Robot24 => RobotColor,
+            Pd50 | Pd90 | Pd120 | Pd160 | Pd180 | Pd240 | Pd290
+            | Mp73 | Mp115 | Mp140 | Mp175
+            | Mn73 | Mn110 | Mn140 => PdColor,
+            Mr73 | Mr90 | Mr115 | Mr140 | Mr175
+            | Ml180 | Ml240 | Ml280 | Ml320 => MrColor,
+            Bw8 | Bw12 => Mono,
+            Avt90 => Avt,
+        }
+    }
+
+    /// Picture geometry. ref: sstv.cpp `GetBitmapSize`:607-635, `GetPictureSize`:638-653,
+    /// and per-mode `m_L` in `SetSampFreq`.
+    pub fn geometry(self) -> Geometry {
+        use SstvMode::*;
+        let g = |width: u16, rows: u16, scan_lines: u16| Geometry { width, rows, scan_lines };
+        match self {
+            // Robot colour: picture height hp=240 (GetPictureSize), m_L scan lines.
+            Robot36 | Robot72 | Avt90 => g(320, 240, 240),
+            Robot24 => g(320, 240, 120),
+            Bw8 | Bw12 => g(320, 240, 120),
+            // Scottie / Martin / SC2: 320x256, 256 lines.
+            Scottie1 | Scottie2 | ScottieDx | Martin1 | Martin2
+            | Sc2_180 | Sc2_120 | Sc2_60 => g(320, 256, 256),
+            // PD: two picture rows per scan (m_L scans → 2*m_L rows).
+            Pd50 => g(320, 256, 128),
+            Pd90 => g(320, 256, 128),
+            Pd120 => g(640, 496, 248),
+            Pd160 => g(512, 400, 200),
+            Pd180 => g(640, 496, 248),
+            Pd240 => g(640, 496, 248),
+            Pd290 => g(800, 616, 308),
+            // Pasokon P: 640x496, 496 lines.
+            P3 | P5 | P7 => g(640, 496, 496),
+            // MMSSTV MR (320x256) / ML (640x496).
+            Mr73 | Mr90 | Mr115 | Mr140 | Mr175 => g(320, 256, 256),
+            Ml180 | Ml240 | Ml280 | Ml320 => g(640, 496, 496),
+            // MMSSTV MP: 320x256, two rows/scan (128 scans).
+            Mp73 | Mp115 | Mp140 | Mp175 => g(320, 256, 128),
+            // Narrow MP-N (two rows/scan, 128 scans) / MC-N (256 lines).
+            Mn73 | Mn110 | Mn140 => g(320, 256, 128),
+            Mc110 | Mc140 | Mc180 => g(320, 256, 256),
+        }
+    }
+
+    /// Whether this is a narrow-band mode (2044–2300 Hz scan, N-VIS). ref: sstv.cpp
+    /// `IsNarrowMode`:550-563.
+    pub fn is_narrow(self) -> bool {
+        matches!(self.vis(), Vis::Narrow(_))
+    }
+
+    /// Stable lowercase label used by the registry, TUI and CLI.
+    pub fn label(self) -> &'static str {
+        use SstvMode::*;
+        match self {
+            Robot36 => "robot36", Robot72 => "robot72", Robot24 => "robot24",
+            Bw8 => "bw8", Bw12 => "bw12", Avt90 => "avt90",
+            Scottie1 => "scottie1", Scottie2 => "scottie2", ScottieDx => "scottiedx",
+            Martin1 => "martin1", Martin2 => "martin2",
+            Sc2_180 => "sc2-180", Sc2_120 => "sc2-120", Sc2_60 => "sc2-60",
+            Pd50 => "pd50", Pd90 => "pd90", Pd120 => "pd120", Pd160 => "pd160",
+            Pd180 => "pd180", Pd240 => "pd240", Pd290 => "pd290",
+            P3 => "p3", P5 => "p5", P7 => "p7",
+            Mr73 => "mr73", Mr90 => "mr90", Mr115 => "mr115", Mr140 => "mr140", Mr175 => "mr175",
+            Ml180 => "ml180", Ml240 => "ml240", Ml280 => "ml280", Ml320 => "ml320",
+            Mp73 => "mp73", Mp115 => "mp115", Mp140 => "mp140", Mp175 => "mp175",
+            Mn73 => "mp73-n", Mn110 => "mp110-n", Mn140 => "mp140-n",
+            Mc110 => "mc110-n", Mc140 => "mc140-n", Mc180 => "mc180-n",
+        }
+    }
+
+    pub fn from_label(s: &str) -> Option<SstvMode> {
+        SstvMode::all().iter().copied().find(|m| m.label() == s)
+    }
+
+    /// Every ported submode, for table-driven tests, the registry and the TUI.
+    pub fn all() -> &'static [SstvMode] {
+        use SstvMode::*;
+        &[
+            Robot36, Robot72, Robot24, Bw8, Bw12, Avt90,
+            Scottie1, Scottie2, ScottieDx, Martin1, Martin2,
+            Sc2_180, Sc2_120, Sc2_60,
+            Pd50, Pd90, Pd120, Pd160, Pd180, Pd240, Pd290,
+            P3, P5, P7,
+            Mr73, Mr90, Mr115, Mr140, Mr175,
+            Ml180, Ml240, Ml280, Ml320,
+            Mp73, Mp115, Mp140, Mp175,
+            Mn73, Mn110, Mn140, Mc110, Mc140, Mc180,
+        ]
+    }
+}
+
+/// The VIS codec (plan F1.2): the tone/timing sequence that frames a submode's identity
+/// on the wire, and its inverse. A "symbol" is one `(freq_hz, ms)` write, matching the
+/// reference `CSSTVMOD::Write(fq, ms)` domain — this is a **bit-exact** stage.
+pub mod vis {
+    use super::{SstvMode, Vis};
+
+    /// One transmit symbol: hold `freq_hz` for `ms` milliseconds.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Symbol {
+        pub freq_hz: u16,
+        pub ms: f64,
+    }
+    const fn sym(freq_hz: u16, ms: f64) -> Symbol {
+        Symbol { freq_hz, ms }
+    }
+
+    // Standard/extended VIS tones (ref: Main.cpp:7098-7104).
+    const BIT1_HZ: u16 = 1100;
+    const BIT0_HZ: u16 = 1300;
+    // N-VIS FSK tones (ref: mode.txt §7).
+    const NVIS1_HZ: u16 = 1900;
+    const NVIS0_HZ: u16 = 2100;
+
+    /// The standard leader + VIS-bit sequence for a submode's VIS header, as the exact
+    /// `(freq, ms)` writes the reference emits (ref: Main.cpp:6940-7107). Narrow modes use
+    /// the 24-bit N-VIS FSK framing instead (ref: mode.txt §7 / Main.cpp:6936-6970).
+    pub fn header(mode: SstvMode) -> Vec<Symbol> {
+        let mut out = Vec::new();
+        match mode.vis() {
+            Vis::Standard(byte) => {
+                push_leader(&mut out);
+                push_bits(&mut out, byte as u32, 8);
+                out.push(sym(1200, 30.0)); // stop
+            }
+            Vis::Extended(word) => {
+                push_leader(&mut out);
+                push_bits(&mut out, word as u32, 16);
+                out.push(sym(1200, 30.0)); // stop
+            }
+            Vis::Narrow(d2) => push_nvis(&mut out, d2),
+        }
+        out
+    }
+
+    // 1900/300, 1200/10, 1900/300, 1200/30 (ref: Main.cpp:6975-6978).
+    fn push_leader(out: &mut Vec<Symbol>) {
+        out.push(sym(1900, 300.0));
+        out.push(sym(1200, 10.0));
+        out.push(sym(1900, 300.0));
+        out.push(sym(1200, 30.0));
+    }
+
+    // `n` VIS bits, LSB first, 30 ms each: bit 1 → 1100 Hz, bit 0 → 1300 Hz.
+    fn push_bits(out: &mut Vec<Symbol>, mut d: u32, n: u32) {
+        for _ in 0..n {
+            out.push(sym(if d & 1 != 0 { BIT1_HZ } else { BIT0_HZ }, 30.0));
+            d >>= 1;
+        }
+    }
+
+    // 24-bit N-VIS FSK: preamble 1900/300, 2100/100, start 1900/22, then four 6-bit
+    // symbols D0=101101, D1=010101, D2=mode, D3=010101^mode — each bit 22 ms,
+    // MSB(D05..D00) first, 1=1900 Hz/0=2100 Hz. ref: mode.txt §7.
+    fn push_nvis(out: &mut Vec<Symbol>, d2: u8) {
+        out.push(sym(1900, 300.0));
+        out.push(sym(2100, 100.0));
+        out.push(sym(1900, 22.0)); // start bit
+        let d0 = 0b101101u8;
+        let d1 = 0b010101u8;
+        let d3 = d1 ^ d2;
+        for sym6 in [d0, d1, d2, d3] {
+            for bit in (0..6).rev() {
+                let hi = (sym6 >> bit) & 1 != 0;
+                out.push(sym(if hi { NVIS1_HZ } else { NVIS0_HZ }, 22.0));
+            }
+        }
+    }
+
+    /// Decode a run of received VIS bit-tone frequencies (1100/1300 Hz, LSB first) back to
+    /// the identifying value, then to a submode. `extended` selects 16-bit framing. This is
+    /// the RX counterpart of `push_bits` (ref: sstv.cpp:1979-1990); tone→bit is `d11 > d13`.
+    pub fn decode_bits(tones_hz: &[u16], extended: bool) -> Option<SstvMode> {
+        let n = if extended { 16 } else { 8 };
+        if tones_hz.len() < n {
+            return None;
+        }
+        let mut v = 0u32;
+        for (i, &t) in tones_hz.iter().take(n).enumerate() {
+            let bit = if nearer(t, BIT1_HZ, BIT0_HZ) { 1 } else { 0 };
+            v |= bit << i;
+        }
+        let target = if extended {
+            Vis::Extended(v as u16)
+        } else {
+            Vis::Standard(v as u8)
+        };
+        SstvMode::all().iter().copied().find(|m| m.vis() == target)
+    }
+
+    fn nearer(t: u16, a: u16, b: u16) -> bool {
+        let (t, a, b) = (t as i32, a as i32, b as i32);
+        (t - a).abs() <= (t - b).abs()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vis::{header, Symbol};
+    use super::*;
+
+    #[test]
+    fn all_modes_have_unique_labels_and_roundtrip() {
+        let modes = SstvMode::all();
+        assert_eq!(modes.len(), 43, "SSTVModeList has 43 submodes (ref: sstv.cpp:493-503, smEND=43)");
+        let mut labels = std::collections::HashSet::new();
+        for &m in modes {
+            assert!(labels.insert(m.label()), "duplicate label {}", m.label());
+            assert_eq!(SstvMode::from_label(m.label()), Some(m));
+        }
+    }
+
+    #[test]
+    fn vis_codes_are_unique_per_form() {
+        // No two modes share a VIS identifier (would make RX ambiguous).
+        let mut seen = std::collections::HashSet::new();
+        for &m in SstvMode::all() {
+            let key = format!("{:?}", m.vis());
+            assert!(seen.insert(key), "duplicate VIS for {}", m.label());
+        }
+    }
+
+    #[test]
+    fn scottie1_vis_matches_reference() {
+        // ref: Main.cpp:6997 (smSCT1 → 0x3c).
+        assert_eq!(SstvMode::Scottie1.vis(), Vis::Standard(0x3c));
+    }
+
+    #[test]
+    fn scottie1_geometry_matches_reference() {
+        assert_eq!(
+            SstvMode::Scottie1.geometry(),
+            Geometry { width: 320, rows: 256, scan_lines: 256 }
+        );
+    }
+
+    /// The header symbol sequence must be byte-for-byte the leader + VIS bits the reference
+    /// emits — verified against the golden TX vector `sstv_scottie1_tx.json`, whose first 13
+    /// `vis_symbols` are exactly this header (the 14th onward is line data).
+    #[test]
+    fn scottie1_header_matches_golden_vector() {
+        let h = header(SstvMode::Scottie1);
+        let want = [
+            Symbol { freq_hz: 1900, ms: 300.0 },
+            Symbol { freq_hz: 1200, ms: 10.0 },
+            Symbol { freq_hz: 1900, ms: 300.0 },
+            Symbol { freq_hz: 1200, ms: 30.0 },
+            // VIS 0x3c = 0b00111100, LSB-first: 0,0,1,1,1,1,0,0
+            Symbol { freq_hz: 1300, ms: 30.0 },
+            Symbol { freq_hz: 1300, ms: 30.0 },
+            Symbol { freq_hz: 1100, ms: 30.0 },
+            Symbol { freq_hz: 1100, ms: 30.0 },
+            Symbol { freq_hz: 1100, ms: 30.0 },
+            Symbol { freq_hz: 1100, ms: 30.0 },
+            Symbol { freq_hz: 1300, ms: 30.0 },
+            Symbol { freq_hz: 1300, ms: 30.0 },
+            Symbol { freq_hz: 1200, ms: 30.0 }, // stop
+        ];
+        assert_eq!(h, want);
+    }
+
+    #[test]
+    fn extended_header_is_16_bit() {
+        // MR73 → 0x4523; 16 bits between leader (4) and stop (1) → 21 symbols total.
+        let h = header(SstvMode::Mr73);
+        assert_eq!(h.len(), 4 + 16 + 1);
+        // Low byte 0x23 marks extended VIS; bit 0 (LSB) is 1 → first VIS bit is 1100 Hz.
+        assert_eq!(h[4].freq_hz, 1100);
+    }
+
+    #[test]
+    fn narrow_header_is_nvis_fsk() {
+        // MP73-N: N-VIS D2=0x02; frame D0=101101 D1=010101 D2=000010 D3=010111
+        // (ref: mode.txt §7 example "101101 010101 000010 010111").
+        let h = header(SstvMode::Mn73);
+        // preamble(2) + start(1) + 24 bits
+        assert_eq!(h.len(), 3 + 24);
+        assert_eq!(h[0].freq_hz, 1900);
+        assert_eq!(h[1].freq_hz, 2100);
+        // D2 = 000010 (MSB first): 0,0,0,0,1,0 → tones 2100,2100,2100,2100,1900,2100
+        let d2 = &h[3 + 12..3 + 18];
+        let d2_tones: Vec<u16> = d2.iter().map(|s| s.freq_hz).collect();
+        assert_eq!(d2_tones, vec![2100, 2100, 2100, 2100, 1900, 2100]);
+    }
+
+    #[test]
+    fn decode_bits_recovers_mode() {
+        // Round-trip a standard and an extended VIS through decode_bits.
+        for &m in &[SstvMode::Scottie1, SstvMode::Robot36, SstvMode::Pd90] {
+            let byte = match m.vis() { Vis::Standard(b) => b, _ => unreachable!() };
+            let tones: Vec<u16> = (0..8).map(|i| if (byte >> i) & 1 != 0 { 1100 } else { 1300 }).collect();
+            assert_eq!(super::vis::decode_bits(&tones, false), Some(m));
+        }
+        let word = match SstvMode::Mr73.vis() { Vis::Extended(w) => w, _ => unreachable!() };
+        let tones: Vec<u16> = (0..16).map(|i| if (word >> i) & 1 != 0 { 1100 } else { 1300 }).collect();
+        assert_eq!(super::vis::decode_bits(&tones, true), Some(SstvMode::Mr73));
+    }
+}
