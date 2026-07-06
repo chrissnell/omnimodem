@@ -4,6 +4,7 @@
 //! wire, MSB-first big-endian for WSJT-X). Decoders consume the locked `Llr`
 //! convention `L = ln(P(0)/P(1))`: positive ⇒ bit 0, hard slice `bit = (L < 0)`.
 
+pub mod ccir476;
 pub mod crc;
 pub mod nrzi;
 pub mod gray;

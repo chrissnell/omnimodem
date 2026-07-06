@@ -40,6 +40,10 @@ pub enum ModeConfig {
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
     Hell { submode: String, center_hz: f32 },
+    /// Throb family (fldigi parity): `submode` is a `throb::ThrobVariant` label
+    /// (`throb1`/`throb2`/`throb4`/`throbx1`/`throbx2`/`throbx4`), `center_hz` the
+    /// audio carrier. Dual-tone MFSK at 8 kHz.
+    Throb { submode: String, center_hz: f32 },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
     Jt65,
@@ -56,6 +60,14 @@ pub enum ModeConfig {
     /// (`mt63_500s`/…/`mt63_2000l`), `center_hz` the audio carrier. 64-carrier
     /// overlapping-Walsh OFDM with deep interleave.
     Mt63 { submode: String, center_hz: f32 },
+    /// NAVTEX / SITOR-B (fldigi parity): `submode` is a `navtex::NavtexVariant`
+    /// label (`navtex`/`sitorb`), `center_hz` the audio center. 100-baud FSK with
+    /// CCIR-476 FEC-B.
+    Navtex { submode: String, center_hz: f32 },
+    /// WEFAX HF weather fax (fldigi parity): `submode` is a `wefax::WefaxVariant`
+    /// label (`wefax576`/`wefax288`), `center_hz` the audio carrier. A facsimile
+    /// mode — RX emits an image raster, not text.
+    Wefax { submode: String, center_hz: f32 },
     // Phase 5 fldigi breadth modes.
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
@@ -124,6 +136,12 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::throb::ThrobVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Throb {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
             m if omnimodem_dsp::modes::mfsk::MfskVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Mfsk {
                     submode: m.to_string(),
@@ -134,6 +152,18 @@ impl ModeConfig {
                 Some(ModeConfig::Mt63 {
                     submode: m.to_string(),
                     center_hz: f("center", 1500.0),
+                })
+            }
+            m if omnimodem_dsp::modes::navtex::NavtexVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Navtex {
+                    submode: m.to_string(),
+                    center_hz: f("center", omnimodem_dsp::modes::navtex::CENTER_HZ),
+                })
+            }
+            m if omnimodem_dsp::modes::wefax::WefaxVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Wefax {
+                    submode: m.to_string(),
+                    center_hz: f("center", omnimodem_dsp::modes::wefax::CARRIER_HZ),
                 })
             }
             m if omnimodem_dsp::modes::contestia::ContestiaVariant::from_label(m).is_some() => {
@@ -178,8 +208,11 @@ impl ModeConfig {
                 format!("{speed}:center={center_hz},mycall={mycall},directed={directed}")
             }
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Throb { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Navtex { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Wefax { submode, center_hz } => format!("{submode}:center={center_hz}"),
             // The tones/bw live in the Contestia label itself (contestia8_500).
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
@@ -275,6 +308,11 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("hell")
             }
+            ModeConfig::Throb { submode, .. } => {
+                omnimodem_dsp::modes::throb::ThrobVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("throb")
+            }
             ModeConfig::Mfsk { submode, .. } => {
                 omnimodem_dsp::modes::mfsk::MfskVariant::from_label(submode)
                     .map(|v| v.label())
@@ -284,6 +322,16 @@ impl ModeConfig {
                 omnimodem_dsp::modes::mt63::Mt63Variant::from_label(submode)
                     .map(|v| v.label())
                     .unwrap_or("mt63")
+            }
+            ModeConfig::Navtex { submode, .. } => {
+                omnimodem_dsp::modes::navtex::NavtexVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("navtex")
+            }
+            ModeConfig::Wefax { submode, .. } => {
+                omnimodem_dsp::modes::wefax::WefaxVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("wefax")
             }
             ModeConfig::Contestia { .. } => "contestia",
             ModeConfig::Ft4 => "ft4",
@@ -522,6 +570,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolves_throb_family() {
+        // Every fldigi Throb / ThrobX submode resolves, defaulting to 1500 Hz.
+        for label in ["throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Throb { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("throb2:center=1200"),
+            Some(ModeConfig::Throb { submode: "throb2".into(), center_hz: 1200.0 })
+        );
+        // Round-trips through the canonical mode string.
+        let c = ModeConfig::Throb { submode: "throbx4".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("throb9"), None);
+    }
+
+    #[test]
     fn parse_resolves_mfsk_family() {
         // Every fldigi MFSK submode resolves, defaulting to a 1500 Hz carrier.
         for label in [
@@ -560,6 +627,42 @@ mod tests {
         let c = ModeConfig::Mt63 { submode: "mt63_2000s".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         assert_eq!(ModeConfig::parse("mt63_9000x"), None);
+    }
+
+    #[test]
+    fn parse_resolves_navtex_family() {
+        // Both submodes resolve, defaulting to the 1000 Hz NAVTEX center.
+        for label in ["navtex", "sitorb"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Navtex { submode: label.into(), center_hz: 1000.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("sitorb:center=1500"),
+            Some(ModeConfig::Navtex { submode: "sitorb".into(), center_hz: 1500.0 })
+        );
+        let c = ModeConfig::Navtex { submode: "navtex".into(), center_hz: 1000.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("navtex99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_wefax_family() {
+        // Both WEFAX submodes resolve, defaulting to the 1900 Hz carrier.
+        for label in ["wefax576", "wefax288"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Wefax { submode: label.into(), center_hz: 1900.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("wefax576:center=1800"),
+            Some(ModeConfig::Wefax { submode: "wefax576".into(), center_hz: 1800.0 })
+        );
+        let c = ModeConfig::Wefax { submode: "wefax288".into(), center_hz: 1900.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("wefax999"), None);
     }
 
     #[test]
