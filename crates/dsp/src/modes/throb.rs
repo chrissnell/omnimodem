@@ -358,8 +358,11 @@ pub struct ThrobDemod {
     v: ThrobVariant,
     center_hz: f32,
     buf: Vec<Sample>,
-    // ThrobX idle/space flip state, tracked identically to the transmitter so the
-    // idle/space symbols map correctly. ref: throb.cxx:54-63, :396-414.
+    // ThrobX-only RX state: the idle/space flip indices (tracked identically to
+    // the transmitter so idle/space symbols map correctly) and the last decoded
+    // char (so a run of idles/spaces collapses to a single space). Unused on the
+    // regular-Throb path, which decodes via the tonepair→charset lookup + shift
+    // latch. ref: throb.cxx:54-63, :396-414.
     idlesym: usize,
     spacesym: usize,
     lastchar: u8,
@@ -480,8 +483,8 @@ impl ThrobDemod {
         let mut out = Vec::new();
         let mut consumed = 0;
         while self.buf.len() - consumed >= symlen {
-            let block = self.buf[consumed..consumed + symlen].to_vec();
-            let (t1, t2) = self.find_tones(&block);
+            // Detect on the buffer slice in place (no per-symbol copy).
+            let (t1, t2) = self.find_tones(&self.buf[consumed..consumed + symlen]);
             if let Some(c) = self.decode(t1, t2) {
                 push_char(&mut out, c, self.v);
             }
@@ -636,5 +639,12 @@ mod tests {
     #[test]
     fn lowercase_folds_to_upper() {
         assert_eq!(loopback(ThrobVariant::Throb2, "cq"), "CQ");
+    }
+
+    #[test]
+    fn throbx_consecutive_spaces_collapse_like_fldigi() {
+        // ThrobX collapses a run of idle/space symbols to a single space (the RX
+        // `lastchar` logic must stay in sync with the TX flip). ref: throb.cxx:399-407.
+        assert_eq!(loopback(ThrobVariant::ThrobX2, "A   B"), "A B");
     }
 }
