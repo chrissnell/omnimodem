@@ -12,6 +12,7 @@
 //! for the current Phase-5 plan; their groups are named here to keep the catalog
 //! map honest.
 pub mod varicode;
+pub mod jsc;
 pub mod dominoex_varicode;
 pub mod thor_varicode;
 pub mod ifkp_varicode;

@@ -39,6 +39,34 @@ fn crc14_ft8_is_14_bits_and_deterministic() {
     assert!(a < (1 << 14), "CRC-14 must fit in 14 bits");
 }
 
+/// JS8's JSC compressed-text codec is bit-exact vs the reference.
+/// `compress(text)` reproduces the reference bit stream byte-for-byte and
+/// `decompress` inverts the reference stream. Provenance:
+/// `tests/vectors/js8_jsc.json` (js8call @ a7ff1be, driver
+/// `scratch/refvectors/js8/build_jsc.sh`). The same assertions run as plain
+/// lib unit tests in `framing::jsc` (CI has no `testutil`).
+#[test]
+fn jsc_codec_matches_reference() {
+    use omnimodem_dsp::framing::jsc::{compress_bits, decompress};
+    let raw = include_str!("vectors/js8_jsc.json");
+    let mut checked = 0;
+    for line in raw.lines().filter(|l| l.contains("\"compressed\"")) {
+        let field = |k: &str| -> String {
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let text = field("\"text\": \"");
+        let compressed = field("\"compressed\": \"");
+        let decompressed = field("\"decompressed\": \"");
+        let got: String = compress_bits(&text).iter().map(|&b| if b { '1' } else { '0' }).collect();
+        assert_eq!(got, compressed, "JSC compress differs for {text:?}");
+        let bits: Vec<bool> = compressed.bytes().map(|c| c == b'1').collect();
+        assert_eq!(decompress(&bits), decompressed, "JSC decompress differs for {text:?}");
+        checked += 1;
+    }
+    assert!(checked >= 10, "expected the full JSC vector set, got {checked}");
+}
+
 /// Reed–Solomon corrects within capacity and *detects* (does not miscorrect)
 /// beyond it, for both the FX.25 (fcr=1) and IL2P (fcr=0) instantiations.
 #[test]
