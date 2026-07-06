@@ -521,9 +521,11 @@ impl RsidDetector {
         {
             let newest = self.buckets.last_mut().unwrap();
             newest.iter_mut().for_each(|b| *b = 0);
-            // ref: rsid.cxx:330-331 — both bin parities, over [3, 992-NTIMES).
-            calculate_buckets(&self.ampl, newest, 3, NBINS - 32);
-            calculate_buckets(&self.ampl, newest, 4, NBINS - 32);
+            // ref: rsid.cxx:330-331 — both bin parities, over
+            // [bucket_low, bucket_high - NTIMES) == [3, 992 - 30). This is exactly
+            // the bin span search_table reads, so no bucket is computed unused.
+            calculate_buckets(&self.ampl, newest, 3, (NBINS - 32) - NTIMES);
+            calculate_buckets(&self.ampl, newest, 4, (NBINS - 32) - NTIMES);
         }
 
         // ref: rsid.cxx:338-364 — primary table until an ESCAPE opens the
@@ -600,6 +602,11 @@ impl RsidDetector {
         RsidDetection { tag: en.tag, mode: en.mode, freq_hz, extended }
     }
 
+    /// Drop the detection state after a hit so the same burst is not re-reported.
+    /// Unlike fldigi's `reset()` (rsid.cxx:162) this deliberately does NOT flush
+    /// `inbuf`: as a streaming tap we keep unprocessed audio (a re-trigger needs a
+    /// fresh 30-slot ring fill regardless), rather than discarding samples the
+    /// caller already handed us.
     fn clear_ring(&mut self) {
         for row in self.buckets.iter_mut() {
             row.iter_mut().for_each(|b| *b = 0);
