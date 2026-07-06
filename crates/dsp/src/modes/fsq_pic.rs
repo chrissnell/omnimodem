@@ -22,7 +22,10 @@
 //! `61b97f413`. Golden vectors: `tests/vectors/fsqpic.json` (driver
 //! `scratch/refvectors/build_fsqpic.sh`).
 
+use crate::mode::Modulator;
+use crate::modes::fsq::{FsqMod, FsqSpeed};
 use crate::modes::picture::{LumaKind, PictureCodec, PixelScale, PlaneOrder};
+use crate::types::{Frame, Sample};
 
 /// FSQ picture sample rate and samples-per-pixel (`SR` fsq.h:40, `RXspp`
 /// fsq.cxx:273).
@@ -125,10 +128,40 @@ pub fn codec(carrier_hz: f32) -> PictureCodec {
     }
 }
 
+/// **Picture-send assembler (T6 TX core).** Build the complete on-air audio for
+/// an FSQ picture from `mycall` at `speed`, centred at `center_hz`: the directed
+/// `% X` picture token framed as an FSQ transmission (`%` is an allcall trigger,
+/// so no target is needed), immediately followed by the pixel-FSK raster over the
+/// shared [`PictureCodec`] (`FsqLinear`, B→G→R, IMAGEspp=10). `mode` fixes the
+/// size, colour, and mode char. A daemon picture-send trigger keys the rig and
+/// plays this buffer.
+///
+/// Unlike the MFSK/THOR/IFKP families the header rides FSQ's *directed*
+/// (BOT/CRC/EOT) framing, so a stock fldigi FSQ receiver dispatches the `%`
+/// trigger to `parse_pcnt` and decodes the raster.
+pub fn build_tx(
+    speed: FsqSpeed,
+    center_hz: f32,
+    mycall: &str,
+    mode: FsqPicMode,
+    rgb: &[u8],
+) -> Vec<Sample> {
+    let (w, h) = mode.dims();
+    let mut audio = FsqMod::new(speed, center_hz, mycall, true)
+        .modulate(&Frame::text(header(mode)))
+        .unwrap_or_default();
+    let pixels = codec(center_hz).encode(rgb, w as usize, h as usize, mode.color(), SPP);
+    audio.extend_from_slice(&pixels);
+    audio
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::Demodulator;
+    use crate::modes::fsq::FsqDemod;
     use crate::modes::picture::{color_tx_raster, PlaneOrder};
+    use crate::types::FramePayload;
 
     const VECTORS: &str = include_str!("../../tests/vectors/fsqpic.json");
 
@@ -234,6 +267,62 @@ mod tests {
 
     fn test_codec() -> PictureCodec {
         codec(1500.0)
+    }
+
+    fn monitor(frames: &[crate::types::Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // T6 TX assembler: the directed `% X` header (recovered from the FSQ monitor
+    // stream → parse_header) then the pixel-FSK raster (tracking the pinned
+    // FsqLinear quantiser at the split).
+    #[test]
+    fn build_tx_carries_directed_header_then_raster() {
+        let speed = FsqSpeed::S3;
+        let center = 1500.0f32;
+        let mode = FsqPicMode::MiniGrey; // 120×150, grey
+        let (w, h) = mode.dims();
+        // Grey ramp raster.
+        let total = (w * h) as usize;
+        let mut rgb = Vec::with_capacity(total * 3);
+        for i in 0..total {
+            let g = (i * 255 / (total - 1)) as u8;
+            rgb.extend_from_slice(&[g, g, g]);
+        }
+        // Header-only audio length is the split point.
+        let hdr_len = FsqMod::new(speed, center, "k1abc", true)
+            .modulate(&Frame::text(header(mode)))
+            .unwrap()
+            .len();
+        let full = build_tx(speed, center, "k1abc", mode, &rgb);
+        assert!(full.len() > hdr_len, "picture audio must extend past the header");
+
+        // The FSQ monitor stream over the header portion contains the "% X" token,
+        // which parse_header dispatches (rx_text[2] == mode char).
+        let mut rx = FsqDemod::new(speed, center, "n0call");
+        let mut frames = rx.feed(&full[..hdr_len]);
+        frames.extend(rx.flush());
+        let text = monitor(&frames);
+        let parsed = parse_header(&text).unwrap_or_else(|| panic!("FSQ monitor must carry header: {text:?}"));
+        assert_eq!((parsed.width, parsed.height, parsed.image_mode), (w, h, 7));
+
+        // The pixel suffix tracks the pinned (non-inverse) FsqLinear quantiser.
+        let scale = PixelScale::FsqLinear;
+        let frame = test_codec().decode(&full[hdr_len..], w as usize, h as usize, false, SPP);
+        let FramePayload::Image { pixels, .. } = frame.payload else { panic!("expected Image") };
+        let want: Vec<u8> = rgb
+            .chunks_exact(3)
+            .map(|p| scale.rx_byte(scale.tx_deviation_hz(p[0], false), false))
+            .collect();
+        let max_err =
+            pixels.iter().zip(&want).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
+        assert!(max_err <= 10, "FSQ built-raster deviation from pinned quantiser {max_err} > 10");
     }
 
     // Loopback (audio domain, tolerance — Doctrine §3) at FSQ's 12 kHz / spp=10.
