@@ -16,7 +16,10 @@
 //! :366-422), upstream 4.1.23 @ `61b97f413`. Golden vectors:
 //! `tests/vectors/mfskpic.json` (driver `scratch/refvectors/build_mfskpic.sh`).
 
-use crate::modes::picture::{LumaKind, PictureCodec, PixelScale, PlaneOrder};
+use crate::mode::Modulator;
+use crate::modes::mfsk::{MfskMod, MfskVariant};
+use crate::modes::picture::{LumaKind, PictureCodec, PixelScale, PlaneOrder, RasterRef};
+use crate::types::{Frame, Sample};
 
 /// Build the shared pixel-FSK codec configured for MFSK pictures: linear
 /// `Deviation256` scaling over the submode's occupied `bandwidth_hz`
@@ -122,9 +125,39 @@ pub fn parse_header(window: &str) -> Option<MfskPicHeader> {
     in_range(width, height).then_some(MfskPicHeader { width, height, color, rxspp })
 }
 
+/// **Picture-send assembler (T6 TX core).** Build the complete on-air audio for
+/// an MFSK picture transmission on submode `v` centred at `center_hz`: the
+/// in-band header text (`"\nSending Pic:WxH…;"`) modulated through the live MFSK
+/// text path, immediately followed by the pixel-FSK raster over the shared
+/// [`PictureCodec`]. `rgb` is row-major interleaved RGB (`width*height*3` bytes);
+/// `color` picks the R→G→B plane raster vs the grey luma reduction; `txspp`
+/// selects 8/4/2 samples-per-pixel (the header advertises it). A daemon
+/// picture-send trigger keys the rig and plays this buffer.
+///
+/// The header rides the mode's existing varicode modulator, so a stock fldigi
+/// MFSK receiver sees the `Pic:` announcement then decodes the raster — the
+/// symmetric partner of the typed `Image` RX frame.
+pub fn build_tx(
+    v: MfskVariant,
+    center_hz: f32,
+    img: RasterRef,
+    color: bool,
+    txspp: u8,
+    reverse: bool,
+) -> Vec<Sample> {
+    let hdr = header(img.width, img.height, color, txspp);
+    let mut audio = MfskMod::new(v, center_hz).modulate(&Frame::text(hdr)).unwrap_or_default();
+    let cdc = codec(center_hz, v.params().bandwidth() as f64, v.samplerate() as f32, reverse);
+    let pixels = cdc.encode(img.rgb, img.width as usize, img.height as usize, color, txspp as usize);
+    audio.extend_from_slice(&pixels);
+    audio
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::Demodulator;
+    use crate::modes::mfsk::MfskDemod;
     use crate::modes::picture::{color_tx_raster, luma_mfsk, PlaneOrder};
     use crate::types::FramePayload;
 
@@ -265,6 +298,52 @@ mod tests {
         let max_err =
             pixels.iter().zip(&rgb).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
         assert!(max_err <= 14, "colour loopback max pixel error {max_err} > 14");
+    }
+
+    // T6 TX assembler: the built audio carries the header (recoverable by the
+    // real MFSK text demod → parse_header) immediately followed by the pixel-FSK
+    // raster (recoverable by the shared codec at the known header offset).
+    #[test]
+    fn build_tx_carries_header_then_raster() {
+        let v = MfskVariant::M16;
+        let center = 1500.0f32;
+        let (w, h) = (16u32, 4u32);
+        let txspp = 8u8;
+        // Grey ramp raster.
+        let total = (w * h) as usize;
+        let mut rgb = Vec::new();
+        for i in 0..total {
+            let g = (i * 255 / (total - 1)) as u8;
+            rgb.extend_from_slice(&[g, g, g]);
+        }
+        // Header-only audio length is the split point between text and pixels.
+        let hdr_audio = MfskMod::new(v, center)
+            .modulate(&Frame::text(header(w, h, false, txspp)))
+            .unwrap();
+        let full = build_tx(v, center, RasterRef { rgb: &rgb, width: w, height: h }, false, txspp, false);
+        assert!(full.len() > hdr_audio.len(), "picture audio must extend past the header");
+
+        // The header prefix demodulates back to text containing the Pic: header,
+        // which parse_header accepts with the right dims.
+        let text: String = MfskDemod::new(v, center)
+            .feed(&full[..hdr_audio.len()])
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        let parsed = parse_header(&text).expect("demodulated header must parse");
+        assert_eq!((parsed.width, parsed.height, parsed.color, parsed.rxspp), (w, h, false, txspp));
+
+        // The pixel suffix decodes to the raster within loopback tolerance.
+        let cdc = codec(center, v.params().bandwidth() as f64, v.samplerate() as f32, false);
+        let frame = cdc.decode(&full[hdr_audio.len()..], w as usize, h as usize, false, txspp as usize);
+        let FramePayload::Image { pixels, .. } = frame.payload else { panic!("expected Image") };
+        let want: Vec<u8> = rgb.chunks_exact(3).map(|p| p[0]).collect();
+        let max_err =
+            pixels.iter().zip(&want).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
+        assert!(max_err <= 14, "built-raster loopback max pixel error {max_err} > 14");
     }
 
     #[test]

@@ -17,7 +17,10 @@
 //! 4.1.23 @ `61b97f413`. Golden vectors: `tests/vectors/thorpic.json`
 //! (driver `scratch/refvectors/build_thorpic.sh`).
 
+use crate::mode::Modulator;
 use crate::modes::picture::{LumaKind, PictureCodec, PixelScale, PlaneOrder};
+use crate::modes::thor::{ThorMod, ThorVariant};
+use crate::types::{Frame, Sample};
 
 /// THOR picture sample rate and samples-per-pixel (thor.cxx:243 family,
 /// `THOR_IMAGESPP` thor.h:68).
@@ -124,10 +127,36 @@ pub fn codec(carrier_hz: f32, bandwidth_hz: f64, samplerate: f32, reverse: bool)
     }
 }
 
+/// **Picture-send assembler (T6 TX core).** Build the complete on-air audio for
+/// a THOR picture on submode `v` centred at `center_hz`: the `pic%X\n` header
+/// modulated through the live THOR text path, then the pixel-FSK raster over the
+/// shared [`PictureCodec`] at IMAGEspp=10. `size` selects the fixed W×H; `grey`
+/// picks the luma reduction vs the R→G→B plane raster. A daemon picture-send
+/// trigger keys the rig and plays this buffer.
+pub fn build_tx(
+    v: ThorVariant,
+    center_hz: f32,
+    size: ThorPicSize,
+    rgb: &[u8],
+    grey: bool,
+    reverse: bool,
+) -> Vec<Sample> {
+    let (w, h) = size.dims();
+    let mut audio =
+        ThorMod::new(v, center_hz).modulate(&Frame::text(header(size, grey))).unwrap_or_default();
+    let cdc = codec(center_hz, v.bandwidth() as f64, v.samplerate() as f32, reverse);
+    let pixels = cdc.encode(rgb, w as usize, h as usize, !grey, SPP);
+    audio.extend_from_slice(&pixels);
+    audio
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::Demodulator;
     use crate::modes::picture::{color_tx_raster, PlaneOrder};
+    use crate::modes::thor::ThorDemod;
+    use crate::types::FramePayload;
 
     const VECTORS: &str = include_str!("../../tests/vectors/thorpic.json");
 
@@ -217,6 +246,45 @@ mod tests {
     fn test_codec() -> PictureCodec {
         // THOR: 8 kHz, carrier 1500, ~244 Hz occupied bandwidth (THOR16-ish).
         codec(1500.0, 244.0, SAMPLE_RATE, false)
+    }
+
+    // T6 TX assembler: header (recoverable by the real THOR demod → parse_header)
+    // then the pixel-FSK raster (recoverable by the shared codec at the split).
+    #[test]
+    fn build_tx_carries_header_then_raster() {
+        let v = ThorVariant::T16;
+        let center = 1500.0f32;
+        let size = ThorPicSize::Thumb; // 59×74
+        let (w, h) = size.dims();
+        let total = (w * h) as usize;
+        let mut rgb = Vec::new();
+        for i in 0..total {
+            let g = (i * 255 / (total - 1)) as u8;
+            rgb.extend_from_slice(&[g, g, g]);
+        }
+        // Header-only length is the split point between text and pixel-FSK.
+        let hdr_len =
+            ThorMod::new(v, center).modulate(&Frame::text(header(size, true))).unwrap().len();
+        let full = build_tx(v, center, size, &rgb, true, false);
+        assert!(full.len() > hdr_len, "picture audio must extend past the header");
+
+        let text: String = ThorDemod::new(v, center)
+            .feed(&full[..hdr_len])
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(parse_header(&text).is_some(), "demodulated THOR header must parse: {text:?}");
+
+        let cdc = codec(center, v.bandwidth() as f64, v.samplerate() as f32, false);
+        let frame = cdc.decode(&full[hdr_len..], w as usize, h as usize, false, SPP);
+        let FramePayload::Image { pixels, .. } = frame.payload else { panic!("expected Image") };
+        let want: Vec<u8> = rgb.chunks_exact(3).map(|p| p[0]).collect();
+        let max_err =
+            pixels.iter().zip(&want).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
+        assert!(max_err <= 14, "THOR built-raster loopback max pixel error {max_err} > 14");
     }
 
     // Loopback (audio domain, tolerance — Doctrine §3) at THOR's 8 kHz / spp=10.

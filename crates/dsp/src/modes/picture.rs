@@ -106,6 +106,17 @@ pub fn luma_std(r: u8, g: u8, b: u8) -> u8 {
     (0.3 * r as f64 + 0.6 * g as f64 + 0.1 * b as f64) as u8
 }
 
+/// A borrowed row-major interleaved-RGB raster (`R,G,B,…`, with
+/// `rgb.len() == width*height*3`). Bundles the three values a picture-send always
+/// passes together, keeping the per-family `build_tx` assemblers under the arg
+/// limit and self-documenting.
+#[derive(Debug, Clone, Copy)]
+pub struct RasterRef<'a> {
+    pub rgb: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Colour-plane transmit order. Row-major; within each row all of plane A, then
 /// plane B, then plane C. MFSK/THOR/IFKP send R→G→B; FSQ sends B→G→R.
 /// ref: mfsk-pic.cxx:198-202, thor.cxx:1349-1362, fsq.cxx:1445 (`RGB[]={2,1,0}`).

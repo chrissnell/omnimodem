@@ -16,7 +16,17 @@
 //! table :461-470), upstream 4.1.23 @ `61b97f413`. Golden vectors:
 //! `tests/vectors/ifkppic.json` (driver `scratch/refvectors/build_ifkppic.sh`).
 
+use crate::mode::Modulator;
+use crate::modes::ifk33::NUMTONES;
+use crate::modes::ifkp::{tone_spacing, IfkpMod, IfkpSpeed};
 use crate::modes::picture::{LumaKind, PictureCodec, PixelScale, PlaneOrder};
+use crate::types::{Frame, Sample};
+
+/// IFKP picture occupied bandwidth (Hz) — `NUMTONES · tone_spacing`, the value
+/// the `Deviation256` pixel scale spans. ref: ifkp.cxx:270.
+pub fn bandwidth_hz() -> f64 {
+    NUMTONES as f64 * tone_spacing() as f64
+}
 
 /// IFKP picture sample rate and samples-per-pixel (ifkp.cxx:58, ifkp.h:48).
 pub const SAMPLE_RATE: f32 = 16000.0;
@@ -120,10 +130,36 @@ pub fn codec(carrier_hz: f32, bandwidth_hz: f64, reverse: bool) -> PictureCodec 
     }
 }
 
+/// **Picture-send assembler (T6 TX core).** Build the complete on-air audio for
+/// an IFKP picture at `speed` centred at `center_hz`: the ` pic%X` header
+/// modulated through the live IFKP text path, then the pixel-FSK raster over the
+/// shared [`PictureCodec`] at 16 kHz IMAGESPP=8. `size` selects the fixed W×H;
+/// `grey` picks the luma reduction vs the R→G→B plane raster. A daemon
+/// picture-send trigger keys the rig and plays this buffer.
+pub fn build_tx(
+    speed: IfkpSpeed,
+    center_hz: f32,
+    size: IfkpPicSize,
+    rgb: &[u8],
+    grey: bool,
+    reverse: bool,
+) -> Vec<Sample> {
+    let (w, h) = size.dims();
+    let mut audio =
+        IfkpMod::new(speed, center_hz).modulate(&Frame::text(header(size, grey))).unwrap_or_default();
+    let cdc = codec(center_hz, bandwidth_hz(), reverse);
+    let pixels = cdc.encode(rgb, w as usize, h as usize, !grey, SPP);
+    audio.extend_from_slice(&pixels);
+    audio
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::Demodulator;
+    use crate::modes::ifkp::IfkpDemod;
     use crate::modes::picture::{color_tx_raster, PlaneOrder};
+    use crate::types::FramePayload;
 
     const VECTORS: &str = include_str!("../../tests/vectors/ifkppic.json");
 
@@ -200,6 +236,50 @@ mod tests {
     fn test_codec() -> PictureCodec {
         // 16 kHz, carrier 1500, ~386 Hz occupied bandwidth (ifkp.cxx:270).
         codec(1500.0, 386.0, false)
+    }
+
+    // T6 TX assembler: header (recoverable by the real IFKP demod → parse_header)
+    // then the pixel-FSK raster (recoverable by the shared codec at the split).
+    #[test]
+    fn build_tx_carries_header_then_raster() {
+        let speed = IfkpSpeed::Normal;
+        let center = 1500.0f32;
+        let size = IfkpPicSize::Thumb; // 59×74
+        let (w, h) = size.dims();
+        let total = (w * h) as usize;
+        let mut rgb = Vec::new();
+        for i in 0..total {
+            let g = (i * 255 / (total - 1)) as u8;
+            rgb.extend_from_slice(&[g, g, g]);
+        }
+        let hdr_len = IfkpMod::new(speed, center)
+            .modulate(&Frame::text(header(size, true)))
+            .unwrap()
+            .len();
+        let full = build_tx(speed, center, size, &rgb, true, false);
+        assert!(full.len() > hdr_len, "picture audio must extend past the header");
+
+        // The streaming IFKP demod emits a varicode char only once the next
+        // symbol arrives, so the header's final char lands after the split — feed
+        // the whole stream (as a live receiver does) and locate the header, which
+        // is the first `pic%` token.
+        let text: String = IfkpDemod::new(speed, center)
+            .feed(&full)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(parse_header(&text).is_some(), "demodulated IFKP header must parse: {text:?}");
+
+        let cdc = codec(center, bandwidth_hz(), false);
+        let frame = cdc.decode(&full[hdr_len..], w as usize, h as usize, false, SPP);
+        let FramePayload::Image { pixels, .. } = frame.payload else { panic!("expected Image") };
+        let want: Vec<u8> = rgb.chunks_exact(3).map(|p| p[0]).collect();
+        let max_err =
+            pixels.iter().zip(&want).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
+        assert!(max_err <= 14, "IFKP built-raster loopback max pixel error {max_err} > 14");
     }
 
     // Loopback (audio domain, tolerance — Doctrine §3) at IFKP's 16 kHz. Closed by
