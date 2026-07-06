@@ -2,6 +2,9 @@ package app
 
 import (
 	"fmt"
+	"image"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +42,21 @@ type operateView struct {
 	modeLabel  string     // active mode label, for the surface header
 	slotSecs   float64    // T/R slot length for sequencer/beacon modes
 	qlog       qsoLog
+
+	// Picture send (image-shape modes): a file picker overlay and the staged
+	// image awaiting transmit. picker != nil means the dialog is open and owns
+	// all keys; staged != nil means a picture is chosen and previewed.
+	picker *ui.ImagePicker
+	staged *stagedImage
+}
+
+// stagedImage is a picture chosen from the picker, held ready to transmit with a
+// live preview shown on the operate surface.
+type stagedImage struct {
+	name  string
+	bytes []byte
+	img   image.Image
+	w, h  int
 }
 
 func newOperateView(m *Model) *operateView {
@@ -133,6 +151,17 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		v.txWf.pushBlank()
 		return v, txDrainCmd()
 	case tea.KeyMsg:
+		// While the picture picker is open it owns every key.
+		if v.picker != nil {
+			switch v.picker.Update(msg) {
+			case ui.PickerSelected:
+				v.stageImage(v.picker.Selected())
+				v.picker = nil
+			case ui.PickerCancelled:
+				v.picker = nil
+			}
+			return v, nil
+		}
 		switch msg.String() {
 		case "esc":
 			// Leave operate: halt any TX, stop the spectrum, then pop back.
@@ -148,6 +177,16 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 				v.tx.halt()
 				return v, releaseLeaseCmd(v.m.c, v.m.sel)
 			}
+			// Idle picture mode: clear a staged image without transmitting.
+			if v.staged != nil {
+				v.staged = nil
+			}
+			return v, nil
+		case "ctrl+o":
+			// Picture modes: open the file picker to choose an image to send.
+			if v.raster != nil {
+				v.picker = ui.NewImagePicker(pickerStartDir())
+			}
 			return v, nil
 		case "enter":
 			if v.beacon {
@@ -155,6 +194,9 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			}
 			if v.seq != nil {
 				return v, v.ft8Send()
+			}
+			if v.raster != nil && v.staged != nil {
+				return v, v.sendImage() // picture mode with an image staged
 			}
 			return v, v.sendCompose()
 		case "f1", "f2", "f3", "f4", "f5":
@@ -244,6 +286,43 @@ func (v *operateView) appendRx(s string) {
 	}
 }
 
+// pickerStartDir chooses where the picture picker opens: the operator's home
+// directory when known (that's where photos usually live), else the working dir.
+func pickerStartDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return "."
+}
+
+// stageImage loads a chosen file into the staging slot: it reads the raw bytes
+// for TX and decodes the image for the on-screen preview. Failures leave any
+// previously staged image untouched and surface a toast.
+func (v *operateView) stageImage(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		v.m.toast = ui.NewToast("Cannot read image: "+err.Error(), ui.SeverityError)
+		return
+	}
+	img, err := ui.DecodeImageFile(path)
+	if err != nil {
+		v.m.toast = ui.NewToast("Cannot decode image: "+err.Error(), ui.SeverityError)
+		return
+	}
+	b := img.Bounds()
+	v.staged = &stagedImage{name: filepath.Base(path), bytes: data, img: img, w: b.Dx(), h: b.Dy()}
+	v.m.toast = ui.NewToast(fmt.Sprintf("Staged %s — enter to transmit", v.staged.name), ui.SeverityInfo)
+}
+
+// sendImage transmits the staged picture over the current picture-capable mode.
+func (v *operateView) sendImage() tea.Cmd {
+	if v.tx.active() || v.staged == nil {
+		return nil
+	}
+	v.tx.begin(v.staged.bytes)
+	return acquireLeaseCmd(v.m.c, v.m.sel)
+}
+
 func (v *operateView) sendCompose() tea.Cmd {
 	line := strings.TrimSpace(v.compose)
 	if line == "" || v.tx.active() {
@@ -257,6 +336,21 @@ func (v *operateView) sendCompose() tea.Cmd {
 }
 
 func (v *operateView) Render(w, h int) string {
+	// The picture picker takes over the whole surface while open.
+	if v.picker != nil {
+		modalW := w
+		if modalW > 88 {
+			modalW = 88
+		}
+		bodyH := h - 6
+		if bodyH < 6 {
+			bodyH = 6
+		}
+		box := v.picker.View(modalW, bodyH)
+		return "\n" + lipgloss.PlaceHorizontal(w, lipgloss.Center, box,
+			lipgloss.WithWhitespaceBackground(ui.ColorPanel))
+	}
+
 	var b strings.Builder
 
 	// Two waterfalls side by side, fixed at the top: RX (received) on the left,
@@ -325,14 +419,21 @@ func (v *operateView) Render(w, h int) string {
 		return b.String()
 	}
 	if v.raster != nil {
-		// Facsimile: a scrolling raster of the received image columns, then the
-		// text compose line (the mode paints typed text into pixels on TX).
+		// Facsimile / picture: a scrolling raster of the received image columns,
+		// then either the staged-picture preview (ready to transmit) or the text
+		// compose line (the mode also paints typed text into pixels on TX).
 		b.WriteString(fmt.Sprintf("%s · facsimile raster · %d cols\n\n",
 			strings.ToUpper(v.modeLabel), len(v.raster.cols)))
 		b.WriteString(v.raster.render(w) + "\n\n")
+		if v.staged != nil {
+			b.WriteString(v.stagedPreview(w))
+			return b.String()
+		}
 		b.WriteString("› " + v.compose)
 		if v.tx.active() {
 			b.WriteString("   " + ui.Accent.Render("[TX]"))
+		} else {
+			b.WriteString("\n\n" + ui.Dim.Render("‹ctrl+o› choose a picture to send"))
 		}
 		return b.String()
 	}
@@ -344,6 +445,40 @@ func (v *operateView) Render(w, h int) string {
 		b.WriteString("   " + ui.Accent.Render("[TX]"))
 	}
 	return b.String()
+}
+
+// stagedPreview draws the chosen picture (half-block thumbnail) with its name,
+// dimensions, and the transmit/replace hints — the "preview before TX" surface.
+func (v *operateView) stagedPreview(w int) string {
+	s := v.staged
+	previewCols := w
+	if previewCols > 56 {
+		previewCols = 56
+	}
+	art := ui.RenderImageHalfBlock(s.img, previewCols, 10)
+	header := ui.Title.Render("Ready to send: ") +
+		ui.Accent.Render(fmt.Sprintf("%s  %d×%d  %s", s.name, s.w, s.h, humanBytes(len(s.bytes))))
+	var b strings.Builder
+	b.WriteString(header + "\n\n")
+	b.WriteString(art + "\n\n")
+	if v.tx.active() {
+		b.WriteString(ui.Accent.Render("[TX] transmitting picture…"))
+	} else {
+		b.WriteString(ui.Dim.Render("‹enter› transmit   ‹ctrl+o› choose another   ‹ctrl+x› cancel"))
+	}
+	return b.String()
+}
+
+// humanBytes formats a byte count for the staged-picture footer.
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 func (v *operateView) Title() string {
@@ -364,6 +499,23 @@ func (v *operateView) Hints() []ui.Hint {
 	if v.seq != nil {
 		return []ui.Hint{
 			{Key: "enter", Action: "send next"}, {Key: "ctrl+x", Action: "halt"}, {Key: "esc", Action: "back"},
+		}
+	}
+	if v.raster != nil {
+		if v.picker != nil {
+			return []ui.Hint{
+				{Key: "↑/↓", Action: "browse"}, {Key: "enter", Action: "select"}, {Key: "esc", Action: "cancel"},
+			}
+		}
+		if v.staged != nil {
+			return []ui.Hint{
+				{Key: "enter", Action: "transmit"}, {Key: "ctrl+o", Action: "change"},
+				{Key: "ctrl+x", Action: "cancel"}, {Key: "esc", Action: "back"},
+			}
+		}
+		return []ui.Hint{
+			{Key: "ctrl+o", Action: "pick picture"}, {Key: "enter", Action: "send text"},
+			{Key: "ctrl+x", Action: "halt"}, {Key: "esc", Action: "back"},
 		}
 	}
 	return []ui.Hint{
