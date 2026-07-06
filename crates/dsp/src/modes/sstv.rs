@@ -444,8 +444,104 @@ pub mod modulator {
     }
 }
 
+/// Fixed working sample rate for every SSTV submode. ref: Main.cpp:212 (`SampFreq=11025`).
+pub const SAMPLE_RATE: u32 = 11025;
+
+/// Audio rendering + FM demodulation (plan F1.1 + T4-audio). These are the **FP-tolerance**
+/// stages (Doctrine §3): the tone renderer and discriminator are faithful ports of the
+/// reference's VCO/PLL behaviour but are never asserted bit-exact against reference audio.
+pub mod audio {
+    use super::vis::Symbol;
+    use super::SAMPLE_RATE;
+    use crate::frontend::fir::{design_lowpass, Fir};
+    use crate::frontend::nco::DownConverter;
+    use crate::types::{Cplx, Sample};
+
+    /// The scan/sync band spans 1200–2300 Hz; centre the discriminator at 1900 Hz (the
+    /// reference PLL free band is 1500–2300, ref: sstv.cpp:1436). Only the low 12 bits of a
+    /// symbol frequency are the tone — the upper nibble is a TX channel-gain tag masked off
+    /// in `CSSTVMOD::Do` (`f & 0x0fff`, ref: sstv.cpp:2869).
+    const DISC_CENTER_HZ: f32 = 1900.0;
+    const TONE_MASK: u16 = 0x0fff;
+
+    /// Render a symbol stream to PCM at [`SAMPLE_RATE`], accumulating fractional sample
+    /// positions exactly as the reference does (`m_dPos += ms*fs/1000`, ref: sstv.cpp:2843)
+    /// so line timing does not drift. A pure sine per tone (the FP-domain analogue of the
+    /// reference VCO); edge shaping/BPF are spectral refinements that don't move the raster.
+    pub fn render(symbols: &[Symbol], amplitude: f32) -> Vec<Sample> {
+        let fs = SAMPLE_RATE as f64;
+        let mut out = Vec::new();
+        let mut d_pos = 0.0f64;
+        let mut i_pos = 0i64;
+        let mut phase = 0.0f64;
+        for s in symbols {
+            let f = (s.freq_hz & TONE_MASK) as f64;
+            d_pos += s.ms * fs / 1000.0;
+            let dphi = std::f64::consts::TAU * f / fs;
+            while (i_pos as f64) < d_pos {
+                out.push((amplitude as f64 * phase.sin()) as Sample);
+                phase += dphi;
+                if phase > std::f64::consts::TAU {
+                    phase -= std::f64::consts::TAU;
+                }
+                i_pos += 1;
+            }
+        }
+        out
+    }
+
+    /// FM discriminator: down-convert to complex baseband around [`DISC_CENTER_HZ`], lowpass
+    /// to kill the sum-frequency image, and read instantaneous frequency from the phase
+    /// increment `arg(z[n] · conj(z[n-1]))`. Output is the recovered tone frequency in Hz.
+    pub struct Discriminator {
+        dc: DownConverter,
+        lpf_i: Fir,
+        lpf_q: Fir,
+        prev: Cplx,
+        have_prev: bool,
+    }
+
+    impl Discriminator {
+        pub fn new() -> Self {
+            // Anti-image lowpass on the complex baseband: pass the ±700 Hz difference band,
+            // reject the sum-frequency image (≈3000–4600 Hz). 31-tap Blackman sinc @ 1000 Hz.
+            let taps = design_lowpass(31, 1000.0, SAMPLE_RATE as f32);
+            Discriminator {
+                dc: DownConverter::new(DISC_CENTER_HZ, SAMPLE_RATE as f32),
+                lpf_i: Fir::new(taps.clone()),
+                lpf_q: Fir::new(taps),
+                prev: Cplx::new(0.0, 0.0),
+                have_prev: false,
+            }
+        }
+
+        /// Push one real sample, get the instantaneous tone frequency (Hz).
+        pub fn push(&mut self, x: Sample) -> f32 {
+            let b = self.dc.push(x);
+            let z = Cplx::new(self.lpf_i.push(b.re), self.lpf_q.push(b.im));
+            let freq = if self.have_prev {
+                let d = z * self.prev.conj();
+                let dphi = d.im.atan2(d.re);
+                DISC_CENTER_HZ + dphi * SAMPLE_RATE as f32 / std::f32::consts::TAU
+            } else {
+                DISC_CENTER_HZ
+            };
+            self.prev = z;
+            self.have_prev = true;
+            freq
+        }
+    }
+
+    impl Default for Discriminator {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::audio::{render, Discriminator};
     use super::modulator::{color_to_freq, scottie_symbols, symbol_digest, Rgb};
     use super::vis::{header, Symbol};
     use super::*;
@@ -590,6 +686,44 @@ mod tests {
         assert_eq!(line0[0], Symbol { freq_hz: 1500 + 0x2000, ms: 1.5 });
         // porch + 320 G + sepB + 320 B = index 642 is the 1200/9 sync.
         assert_eq!(line0[1 + 320 + 1 + 320], Symbol { freq_hz: 1200, ms: 9.0 });
+    }
+
+    /// FP round-trip of the audio primitives (plan F1.1): render known held tones, run the
+    /// FM discriminator, and confirm the recovered frequency settles near each tone. Proves
+    /// the symbol→PCM renderer and the discriminator agree end-to-end.
+    #[test]
+    fn audio_render_then_discriminate_recovers_tones() {
+        use super::vis::Symbol;
+        // Black (1500), sync (1200), mid-grey (1900), white (2300), each held 20 ms.
+        let syms = [
+            Symbol { freq_hz: 1500, ms: 20.0 },
+            Symbol { freq_hz: 1200, ms: 20.0 },
+            Symbol { freq_hz: 1900, ms: 20.0 },
+            Symbol { freq_hz: 2300, ms: 20.0 },
+        ];
+        let pcm = render(&syms, 16000.0);
+        let mut disc = Discriminator::new();
+        let freqs: Vec<f32> = pcm.iter().map(|&x| disc.push(x)).collect();
+
+        let sps = (SAMPLE_RATE as f64 * 0.020) as usize; // samples per 20 ms tone
+                                                         // Sample the steady-state middle of each tone (skip filter/discriminator settling).
+        for (i, &want) in [1500.0f32, 1200.0, 1900.0, 2300.0].iter().enumerate() {
+            let mid = i * sps + sps / 2;
+            let got = freqs[mid];
+            assert!(
+                (got - want).abs() < 25.0,
+                "tone {}: wanted {want} Hz, discriminator gave {got} Hz",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_pcm_length_tracks_symbol_durations() {
+        use super::vis::Symbol;
+        // 100 ms total at 11025 Hz ≈ 1102 samples (fractional accumulation, no drift).
+        let pcm = render(&[Symbol { freq_hz: 1900, ms: 100.0 }], 10000.0);
+        assert!((pcm.len() as i64 - 1102).abs() <= 1, "got {} samples", pcm.len());
     }
 
     #[test]
