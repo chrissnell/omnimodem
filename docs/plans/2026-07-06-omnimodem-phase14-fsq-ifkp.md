@@ -111,20 +111,24 @@ retargeted to 33 tones with `OFFSET = 1`.
 
 - [x] **T1** — extractors + golden vectors committed (`ifkp_varicode.json`,
   `fsq_varicode.json`).
-- [ ] **T2** — port `ifkp_varicode` + `fsq_varicode` (tables + framer + CRC8);
-  bit-exact unit tests vs the golden tables.
-- [ ] **T3** — n/a: neither mode has FEC or interleave (text path). The
+- [x] **T2** — ported `ifkp_varicode` + `fsq_varicode` (verbatim tables + framer
+  + CRC8); bit-exact unit tests vs the golden tables.
+- [x] **T3** — n/a: neither mode has FEC or interleave (text path). The
   "codeword" stage is the varicode symbol stream, covered by T2.
-- [ ] **T4** — 33-tone IFK modulator: symbol→tone index bit-exact vs golden
-  `tones`; audio via `MFsk`, loopback tolerance only.
-- [ ] **T5** — 33-tone IFK demodulator: Goertzel symbol detect + differential
-  inverse + framer; loopback round-trip at high SNR + AWGN sweep.
-- [ ] **T6** — register `ifkp` (+ speed) and `fsq` (+ speed, directed flag,
-  mycall) in `modes/mod.rs`, `mode/{mod.rs,registry.rs}`, proto params.
-- [ ] **T7** — conformance: `#[ignore]` cross-decode gate stub in `kat.rs`;
-  `ber.rs` AWGN decode-rate sweep with committed threshold.
-- [ ] **T8** — TUI: add `ifkp` and `fsq` rows to `internal/app/modes.go` with
-  their params; FSQ's directed traffic surfaces in the operate view.
+- [x] **T4** — 33-tone IFK modulator (`modes/ifk33.rs` + `ifkp`/`fsq`):
+  symbol→tone index bit-exact vs golden `tones`; audio via `MFsk`, loopback
+  tolerance only.
+- [x] **T5** — 33-tone IFK demodulator: Goertzel symbol detect + differential
+  inverse + framer; loopback round-trip + AWGN sweep. FSQ adds the BOT/EOT
+  segmentation + directed parse.
+- [x] **T6** — registered `ifkp` (+ speed) and `fsq` (+ speed, directed, mycall)
+  in `modes/mod.rs`, `mode/{mod.rs,registry.rs}`, proto params.
+- [x] **T7** — conformance: golden-vector KAT + loopback/AWGN grid + `#[ignore]`
+  cross-decode gate in `kat.rs`; `ber.rs` AWGN decode-rate sweeps with committed
+  thresholds.
+- [x] **T8** — TUI: `ifkp` and `fsq` rows in `internal/app/modes.go` with their
+  params; `IfkpParams`/`FsqParams` proto (Rust + Go), `effective_mode` encoding,
+  and the FSQ callsign injected from the station identity.
 - [ ] **T9** — phase PR.
 
 ## Deferred (documented, not stubbed)
