@@ -287,12 +287,26 @@ func TestHellImageShapeRendersRaster(t *testing.T) {
 	for i := range on {
 		on[i] = 255
 	}
-	v.raster.push(&pb.Image{Width: 14, Gray: on})
+	v.raster.push(&pb.Image{Width: 14, Pixels: on})
 	if got := v.raster.render(80); !strings.Contains(got, "#") {
 		t.Fatalf("raster should render on-pixels as blocks, got %q", got)
 	}
 	if got := v.Render(80, 24); !strings.Contains(got, "FELDHELL") {
 		t.Fatalf("raster header should name the mode, got %q", firstLine(got))
+	}
+}
+
+// A colour (channels=3) Image frame from the picture sub-protocols folds into
+// the same raster surface, reduced to luminance for the monochrome terminal.
+func TestRasterFoldsColorImageAsLuma(t *testing.T) {
+	var r rasterBuf
+	// One 2-pixel column: white and black RGB pixels.
+	r.push(&pb.Image{Width: 2, Channels: 3, Pixels: []byte{255, 255, 255, 0, 0, 0}})
+	if r.width != 2 || len(r.cols) != 1 {
+		t.Fatalf("expected one 2-tall column, got width=%d cols=%d", r.width, len(r.cols))
+	}
+	if r.cols[0][0] != 255 || r.cols[0][1] != 0 {
+		t.Fatalf("RGB should reduce to luma {255,0}, got %v", r.cols[0])
 	}
 }
 

@@ -2355,15 +2355,19 @@ func (x *RxFrame) GetImage() *Image {
 	return nil
 }
 
-// A decoded raster. `gray` is row-major 8-bit luminance, `gray.len() == width *
-// rows` (rows = gray.len() / width). Designed against Hell's continuous column
-// stream — each successive `width`-byte row is one on-air column (14 rows tall)
-// — and reused by WEFAX (Phase 12) and the picture sub-protocols (Phase 15),
-// which append rows/columns incrementally.
+// A decoded raster. `pixels` is row-major 8-bit samples, `channels` interleaved
+// values per pixel: 1 = grayscale luminance, 3 = RGB (`R,G,B,R,G,B,…`).
+// `pixels.len() == width * rows * channels` (rows = pixels.len()/(width*channels)).
+// Designed against Hell's continuous column stream — each successive
+// `width*channels`-byte row is one on-air column — and reused by WEFAX
+// (Phase 12) and the picture sub-protocols (Phase 15, which carry colour),
+// appended incrementally. `channels` defaults to 0 on the wire for older
+// grayscale producers; readers treat 0 as 1.
 type Image struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Width         uint32                 `protobuf:"varint,1,opt,name=width,proto3" json:"width,omitempty"` // pixels per row (Hell: 14, the column height)
-	Gray          []byte                 `protobuf:"bytes,2,opt,name=gray,proto3" json:"gray,omitempty"`    // row-major 8-bit luminance
+	Width         uint32                 `protobuf:"varint,1,opt,name=width,proto3" json:"width,omitempty"`       // pixels per row (Hell: 14, the column height)
+	Pixels        []byte                 `protobuf:"bytes,2,opt,name=pixels,proto3" json:"pixels,omitempty"`      // row-major 8-bit samples, `channels` per pixel
+	Channels      uint32                 `protobuf:"varint,3,opt,name=channels,proto3" json:"channels,omitempty"` // 1 = grayscale, 3 = RGB interleaved (0 ⇒ 1)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2405,11 +2409,18 @@ func (x *Image) GetWidth() uint32 {
 	return 0
 }
 
-func (x *Image) GetGray() []byte {
+func (x *Image) GetPixels() []byte {
 	if x != nil {
-		return x.Gray
+		return x.Pixels
 	}
 	return nil
+}
+
+func (x *Image) GetChannels() uint32 {
+	if x != nil {
+		return x.Channels
+	}
+	return 0
 }
 
 type AudioLevel struct {
@@ -4098,10 +4109,11 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12!\n" +
 	"\ftimestamp_ns\x18\x03 \x01(\x04R\vtimestampNs\x12)\n" +
-	"\x05image\x18\x04 \x01(\v2\x13.omnimodem.v1.ImageR\x05image\"1\n" +
+	"\x05image\x18\x04 \x01(\v2\x13.omnimodem.v1.ImageR\x05image\"Q\n" +
 	"\x05Image\x12\x14\n" +
-	"\x05width\x18\x01 \x01(\rR\x05width\x12\x12\n" +
-	"\x04gray\x18\x02 \x01(\fR\x04gray\":\n" +
+	"\x05width\x18\x01 \x01(\rR\x05width\x12\x16\n" +
+	"\x06pixels\x18\x02 \x01(\fR\x06pixels\x12\x1a\n" +
+	"\bchannels\x18\x03 \x01(\rR\bchannels\":\n" +
 	"\n" +
 	"AudioLevel\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +

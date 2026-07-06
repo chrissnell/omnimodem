@@ -325,14 +325,18 @@ message RxFrame {
   Image image = 4;   // set for raster modes; `data` empty when this is present
 }
 
-// A decoded raster. `gray` is row-major 8-bit luminance, `gray.len() == width *
-// rows` (rows = gray.len() / width). Designed against Hell's continuous column
-// stream — each successive `width`-byte row is one on-air column (14 rows tall)
-// — and reused by WEFAX (Phase 12) and the picture sub-protocols (Phase 15),
-// which append rows/columns incrementally.
+// A decoded raster. `pixels` is row-major 8-bit samples, `channels` interleaved
+// values per pixel: 1 = grayscale luminance, 3 = RGB (`R,G,B,R,G,B,…`).
+// `pixels.len() == width * rows * channels` (rows = pixels.len()/(width*channels)).
+// Designed against Hell's continuous column stream — each successive
+// `width*channels`-byte row is one on-air column — and reused by WEFAX
+// (Phase 12) and the picture sub-protocols (Phase 15, which carry colour),
+// appended incrementally. `channels` defaults to 0 on the wire for older
+// grayscale producers; readers treat 0 as 1.
 message Image {
-  uint32 width = 1;  // pixels per row (Hell: 14, the column height)
-  bytes  gray = 2;   // row-major 8-bit luminance
+  uint32 width = 1;     // pixels per row (Hell: 14, the column height)
+  bytes  pixels = 2;    // row-major 8-bit samples, `channels` per pixel
+  uint32 channels = 3;  // 1 = grayscale, 3 = RGB interleaved (0 ⇒ 1)
 }
 
 message AudioLevel {

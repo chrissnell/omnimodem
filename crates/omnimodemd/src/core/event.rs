@@ -7,12 +7,14 @@
 
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 
-/// A decoded raster payload (Hell, WEFAX, picture sub-protocols): `gray` is
-/// row-major 8-bit luminance, `gray.len() == width * rows`.
+/// A decoded raster payload (Hell, WEFAX, picture sub-protocols): `pixels` is
+/// row-major 8-bit samples, `channels` interleaved values per pixel (1 =
+/// grayscale, 3 = RGB). `pixels.len() == width * rows * channels`.
 #[derive(Debug, Clone)]
 pub struct RxImage {
     pub width: u16,
-    pub gray: Vec<u8>,
+    pub channels: u8,
+    pub pixels: Vec<u8>,
 }
 
 /// LOSSLESS class. Carried on a dedicated broadcast; a subscriber that lags is

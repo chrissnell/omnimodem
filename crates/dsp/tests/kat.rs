@@ -1175,7 +1175,7 @@ fn hell_submode_grid_raster_loopback_and_awgn() {
         rx.feed(samples);
         let frames = rx.flush();
         match &frames[0].payload {
-            FramePayload::Image { width, gray } => image_columns(*width, gray),
+            FramePayload::Image { width, pixels, .. } => image_columns(*width, pixels),
             _ => panic!("expected Image payload"),
         }
     }

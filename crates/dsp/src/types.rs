@@ -43,10 +43,12 @@ pub enum FramePayload {
     /// Opaque vocoder bits (Phase-5 voice modes).
     Vocoder(Vec<u8>),
     /// Raster/scanline image for facsimile modes (Hell, WEFAX, and the
-    /// MFSK/THOR/IFKP/FSQ picture sub-protocols). `gray` is row-major 8-bit
-    /// luminance, one `u8` per pixel; `gray.len()` is a whole multiple of
-    /// `width`, so the row count is `gray.len() / width`.
-    Image { width: u16, gray: Vec<u8> },
+    /// MFSK/THOR/IFKP/FSQ picture sub-protocols). `pixels` is row-major 8-bit
+    /// samples, `channels` interleaved values per pixel: `channels == 1` is
+    /// grayscale luminance, `channels == 3` is `R,G,B,R,G,B,…`. `pixels.len()`
+    /// is a whole multiple of `width * channels`, so the row count is
+    /// `pixels.len() / (width * channels)`.
+    Image { width: u16, channels: u8, pixels: Vec<u8> },
 }
 
 impl FramePayload {
@@ -70,10 +72,11 @@ impl FramePayload {
                 3u8.hash(h);
                 b.hash(h);
             }
-            FramePayload::Image { width, gray } => {
+            FramePayload::Image { width, channels, pixels } => {
                 4u8.hash(h);
                 width.hash(h);
-                gray.hash(h);
+                channels.hash(h);
+                pixels.hash(h);
             }
         }
     }
@@ -129,13 +132,14 @@ mod tests {
     #[test]
     fn image_payload_roundtrips_and_hashes() {
         use std::hash::Hasher;
-        // 2 rows x 3 cols of 8-bit luminance.
-        let img = FramePayload::Image { width: 3, gray: vec![0, 128, 255, 1, 2, 3] };
+        // 2 rows x 3 cols of 8-bit grayscale luminance.
+        let img = FramePayload::Image { width: 3, channels: 1, pixels: vec![0, 128, 255, 1, 2, 3] };
         let f = Frame { payload: img.clone(), meta: FrameMeta::default() };
         assert_eq!(f.payload, img);
-        if let FramePayload::Image { width, gray } = &f.payload {
-            assert_eq!(gray.len() % (*width as usize), 0);
-            assert_eq!(gray.len() / (*width as usize), 2); // 2 rows
+        if let FramePayload::Image { width, channels, pixels } = &f.payload {
+            let stride = *width as usize * *channels as usize;
+            assert_eq!(pixels.len() % stride, 0);
+            assert_eq!(pixels.len() / stride, 2); // 2 rows
         } else {
             panic!("expected Image");
         }
@@ -143,7 +147,23 @@ mod tests {
         let mut ha = std::collections::hash_map::DefaultHasher::new();
         img.hash_into(&mut ha);
         let mut hb = std::collections::hash_map::DefaultHasher::new();
-        FramePayload::Image { width: 3, gray: vec![0, 128, 255, 1, 2, 4] }.hash_into(&mut hb);
+        FramePayload::Image { width: 3, channels: 1, pixels: vec![0, 128, 255, 1, 2, 4] }
+            .hash_into(&mut hb);
+        assert_ne!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn image_payload_color_is_distinct_from_grayscale() {
+        use std::hash::Hasher;
+        // Same buffer, different channel interpretation must hash differently
+        // (2px RGB vs 6px gray) and compare unequal.
+        let rgb = FramePayload::Image { width: 2, channels: 3, pixels: vec![10, 20, 30, 40, 50, 60] };
+        let gray = FramePayload::Image { width: 6, channels: 1, pixels: vec![10, 20, 30, 40, 50, 60] };
+        assert_ne!(rgb, gray);
+        let mut ha = std::collections::hash_map::DefaultHasher::new();
+        rgb.hash_into(&mut ha);
+        let mut hb = std::collections::hash_map::DefaultHasher::new();
+        gray.hash_into(&mut hb);
         assert_ne!(ha.finish(), hb.finish());
     }
 }

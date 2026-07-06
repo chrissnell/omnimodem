@@ -341,10 +341,10 @@ fn sync_spectrum_tap(
 fn emit(frames: &broadcast::Sender<FrameEvent>, channel: ChannelId, payload: &FramePayload) {
     let ev = match payload {
         // Raster payloads travel in the typed image field; `data` stays empty.
-        FramePayload::Image { width, gray } => FrameEvent::RxFrame {
+        FramePayload::Image { width, channels, pixels } => FrameEvent::RxFrame {
             channel,
             data: Vec::new(),
-            image: Some(RxImage { width: *width, gray: gray.clone() }),
+            image: Some(RxImage { width: *width, channels: *channels, pixels: pixels.clone() }),
             timestamp_ns: 0,
         },
         other => FrameEvent::RxFrame {

@@ -166,7 +166,11 @@ pub fn frame_event_to_proto(ev: FrameEvent) -> proto::Event {
                 channel: channel.0,
                 data,
                 timestamp_ns,
-                image: image.map(|i| proto::Image { width: i.width as u32, gray: i.gray }),
+                image: image.map(|i| proto::Image {
+                    width: i.width as u32,
+                    channels: i.channels as u32,
+                    pixels: i.pixels,
+                }),
             })
         }
     };
@@ -302,7 +306,11 @@ mod tests {
         let ev = FrameEvent::RxFrame {
             channel: ChannelId(3),
             data: Vec::new(),
-            image: Some(RxImage { width: 14, gray: vec![0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255] }),
+            image: Some(RxImage {
+                width: 14,
+                channels: 1,
+                pixels: vec![0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255],
+            }),
             timestamp_ns: 42,
         };
         let proto::event::Kind::RxFrame(rf) =
@@ -313,7 +321,8 @@ mod tests {
         assert!(rf.data.is_empty(), "raster payloads must not flatten into data");
         let img = rf.image.expect("typed image must be set");
         assert_eq!(img.width, 14);
-        assert_eq!(img.gray.len(), 14);
+        assert_eq!(img.channels, 1);
+        assert_eq!(img.pixels.len(), 14);
         assert_eq!(rf.channel, 3);
     }
 
