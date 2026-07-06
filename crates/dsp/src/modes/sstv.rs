@@ -509,10 +509,53 @@ pub mod modulator {
         pixels(out, by.iter().copied(), 0, 69.0 / 320.0);
     }
 
-    /// Whether the colour-difference (Y/R-Y/B-Y) modes wired here support `mode`. Currently
-    /// Robot 72 only; the rest of the Robot/PD/MP/MR families follow.
+    // Fill Y / R-Y / B-Y channel arrays from a row via GetRY.
+    fn ry_channels(row: &[Rgb; 320]) -> ([u8; 320], [u8; 320], [u8; 320]) {
+        let (mut y, mut ry, mut by) = ([0u8; 320], [0u8; 320], [0u8; 320]);
+        for (x, p) in row.iter().enumerate() {
+            let (yy, r, b) = get_ry(*p);
+            y[x] = yy;
+            ry[x] = r;
+            by[x] = b;
+        }
+        (y, ry, by)
+    }
+
+    /// One Robot 24 scan line. ref: Main.cpp:6088 `LineR24`:
+    /// sync(6)·porch(2)·Y(92)·sep(3)·mark(1)·R-Y(46)·sep(3)·mark(1)·B-Y(46).
+    pub fn robot24_line(out: &mut Vec<Symbol>, row: &[Rgb; 320]) {
+        let (y, ry, by) = ry_channels(row);
+        out.push(Symbol { freq_hz: 1200, ms: 6.0 });
+        out.push(Symbol { freq_hz: 1500, ms: 2.0 });
+        pixels(out, y.iter().copied(), 0, 92.0 / 320.0);
+        out.push(Symbol { freq_hz: 1500, ms: 3.0 });
+        out.push(Symbol { freq_hz: 1900, ms: 1.0 });
+        pixels(out, ry.iter().copied(), 0, 46.0 / 320.0);
+        out.push(Symbol { freq_hz: 2300, ms: 3.0 });
+        out.push(Symbol { freq_hz: 1900, ms: 1.0 });
+        pixels(out, by.iter().copied(), 0, 46.0 / 320.0);
+    }
+
+    /// One Robot 36 scan line. ref: Main.cpp:6111 `LineR36`: sync(9)·porch(3)·Y(88)·sep(4.5)·
+    /// mark(1.5)·chroma(44). Each line carries ONE chroma channel, alternating by line parity:
+    /// even lines send R-Y (separator 1500 Hz), odd lines send B-Y (separator 2300 Hz).
+    pub fn robot36_line(out: &mut Vec<Symbol>, row: &[Rgb; 320], line: usize) {
+        let (y, ry, by) = ry_channels(row);
+        let even = line.is_multiple_of(2);
+        out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        out.push(Symbol { freq_hz: 1500, ms: 3.0 });
+        pixels(out, y.iter().copied(), 0, 88.0 / 320.0);
+        out.push(Symbol { freq_hz: if even { 1500 } else { 2300 }, ms: 4.5 });
+        out.push(Symbol { freq_hz: 1900, ms: 1.5 });
+        let chroma = if even { &ry } else { &by };
+        pixels(out, chroma.iter().copied(), 0, 44.0 / 320.0);
+    }
+
+    /// Whether the colour-difference (Y/R-Y/B-Y) modes wired here support `mode`. Currently the
+    /// Robot colour family (72/36/24); PD/MP/MR follow.
     pub fn robot_supported(mode: SstvMode) -> bool {
-        mode == SstvMode::Robot72
+        use SstvMode::*;
+        matches!(mode, Robot72 | Robot36 | Robot24)
     }
 
     /// Full colour-difference transmission (Robot family). VIS header, then one line per row.
@@ -521,8 +564,13 @@ pub mod modulator {
             return None;
         }
         let mut out = header(mode);
-        for row in rows {
-            robot72_line(&mut out, row);
+        for (k, row) in rows.iter().enumerate() {
+            match mode {
+                SstvMode::Robot72 => robot72_line(&mut out, row),
+                SstvMode::Robot24 => robot24_line(&mut out, row),
+                SstvMode::Robot36 => robot36_line(&mut out, row, k),
+                _ => return None,
+            }
         }
         Some(out)
     }
@@ -833,6 +881,16 @@ pub mod demod {
                 ry: (151.5, 69.0),
                 by: (226.5, 69.0),
             }),
+            // ref: LineR24 Main.cpp:6088. sync(6)·porch(2)·Y(92)·sep(3)·mark(1)·R-Y(46)·
+            // sep(3)·mark(1)·B-Y(46). Offsets from the sync centre (+3).
+            super::SstvMode::Robot24 => Some(YcLayout {
+                min_sync_ms: 4.0,
+                period_ms: 200.0,
+                first_sync_ms: header + 3.0,
+                y: (5.0, 92.0),
+                ry: (101.0, 46.0),
+                by: (151.0, 46.0),
+            }),
             _ => None,
         }
     }
@@ -857,26 +915,60 @@ pub mod demod {
         min_sync_ms: f64,
         period_ms: f64,
         first_ms: f64,
-        mut decode: impl FnMut(&[f32], usize) -> [Rgb; 320],
+        mut decode: impl FnMut(&[f32], usize, usize) -> [Rgb; 320],
     ) -> (u16, Vec<u8>) {
         let geom = mode.geometry();
+        // Some modes transmit `scan_lines` lines but display two identical picture rows each
+        // (Robot 24: rows == 2·scan_lines). ref: the smR24 gp2 duplicate, Main.cpp:3937.
+        let rows_per_scan = (geom.rows / geom.scan_lines).max(1) as usize;
         let header_end = ms_to_samp(header_ms(mode)) as i64;
         let all: Vec<usize> =
             find_sync_centers(freq, min_sync_ms).into_iter().filter(|&s| s as i64 >= header_end).collect();
         let period = ms_to_samp(period_ms);
         let first = ms_to_samp(first_ms) as i64 + DISC_GROUP_DELAY;
         let win = (period * 0.3) as i64;
-        let mut rgb = Vec::with_capacity(geom.width as usize * geom.scan_lines as usize * 3);
+        let mut rgb = Vec::with_capacity(geom.width as usize * geom.rows as usize * 3);
         for k in 0..geom.scan_lines as usize {
             let predicted = first + (k as f64 * period) as i64;
             let sc = nearest(&all, predicted, win).unwrap_or_else(|| predicted.max(0) as usize);
-            for px in decode(freq, sc) {
-                rgb.push(px.r);
-                rgb.push(px.g);
-                rgb.push(px.b);
+            let row = decode(freq, sc, k);
+            for _ in 0..rows_per_scan {
+                for px in row {
+                    rgb.push(px.r);
+                    rgb.push(px.g);
+                    rgb.push(px.b);
+                }
             }
         }
         (geom.width, rgb)
+    }
+
+    /// Robot 36 decode: each line carries Y plus ONE chroma channel that alternates by line
+    /// parity (even → R-Y, odd → B-Y). The two chroma buffers persist across lines, so a
+    /// displayed row combines this line's Y with the most-recent R-Y and B-Y. ref: smR36
+    /// reconstruction Main.cpp:3856.
+    fn decode_frame_robot36(freq: &[f32], mode: super::SstvMode) -> (u16, Vec<u8>) {
+        let header = header_ms(mode);
+        let mut ry_buf = [0i32; 320];
+        let mut by_buf = [0i32; 320];
+        run_frame(freq, mode, 6.0, 150.0, header + 4.5, |f, sc, k| {
+            let y = sample_channel(f, sc, 7.5, 88.0);
+            let ch = sample_channel(f, sc, 101.5, 44.0);
+            let even = k.is_multiple_of(2);
+            for x in 0..320 {
+                let c = ch[x] as i32 - 128;
+                if even {
+                    ry_buf[x] = c;
+                } else {
+                    by_buf[x] = c;
+                }
+            }
+            let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+            for (x, px) in row.iter_mut().enumerate() {
+                *px = yc_to_rgb(y[x] as i32, ry_buf[x], by_buf[x]);
+            }
+            row
+        })
     }
 
     /// Decode a full analog line-scan frame from PCM to a row-major RGB raster (3 bytes/pixel),
@@ -887,13 +979,16 @@ pub mod demod {
         match mode.color_model() {
             super::ColorModel::Rgb => {
                 let lay = layout(mode)?;
-                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc| {
+                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc, _k| {
                     decode_line(f, sc, &lay)
                 }))
             }
+            super::ColorModel::RobotColor if mode == super::SstvMode::Robot36 => {
+                Some(decode_frame_robot36(&freq, mode))
+            }
             super::ColorModel::RobotColor => {
                 let lay = robot_layout(mode)?;
-                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc| {
+                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc, _k| {
                     decode_line_yc(f, sc, &lay)
                 }))
             }
@@ -1231,6 +1326,37 @@ mod tests {
     fn robot72_audio_loopback_recovers_colorbars() {
         // Colour-difference family: RGB → GetRY → Y/R-Y/B-Y → freq → RX → YCtoRGB → RGB.
         assert_family_loopback(SstvMode::Robot72, 8);
+    }
+
+    #[test]
+    fn robot24_audio_loopback_recovers_colorbars() {
+        // Like Robot 72 but half-res + row-doubled on display (rows == 2·scan_lines).
+        assert_family_loopback(SstvMode::Robot24, 8);
+    }
+
+    #[test]
+    fn robot36_audio_loopback_recovers_colorbars() {
+        // Robot 36 alternates chroma per line, so row 0 lacks B-Y until line 1 supplies it —
+        // check from row 1 on, where both persistent chroma buffers are populated.
+        let src = colorbar_row();
+        let rows = vec![src; 10];
+        let syms = line_symbols(SstvMode::Robot36, &rows).unwrap();
+        let pcm = render(&syms, 16000.0);
+        let (w, out) = super::demod::decode_frame(&pcm, SstvMode::Robot36).unwrap();
+        assert_eq!(w, 320);
+        let ok = |g: u8, e: u8| if e >= 128 { g >= 150 } else { g <= 105 };
+        for row in 1..8 {
+            for bar in 0..8 {
+                let x = bar * 40 + 20;
+                let i = (row * 320 + x) * 3;
+                let (gr, gg, gb) = (out[i], out[i + 1], out[i + 2]);
+                let (er, eg, eb) = (src[x].r, src[x].g, src[x].b);
+                assert!(
+                    ok(gr, er) && ok(gg, eg) && ok(gb, eb),
+                    "robot36 row {row} bar {bar}: got ({gr},{gg},{gb}) want ~({er},{eg},{eb})"
+                );
+            }
+        }
     }
 
     #[test]
