@@ -356,7 +356,7 @@ pub fn encode_tx(tx: RsidTx, tx_offset_hz: f32, sample_rate: u32) -> Vec<Sample>
     let mut phase = 0.0f64;
 
     // 5 symbol-periods of leading silence.
-    out.extend(std::iter::repeat(0.0).take(5 * symlen));
+    out.extend(std::iter::repeat_n(0.0, 5 * symlen));
 
     let (first, second) = match tx {
         RsidTx::Primary(code) => (code, None),
@@ -367,14 +367,14 @@ pub fn encode_tx(tx: RsidTx, tx_offset_hz: f32, sample_rate: u32) -> Vec<Sample>
 
     if let Some(code2) = second {
         // 10 symbol-periods of silence between the two bursts.
-        out.extend(std::iter::repeat(0.0).take(10 * symlen));
+        out.extend(std::iter::repeat_n(0.0, 10 * symlen));
         // fldigi restarts the phase accumulator for the second burst.
         phase = 0.0;
         append_tones(&mut out, &mut phase, code2, tx_offset_hz, sr, symlen);
     }
 
     // 5 symbol-periods of trailing silence.
-    out.extend(std::iter::repeat(0.0).take(5 * symlen));
+    out.extend(std::iter::repeat_n(0.0, 5 * symlen));
     out
 }
 
@@ -683,8 +683,7 @@ mod tests {
             };
             let syms_str = {
                 let s = field("syms");
-                let inner = &s[s.find('[').unwrap() + 1..s.find(']').unwrap()];
-                inner
+                &s[s.find('[').unwrap() + 1..s.find(']').unwrap()]
             };
             let mut syms = [0u8; NSYMBOLS];
             for (i, tok) in syms_str.split(',').enumerate() {
@@ -748,7 +747,7 @@ mod tests {
         // Pad with a little silence so the detector's ring warms up cleanly.
         let mut audio = vec![0.0f32; rate as usize / 10];
         audio.extend_from_slice(&burst);
-        audio.extend(std::iter::repeat(0.0).take(rate as usize / 10));
+        audio.extend(std::iter::repeat_n(0.0, rate as usize / 10));
         let found = det.feed(&audio);
         assert_eq!(found.len(), 1, "expected exactly one detection for {mode}, got {found:?}");
         found.into_iter().next().unwrap()

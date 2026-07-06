@@ -707,7 +707,7 @@ mod tests {
         let burst = omnimodem_dsp::frontend::rsid::burst_for_mode("mfsk16", 1500.0, 8_000).unwrap();
         let mut audio = vec![0.0f32; 800];
         audio.extend_from_slice(&burst);
-        audio.extend(std::iter::repeat(0.0).take(800));
+        audio.extend(std::iter::repeat_n(0.0, 800));
         let backend = FileBackend::from_samples(to_i16(&audio), 8_000);
         let capture = backend.open_capture(8_000).unwrap();
 
