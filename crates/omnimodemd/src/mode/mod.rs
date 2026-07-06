@@ -423,6 +423,9 @@ mod tests {
             "scottie1", "scottie2", "scottiedx", "martin1", "martin2",
             "sc2-180", "sc2-120", "sc2-60", "robot72", "robot36", "robot24",
             "bw8", "bw12", "p3", "p5", "p7",
+            "pd50", "pd90", "pd120", "pd160", "pd180", "pd240", "pd290",
+            "mp73", "mp115", "mp140", "mp175",
+            "mr73", "mr90", "mr115", "mr140", "mr175", "ml180", "ml240", "ml280", "ml320",
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
@@ -430,11 +433,11 @@ mod tests {
             );
         }
         // Canonical mode string round-trips.
-        let c = ModeConfig::Sstv { submode: "p3".into() };
+        let c = ModeConfig::Sstv { submode: "pd290".into() };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
-        // Unwired SSTV submodes (not yet ported) are not exposed.
-        assert_eq!(ModeConfig::parse("pd90"), None);
-        assert_eq!(ModeConfig::parse("mr73"), None);
+        // Unwired SSTV submodes (narrow N-VIS + AVT, not yet ported) are not exposed.
+        assert_eq!(ModeConfig::parse("mp73-n"), None);
+        assert_eq!(ModeConfig::parse("avt90"), None);
     }
 
     #[test]

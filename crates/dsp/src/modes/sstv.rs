@@ -641,11 +641,113 @@ pub mod modulator {
         Some(out)
     }
 
-    /// Any wired analog line-scan mode → its symbol stream (RGB-sequential, Robot, or B/W).
+    /// PD/MP parameters `(sync, porch, tw)` ms. Both families share the Y(odd)·R-Y·B-Y·
+    /// Y(even) structure (two picture rows per scan sharing chroma); only sync/porch differ.
+    /// ref: LinePD Main.cpp:6239 (sync 20, porch 2.08), LineMP Main.cpp:6286 (sync 9, porch 1),
+    /// and the tw dispatch Main.cpp:6644-6698.
+    pub fn pd_params(mode: SstvMode) -> Option<(f64, f64, f64)> {
+        use SstvMode::*;
+        let tw = match mode {
+            Pd50 => 91.520,
+            Pd90 => 170.240,
+            Pd120 => 121.600,
+            Pd160 => 195.584,
+            Pd180 => 183.040,
+            Pd240 => 244.480,
+            Pd290 => 228.800,
+            Mp73 => 140.0,
+            Mp115 => 223.0,
+            Mp140 => 270.0,
+            Mp175 => 340.0,
+            _ => return None,
+        };
+        let (sync, porch) = if matches!(mode, Mp73 | Mp115 | Mp140 | Mp175) {
+            (9.0, 1.0)
+        } else {
+            (20.0, 2.080)
+        };
+        Some((sync, porch, tw))
+    }
+
+    /// One PD/MP scan line: sync·porch·Y(odd)·R-Y·B-Y·Y(even). The chroma comes from the odd
+    /// row only; `even` supplies just its luma. ref: LinePD/LineMP.
+    pub fn pd_line(out: &mut Vec<Symbol>, odd: &[Rgb], even: &[Rgb], sync: f64, porch: f64, tw: f64) {
+        let dt = tw / odd.len() as f64;
+        let (y_o, ry, by) = ry_channels(odd);
+        let (y_e, _, _) = ry_channels(even);
+        out.push(Symbol { freq_hz: 1200, ms: sync });
+        out.push(Symbol { freq_hz: 1500, ms: porch });
+        pixels(out, y_o.iter().copied(), 0, dt);
+        pixels(out, ry.iter().copied(), 0, dt);
+        pixels(out, by.iter().copied(), 0, dt);
+        pixels(out, y_e.iter().copied(), 0, dt);
+    }
+
+    /// Full PD/MP transmission: VIS header then one scan per row pair (odd, even).
+    pub fn pd_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
+        let (sync, porch, tw) = pd_params(mode)?;
+        let mut out = header(mode);
+        let mut i = 0;
+        while i + 1 < rows.len() {
+            pd_line(&mut out, &rows[i], &rows[i + 1], sync, porch, tw);
+            i += 2;
+        }
+        Some(out)
+    }
+
+    /// MR/ML scan window `tw` (ms). Both use `LineMR` (Y full-width + horizontally-compressed
+    /// R-Y/B-Y, each half the Y time). ref: dispatch Main.cpp:6674-6710.
+    pub fn mr_params(mode: SstvMode) -> Option<f64> {
+        use SstvMode::*;
+        Some(match mode {
+            Mr73 => 138.0,
+            Mr90 => 171.0,
+            Mr115 => 220.0,
+            Mr140 => 269.0,
+            Mr175 => 337.0,
+            Ml180 => 176.5,
+            Ml240 => 236.5,
+            Ml280 => 277.5,
+            Ml320 => 317.5,
+            _ => return None,
+        })
+    }
+
+    /// One MR/ML scan line. ref: Main.cpp:6310 `LineMR`: sync(9)·porch(1)·Y(tw)·LP·R-Y(tw/2)·
+    /// LP·B-Y(tw/2)·LP, where LP is a 0.1 ms hold of the last pixel.
+    pub fn mr_line(out: &mut Vec<Symbol>, row: &[Rgb], tw: f64) {
+        let w = row.len();
+        let ty = tw / w as f64;
+        let tc = ty / 2.0;
+        let (y, ry, by) = ry_channels(row);
+        let lp = |out: &mut Vec<Symbol>, v: u8| out.push(Symbol { freq_hz: color_to_freq(v), ms: 0.1 });
+        out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        out.push(Symbol { freq_hz: 1500, ms: 1.0 });
+        pixels(out, y.iter().copied(), 0, ty);
+        lp(out, y[w - 1]);
+        pixels(out, ry.iter().copied(), 0, tc);
+        lp(out, ry[w - 1]);
+        pixels(out, by.iter().copied(), 0, tc);
+        lp(out, by[w - 1]);
+    }
+
+    /// Full MR/ML transmission: VIS header then one line per row.
+    pub fn mr_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
+        let tw = mr_params(mode)?;
+        let mut out = header(mode);
+        for row in rows {
+            mr_line(&mut out, row, tw);
+        }
+        Some(out)
+    }
+
+    /// Any wired analog line-scan mode → its symbol stream.
     pub fn line_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
         rgb_symbols(mode, rows)
             .or_else(|| robot_symbols(mode, rows))
             .or_else(|| mono_symbols(mode, rows))
+            .or_else(|| pd_symbols(mode, rows))
+            .or_else(|| mr_symbols(mode, rows))
     }
 
     /// Whether this mode is wired end-to-end here (for the daemon/TUI to expose).
@@ -654,6 +756,8 @@ pub mod modulator {
             || pasokon_params(mode).is_some()
             || robot_supported(mode)
             || mono_params(mode).is_some()
+            || pd_params(mode).is_some()
+            || mr_params(mode).is_some()
     }
 
     /// FNV-1a over a symbol stream, each symbol serialized as `freq(i32 LE) ++ ms(f64 LE
@@ -999,6 +1103,20 @@ pub mod demod {
         }
     }
 
+    /// MR/ML RX geometry (ref: LineMR Main.cpp:6310): Y full-width `tw`, then R-Y and B-Y each
+    /// `tw/2`, with 0.1 ms last-pixel fillers between. Offsets from the sync centre (+4.5).
+    fn mr_layout(mode: super::SstvMode) -> Option<YcLayout> {
+        let tw = super::modulator::mr_params(mode)?;
+        Some(YcLayout {
+            min_sync_ms: 6.0,
+            period_ms: 10.3 + 2.0 * tw,
+            first_sync_ms: header_ms(mode) + 4.5,
+            y: (5.5, tw),
+            ry: (5.6 + tw, tw / 2.0),
+            by: (5.7 + 1.5 * tw, tw / 2.0),
+        })
+    }
+
     fn decode_line_yc(freq: &[f32], sync_center: usize, lay: &YcLayout, width: usize) -> Vec<Rgb> {
         let y = sample_channel(freq, sync_center, lay.y.0, lay.y.1, width);
         let ry = sample_channel(freq, sync_center, lay.ry.0, lay.ry.1, width);
@@ -1036,9 +1154,14 @@ pub mod demod {
         for k in 0..geom.scan_lines as usize {
             let predicted = first + (k as f64 * period) as i64;
             let sc = nearest(&all, predicted, win).unwrap_or_else(|| predicted.max(0) as usize);
-            let row = decode(freq, sc, k, width);
-            for _ in 0..rows_per_scan {
-                for px in &row {
+            let px_rows = decode(freq, sc, k, width);
+            // A decode returns either one row (the common case; duplicated when a scan maps to
+            // multiple identical display rows, e.g. Robot 24) or the full `rows_per_scan`
+            // distinct rows itself (PD/MP: two rows sharing chroma).
+            let produced = (px_rows.len() / width).max(1);
+            let reps = if produced == 1 { rows_per_scan } else { 1 };
+            for _ in 0..reps {
+                for px in &px_rows {
                     rgb.push(px.r);
                     rgb.push(px.g);
                     rgb.push(px.b);
@@ -1071,6 +1194,29 @@ pub mod demod {
             }
             (0..width).map(|x| yc_to_rgb(y[x] as i32, ry_buf[x], by_buf[x])).collect()
         })
+    }
+
+    /// PD/MP decode: each scan carries Y(odd)·R-Y·B-Y·Y(even), the two Y channels sharing the
+    /// chroma. Emits TWO distinct display rows per scan. ref: smPD reconstruction
+    /// Main.cpp:3949; offsets derived from the LinePD/LineMP emission.
+    fn decode_frame_pd(freq: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
+        let (sync, porch, tw) = super::modulator::pd_params(mode)?;
+        let header = header_ms(mode);
+        let base = sync + porch - sync / 2.0; // Y(odd) start, relative to the sync centre
+        Some(run_frame(freq, mode, 6.0, sync + porch + 4.0 * tw, header + sync / 2.0, |f, sc, _k, width| {
+            let yo = sample_channel(f, sc, base, tw, width);
+            let ry = sample_channel(f, sc, base + tw, tw, width);
+            let by = sample_channel(f, sc, base + 2.0 * tw, tw, width);
+            let ye = sample_channel(f, sc, base + 3.0 * tw, tw, width);
+            let mut rows = Vec::with_capacity(2 * width);
+            for x in 0..width {
+                rows.push(yc_to_rgb(yo[x] as i32, ry[x] as i32 - 128, by[x] as i32 - 128));
+            }
+            for x in 0..width {
+                rows.push(yc_to_rgb(ye[x] as i32, ry[x] as i32 - 128, by[x] as i32 - 128));
+            }
+            rows
+        }))
     }
 
     /// B/W decode: sample the single luma channel and emit grey (R=G=B). ref: LineRM
@@ -1107,6 +1253,13 @@ pub mod demod {
                 }))
             }
             super::ColorModel::Mono => decode_frame_mono(&freq, mode),
+            super::ColorModel::PdColor => decode_frame_pd(&freq, mode),
+            super::ColorModel::MrColor => {
+                let lay = mr_layout(mode)?;
+                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc, _k, w| {
+                    decode_line_yc(f, sc, &lay, w)
+                }))
+            }
             _ => None,
         }
     }
@@ -1438,6 +1591,21 @@ mod tests {
     fn sc2_audio_loopback_recovers_colorbars() {
         assert_family_loopback(SstvMode::Sc2_180, 8);
         assert_family_loopback(SstvMode::Sc2_60, 8);
+    }
+
+    #[test]
+    fn pd_audio_loopback_recovers_colorbars() {
+        // PD/MP colour-difference, two rows per scan sharing chroma; PD120 is 640-wide.
+        assert_family_loopback(SstvMode::Pd50, 8);
+        assert_family_loopback(SstvMode::Pd120, 8);
+        assert_family_loopback(SstvMode::Mp73, 8);
+    }
+
+    #[test]
+    fn mr_ml_audio_loopback_recovers_colorbars() {
+        // MR (320) and ML (640): Y full-width + half-width chroma, per line.
+        assert_family_loopback(SstvMode::Mr73, 8);
+        assert_family_loopback(SstvMode::Ml180, 8);
     }
 
     #[test]
