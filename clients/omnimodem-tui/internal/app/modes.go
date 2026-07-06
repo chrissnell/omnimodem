@@ -1,6 +1,10 @@
 package app
 
-import pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+import (
+	"strings"
+
+	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+)
 
 // modeParam describes one editable parameter for a mode (label + default).
 type modeParam struct {
@@ -163,7 +167,19 @@ var modes = []modeInfo{
 	{"wspr", "beacon", 120, nil},
 }
 
+// baseModeLabel strips the daemon's parameter suffix from a live mode string.
+// The daemon reports a channel's mode as the descriptor it persists — e.g.
+// "feldhell:center=1500" or "rtty:baud=45,shift=170,center=915,reverse=false"
+// (mode/mod.rs to_mode_string) — while the modes table is keyed by the bare
+// label. Everything from the first ':' is params; labels without one (e.g.
+// "contestia8_500") pass through unchanged.
+func baseModeLabel(mode string) string {
+	base, _, _ := strings.Cut(mode, ":")
+	return base
+}
+
 func modeByLabel(label string) *modeInfo {
+	label = baseModeLabel(label)
 	for i := range modes {
 		if modes[i].label == label {
 			return &modes[i]

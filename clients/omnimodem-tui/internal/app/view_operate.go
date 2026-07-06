@@ -67,7 +67,7 @@ func newOperateView(m *Model) *operateView {
 		rst:    "599",
 	}
 	if cl := m.live[m.sel]; cl != nil {
-		v.modeLabel = cl.mode
+		v.modeLabel = baseModeLabel(cl.mode)
 		if mi := modeByLabel(cl.mode); mi != nil {
 			v.slotSecs = mi.slotSecs
 			switch mi.shape {
@@ -508,7 +508,7 @@ func (v *operateView) Title() string {
 	cl := v.m.live[v.m.sel]
 	mode := "—"
 	if cl != nil {
-		mode = orNone(cl.mode)
+		mode = orNone(baseModeLabel(cl.mode))
 	}
 	return fmt.Sprintf("Operate ch%d · %s", v.m.sel, mode)
 }

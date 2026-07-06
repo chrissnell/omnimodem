@@ -45,6 +45,26 @@ func imageOperateView(t *testing.T, f client.ModemClient) *operateView {
 	return v
 }
 
+// The daemon reports a channel's mode as its full descriptor
+// (e.g. "feldhell:center=1500"), not the bare label. The operate view must
+// still resolve that to the image shape, or ctrl+o silently does nothing.
+func TestDaemonModeDescriptorBuildsRaster(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "feldhell:center=1500"}
+	m.sel = 0
+	v := newOperateView(m)
+	if v.raster == nil {
+		t.Fatal("feldhell:center=1500 should build the image/raster surface")
+	}
+	if v.modeLabel != "feldhell" {
+		t.Fatalf("modeLabel = %q, want the bare label feldhell", v.modeLabel)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	if v.picker == nil {
+		t.Fatal("ctrl+o should open the picker on a descriptor-form image mode")
+	}
+}
+
 // ctrl+o opens the picker on a picture mode; the picker then owns all keys.
 func TestImageModeOpensPicker(t *testing.T) {
 	v := imageOperateView(t, &client.Fake{})

@@ -244,6 +244,7 @@ func defaultChannelName(m *Model) string {
 // modeIdxByLabel returns the index of a mode label in `modes`, or 0 when the
 // label is unknown/empty (a fresh channel falls back to the first mode).
 func modeIdxByLabel(label string) int {
+	label = baseModeLabel(label)
 	for i := range modes {
 		if modes[i].label == label {
 			return i
