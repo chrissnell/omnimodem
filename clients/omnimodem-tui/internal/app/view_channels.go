@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 // dosTableStyles paints the channel table for the black DOS panel: a yellow
@@ -52,7 +52,7 @@ func (v *channelsView) refresh() {
 			ptt = "▣"
 		}
 		rows = append(rows, table.Row{
-			fmt.Sprintf("ch%d", ch), orNone(cl.name), orNone(cl.mode),
+			fmt.Sprintf("ch%d", ch), orNone(cl.name), orNone(baseModeLabel(cl.mode)),
 			orDash(cl.deviceID), ptt, fmt.Sprintf("%.0f", cl.rxDbfs),
 		})
 	}
