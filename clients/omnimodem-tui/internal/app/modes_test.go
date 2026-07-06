@@ -34,6 +34,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"contestia32_1000", "contestia32_2000",
 		"contestia64_500", "contestia64_1000", "contestia64_2000",
 		"mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l",
+		"navtex", "sitorb", "wefax576", "wefax288",
 		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr",
 	}
 	for _, label := range want {
@@ -248,6 +249,54 @@ func TestMt63ModeParams(t *testing.T) {
 	}
 	if def := modeParamsFor("mt63_2000s", nil).GetMt63(); def == nil || def.GetCenterHz() != 1500 {
 		t.Fatalf("mt63_2000s default center = %v, want 1500", def.GetCenterHz())
+	}
+}
+
+// NAVTEX / SITOR-B carry their submode label + center through the dedicated
+// NavtexParams oneof; both use the "chat" text surface.
+func TestNavtexModeParams(t *testing.T) {
+	mp := modeParamsFor("sitorb", map[string]float64{"center": 1500})
+	if mp == nil {
+		t.Fatal("sitorb must produce typed ModeParams")
+	}
+	n := mp.GetNavtex()
+	if n == nil {
+		t.Fatalf("expected NavtexParams, got %T", mp.GetParams())
+	}
+	if n.GetSubmode() != "sitorb" || n.GetCenterHz() != 1500 {
+		t.Fatalf("navtex params = %q / %v, want sitorb / 1500", n.GetSubmode(), n.GetCenterHz())
+	}
+	for _, label := range []string{"navtex", "sitorb"} {
+		if mi := modeByLabel(label); mi == nil || mi.shape != "chat" {
+			t.Fatalf("%s must use the chat shape, got %v", label, mi)
+		}
+		if def := modeParamsFor(label, nil).GetNavtex(); def == nil || def.GetCenterHz() != 1000 {
+			t.Fatalf("%s default center = %v, want 1000", label, def.GetCenterHz())
+		}
+	}
+}
+
+// WEFAX carries its submode label + carrier through the dedicated WefaxParams
+// oneof, and both submodes use the facsimile "image" shape.
+func TestWefaxModeParams(t *testing.T) {
+	mp := modeParamsFor("wefax576", map[string]float64{"center": 1800})
+	if mp == nil {
+		t.Fatal("wefax576 must produce typed ModeParams")
+	}
+	w := mp.GetWefax()
+	if w == nil {
+		t.Fatalf("expected WefaxParams, got %T", mp.GetParams())
+	}
+	if w.GetSubmode() != "wefax576" || w.GetCenterHz() != 1800 {
+		t.Fatalf("wefax params = %q / %v, want wefax576 / 1800", w.GetSubmode(), w.GetCenterHz())
+	}
+	for _, label := range []string{"wefax576", "wefax288"} {
+		if mi := modeByLabel(label); mi == nil || mi.shape != "image" {
+			t.Fatalf("%s must use the image shape, got %v", label, mi)
+		}
+		if def := modeParamsFor(label, nil).GetWefax(); def == nil || def.GetCenterHz() != 1900 {
+			t.Fatalf("%s default center = %v, want 1900", label, def.GetCenterHz())
+		}
 	}
 }
 

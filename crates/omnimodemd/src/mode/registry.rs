@@ -19,10 +19,12 @@ use omnimodem_dsp::modes::{
     jt9::{Jt9Demod, Jt9Mod},
     mfsk::{MfskDemod, MfskMod, MfskVariant},
     mt63::{Mt63Demod, Mt63Mod, Mt63Variant},
+    navtex::{NavtexDemod, NavtexMod, NavtexVariant},
     olivia::{OliviaDemod, OliviaMod},
     psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
     thor::{ThorDemod, ThorMod, ThorVariant},
+    wefax::{WefaxDemod, WefaxMod, WefaxVariant},
     wspr::{WsprDemod, WsprMod},
 };
 
@@ -85,6 +87,14 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Mt63 { submode, center_hz } => {
             let v = Mt63Variant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(Mt63Demod::new(v, *center_hz)))
+        }
+        ModeConfig::Navtex { submode, center_hz } => {
+            let v = NavtexVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(NavtexDemod::new(v, *center_hz)))
+        }
+        ModeConfig::Wefax { submode, center_hz } => {
+            let v = WefaxVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(WefaxDemod::new(v, *center_hz)))
         }
         ModeConfig::Contestia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(ContestiaDemod::new(*tones, *bandwidth_hz)))
@@ -152,6 +162,14 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Mt63 { submode, center_hz } => {
             let v = Mt63Variant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(Mt63Mod::new(v, *center_hz)))
+        }
+        ModeConfig::Navtex { submode, center_hz } => {
+            let v = NavtexVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(NavtexMod::new(v, *center_hz)))
+        }
+        ModeConfig::Wefax { submode, center_hz } => {
+            let v = WefaxVariant::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(WefaxMod::new(v, *center_hz)))
         }
         ModeConfig::Contestia { tones, bandwidth_hz } => {
             Some(Box::new(ContestiaMod::new(*tones, *bandwidth_hz)))
