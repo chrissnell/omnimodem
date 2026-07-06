@@ -43,11 +43,11 @@ const (
 	fTx
 	fPtt
 	fMethod
-	fRsidTx
-	fRsidRx
 	fTxDelay
 	fTxTail
-	fLast = fTxTail
+	fRsidTx
+	fRsidRx
+	fLast = fRsidRx
 )
 
 // cfgSig is the persistable slice of the form. It drives change detection so

@@ -64,6 +64,24 @@ func TestConfigArrowsTraverseFields(t *testing.T) {
 	}
 }
 
+// Focus/Tab order must follow the on-screen top-to-bottom layout: the AUDIO
+// block ends with PTT Method -> TX Delay -> TX Tail, then the RSID section.
+// Guards against the enum drifting out of render order (a zig-zagging cursor).
+func TestConfigFocusOrderMatchesLayout(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	v.focus = fMethod
+	for _, want := range []cfgFocus{fTxDelay, fTxTail, fRsidTx, fRsidRx} {
+		v.Update(tea.KeyMsg{Type: tea.KeyDown})
+		if v.focus != want {
+			t.Fatalf("focus order broke: got %d, want %d", v.focus, want)
+		}
+	}
+	if fLast != fRsidRx {
+		t.Fatalf("fLast should be the last rendered field (fRsidRx), got %d", fLast)
+	}
+}
+
 // The Grid field exists and edits the operator's station locator (uppercased).
 func TestConfigGridFieldSetsStationGrid(t *testing.T) {
 	// Editing identity can trigger persistIdentity; keep the write off the real
