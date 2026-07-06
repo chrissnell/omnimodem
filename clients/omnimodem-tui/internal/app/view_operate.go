@@ -366,7 +366,14 @@ func (v *operateView) Render(w, h int) string {
 		if modalW > 88 {
 			modalW = 88
 		}
-		bodyH := h - 6
+		// picker.View wraps a list/preview of height bodyH in its own chrome
+		// (title, top+bottom border, path, hint); on top of that the "\n" top
+		// margin and the enclosing ui.Frame's title row each cost a line. Reserve
+		// all of it so the modal fills the surface exactly instead of growing one
+		// line past it — which pushes the frame (and the modal's own title) off
+		// the top of the screen.
+		const chrome = 8
+		bodyH := h - chrome
 		if bodyH < 6 {
 			bodyH = 6
 		}
