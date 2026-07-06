@@ -136,6 +136,31 @@ func TestThorModeParams(t *testing.T) {
 	}
 }
 
+// The Throb family carries its submode label and center through the dedicated
+// ThrobParams oneof, and every submode uses the ragchew "chat" shape.
+func TestThrobModeParams(t *testing.T) {
+	mp := modeParamsFor("throb2", map[string]float64{"center": 1200})
+	if mp == nil {
+		t.Fatal("throb2 must produce typed ModeParams")
+	}
+	th := mp.GetThrob()
+	if th == nil {
+		t.Fatalf("expected ThrobParams, got %T", mp.GetParams())
+	}
+	if th.GetSubmode() != "throb2" || th.GetCenterHz() != 1200 {
+		t.Fatalf("throb params = %q / %v, want throb2 / 1200", th.GetSubmode(), th.GetCenterHz())
+	}
+	for _, label := range []string{"throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4"} {
+		mi := modeByLabel(label)
+		if mi == nil || mi.shape != "chat" {
+			t.Fatalf("%s must use the chat shape, got %v", label, mi)
+		}
+		if def := modeParamsFor(label, nil).GetThrob(); def == nil || def.GetCenterHz() != 1500 {
+			t.Fatalf("%s default center = %v, want 1500", label, def.GetCenterHz())
+		}
+	}
+}
+
 // The IFKP family carries its speed label and center through the dedicated
 // IfkpParams oneof, and every speed uses the ragchew "chat" shape.
 func TestIfkpModeParams(t *testing.T) {

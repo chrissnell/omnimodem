@@ -107,6 +107,7 @@ message ModeParams {
     FsqParams fsq = 14;
     NavtexParams navtex = 15;
     WefaxParams wefax = 16;
+    ThrobParams throb = 17;
   }
 }
 
@@ -220,6 +221,14 @@ message WefaxParams {
 
 message Afsk1200Params {
   bool tx = 1;          // enable the transmit modulator
+}
+
+// The fldigi Throb family (throb1/2/4, throbx1/2/4). Dual-tone MFSK at 8 kHz:
+// each character sounds a pair of tones under a pulse envelope. `submode` is the
+// mode label; `center_hz` the audio carrier.
+message ThrobParams {
+  string submode = 1;   // throb::ThrobVariant label, e.g. "throb2"
+  float  center_hz = 2; // audio center frequency
 }
 
 message ConfigureChannelResponse {
