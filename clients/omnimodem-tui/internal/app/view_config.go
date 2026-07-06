@@ -302,11 +302,17 @@ func (v *configView) maybePersist() tea.Cmd {
 func (v *configView) persistAll() tea.Cmd {
 	ch := v.m.sel
 	c := v.m.c
+	mp := modeParamsFor(v.modeLabel(), modeValsFrom(v.settings))
+	// FSQ's directed header carries the operator callsign, which isn't a numeric
+	// setting; inject it from the station identity.
+	if f := mp.GetFsq(); f != nil {
+		f.Mycall = v.m.myCall
+	}
 	chReq := &pb.ConfigureChannelRequest{
 		Channel:    ch,
 		Name:       v.name.Value(),
 		Mode:       v.modeLabel(),
-		ModeParams: modeParamsFor(v.modeLabel(), modeValsFrom(v.settings)),
+		ModeParams: mp,
 	}
 	audioReq := &pb.ConfigureAudioRequest{
 		Channel: ch, DeviceId: v.rxID, SampleRate: 48000, TxDeviceId: v.txID,

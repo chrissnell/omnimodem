@@ -180,6 +180,8 @@ type ModeParams struct {
 	//	*ModeParams_Contestia
 	//	*ModeParams_Thor
 	//	*ModeParams_Mt63
+	//	*ModeParams_Ifkp
+	//	*ModeParams_Fsq
 	Params        isModeParams_Params `protobuf_oneof:"params"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -330,6 +332,24 @@ func (x *ModeParams) GetMt63() *Mt63Params {
 	return nil
 }
 
+func (x *ModeParams) GetIfkp() *IfkpParams {
+	if x != nil {
+		if x, ok := x.Params.(*ModeParams_Ifkp); ok {
+			return x.Ifkp
+		}
+	}
+	return nil
+}
+
+func (x *ModeParams) GetFsq() *FsqParams {
+	if x != nil {
+		if x, ok := x.Params.(*ModeParams_Fsq); ok {
+			return x.Fsq
+		}
+	}
+	return nil
+}
+
 type isModeParams_Params interface {
 	isModeParams_Params()
 }
@@ -382,6 +402,14 @@ type ModeParams_Mt63 struct {
 	Mt63 *Mt63Params `protobuf:"bytes,12,opt,name=mt63,proto3,oneof"`
 }
 
+type ModeParams_Ifkp struct {
+	Ifkp *IfkpParams `protobuf:"bytes,13,opt,name=ifkp,proto3,oneof"`
+}
+
+type ModeParams_Fsq struct {
+	Fsq *FsqParams `protobuf:"bytes,14,opt,name=fsq,proto3,oneof"`
+}
+
 func (*ModeParams_Cw) isModeParams_Params() {}
 
 func (*ModeParams_Rtty) isModeParams_Params() {}
@@ -405,6 +433,10 @@ func (*ModeParams_Contestia) isModeParams_Params() {}
 func (*ModeParams_Thor) isModeParams_Params() {}
 
 func (*ModeParams_Mt63) isModeParams_Params() {}
+
+func (*ModeParams_Ifkp) isModeParams_Params() {}
+
+func (*ModeParams_Fsq) isModeParams_Params() {}
 
 type CwParams struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1005,6 +1037,134 @@ func (x *Mt63Params) GetCenterHz() float32 {
 	return 0
 }
 
+// The fldigi IFKP family (ifkp / ifkp-slow / ifkp-fast). 33-tone IFK MFSK with
+// the self-framing IFKP Varicode. `speed` is the mode label; `center_hz` the
+// audio carrier.
+type IfkpParams struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Speed         string                 `protobuf:"bytes,1,opt,name=speed,proto3" json:"speed,omitempty"`                         // ifkp::IfkpSpeed label, e.g. "ifkp-slow"
+	CenterHz      float32                `protobuf:"fixed32,2,opt,name=center_hz,json=centerHz,proto3" json:"center_hz,omitempty"` // audio center frequency
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IfkpParams) Reset() {
+	*x = IfkpParams{}
+	mi := &file_omnimodem_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IfkpParams) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IfkpParams) ProtoMessage() {}
+
+func (x *IfkpParams) ProtoReflect() protoreflect.Message {
+	mi := &file_omnimodem_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IfkpParams.ProtoReflect.Descriptor instead.
+func (*IfkpParams) Descriptor() ([]byte, []int) {
+	return file_omnimodem_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *IfkpParams) GetSpeed() string {
+	if x != nil {
+		return x.Speed
+	}
+	return ""
+}
+
+func (x *IfkpParams) GetCenterHz() float32 {
+	if x != nil {
+		return x.CenterHz
+	}
+	return 0
+}
+
+// The fldigi FSQ / FSQCALL family (fsq-1.5 / fsq-2 / fsq / fsq-4.5 / fsq-6).
+// 33-tone IFK with a CRC8-keyed directed protocol. `speed` is the mode label;
+// `center_hz` the audio carrier; `mycall` the operator callsign in the directed
+// header; `directed` whether to send the CRC8 directed header + selective-call
+// framing (off ⇒ raw keyboard mode).
+type FsqParams struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Speed         string                 `protobuf:"bytes,1,opt,name=speed,proto3" json:"speed,omitempty"`                         // fsq::FsqSpeed label, e.g. "fsq" (= fsq-3)
+	CenterHz      float32                `protobuf:"fixed32,2,opt,name=center_hz,json=centerHz,proto3" json:"center_hz,omitempty"` // audio center frequency
+	Mycall        string                 `protobuf:"bytes,3,opt,name=mycall,proto3" json:"mycall,omitempty"`                       // operator callsign for the directed header
+	Directed      bool                   `protobuf:"varint,4,opt,name=directed,proto3" json:"directed,omitempty"`                  // append the CRC8 directed header + FSQEOT framing
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FsqParams) Reset() {
+	*x = FsqParams{}
+	mi := &file_omnimodem_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FsqParams) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FsqParams) ProtoMessage() {}
+
+func (x *FsqParams) ProtoReflect() protoreflect.Message {
+	mi := &file_omnimodem_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FsqParams.ProtoReflect.Descriptor instead.
+func (*FsqParams) Descriptor() ([]byte, []int) {
+	return file_omnimodem_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *FsqParams) GetSpeed() string {
+	if x != nil {
+		return x.Speed
+	}
+	return ""
+}
+
+func (x *FsqParams) GetCenterHz() float32 {
+	if x != nil {
+		return x.CenterHz
+	}
+	return 0
+}
+
+func (x *FsqParams) GetMycall() string {
+	if x != nil {
+		return x.Mycall
+	}
+	return ""
+}
+
+func (x *FsqParams) GetDirected() bool {
+	if x != nil {
+		return x.Directed
+	}
+	return false
+}
+
 type Afsk1200Params struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Tx            bool                   `protobuf:"varint,1,opt,name=tx,proto3" json:"tx,omitempty"` // enable the transmit modulator
@@ -1014,7 +1174,7 @@ type Afsk1200Params struct {
 
 func (x *Afsk1200Params) Reset() {
 	*x = Afsk1200Params{}
-	mi := &file_omnimodem_proto_msgTypes[13]
+	mi := &file_omnimodem_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1026,7 +1186,7 @@ func (x *Afsk1200Params) String() string {
 func (*Afsk1200Params) ProtoMessage() {}
 
 func (x *Afsk1200Params) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[13]
+	mi := &file_omnimodem_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1039,7 +1199,7 @@ func (x *Afsk1200Params) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Afsk1200Params.ProtoReflect.Descriptor instead.
 func (*Afsk1200Params) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{13}
+	return file_omnimodem_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Afsk1200Params) GetTx() bool {
@@ -1058,7 +1218,7 @@ type ConfigureChannelResponse struct {
 
 func (x *ConfigureChannelResponse) Reset() {
 	*x = ConfigureChannelResponse{}
-	mi := &file_omnimodem_proto_msgTypes[14]
+	mi := &file_omnimodem_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1230,7 @@ func (x *ConfigureChannelResponse) String() string {
 func (*ConfigureChannelResponse) ProtoMessage() {}
 
 func (x *ConfigureChannelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[14]
+	mi := &file_omnimodem_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1243,7 @@ func (x *ConfigureChannelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureChannelResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureChannelResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{14}
+	return file_omnimodem_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ConfigureChannelResponse) GetChannel() uint32 {
@@ -1101,7 +1261,7 @@ type GetStateRequest struct {
 
 func (x *GetStateRequest) Reset() {
 	*x = GetStateRequest{}
-	mi := &file_omnimodem_proto_msgTypes[15]
+	mi := &file_omnimodem_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1113,7 +1273,7 @@ func (x *GetStateRequest) String() string {
 func (*GetStateRequest) ProtoMessage() {}
 
 func (x *GetStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[15]
+	mi := &file_omnimodem_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1126,7 +1286,7 @@ func (x *GetStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStateRequest.ProtoReflect.Descriptor instead.
 func (*GetStateRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{15}
+	return file_omnimodem_proto_rawDescGZIP(), []int{17}
 }
 
 type TransmitRequest struct {
@@ -1139,7 +1299,7 @@ type TransmitRequest struct {
 
 func (x *TransmitRequest) Reset() {
 	*x = TransmitRequest{}
-	mi := &file_omnimodem_proto_msgTypes[16]
+	mi := &file_omnimodem_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1151,7 +1311,7 @@ func (x *TransmitRequest) String() string {
 func (*TransmitRequest) ProtoMessage() {}
 
 func (x *TransmitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[16]
+	mi := &file_omnimodem_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1164,7 +1324,7 @@ func (x *TransmitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransmitRequest.ProtoReflect.Descriptor instead.
 func (*TransmitRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{16}
+	return file_omnimodem_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TransmitRequest) GetChannel() uint32 {
@@ -1190,7 +1350,7 @@ type TransmitResponse struct {
 
 func (x *TransmitResponse) Reset() {
 	*x = TransmitResponse{}
-	mi := &file_omnimodem_proto_msgTypes[17]
+	mi := &file_omnimodem_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1202,7 +1362,7 @@ func (x *TransmitResponse) String() string {
 func (*TransmitResponse) ProtoMessage() {}
 
 func (x *TransmitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[17]
+	mi := &file_omnimodem_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1215,7 +1375,7 @@ func (x *TransmitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransmitResponse.ProtoReflect.Descriptor instead.
 func (*TransmitResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{17}
+	return file_omnimodem_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *TransmitResponse) GetTransmitId() uint64 {
@@ -1233,7 +1393,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_omnimodem_proto_msgTypes[18]
+	mi := &file_omnimodem_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1245,7 +1405,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[18]
+	mi := &file_omnimodem_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1258,7 +1418,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{18}
+	return file_omnimodem_proto_rawDescGZIP(), []int{20}
 }
 
 type ModemState struct {
@@ -1270,7 +1430,7 @@ type ModemState struct {
 
 func (x *ModemState) Reset() {
 	*x = ModemState{}
-	mi := &file_omnimodem_proto_msgTypes[19]
+	mi := &file_omnimodem_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1282,7 +1442,7 @@ func (x *ModemState) String() string {
 func (*ModemState) ProtoMessage() {}
 
 func (x *ModemState) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[19]
+	mi := &file_omnimodem_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1295,7 +1455,7 @@ func (x *ModemState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModemState.ProtoReflect.Descriptor instead.
 func (*ModemState) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{19}
+	return file_omnimodem_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ModemState) GetChannels() []*ChannelInfo {
@@ -1321,7 +1481,7 @@ type ChannelInfo struct {
 
 func (x *ChannelInfo) Reset() {
 	*x = ChannelInfo{}
-	mi := &file_omnimodem_proto_msgTypes[20]
+	mi := &file_omnimodem_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1333,7 +1493,7 @@ func (x *ChannelInfo) String() string {
 func (*ChannelInfo) ProtoMessage() {}
 
 func (x *ChannelInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[20]
+	mi := &file_omnimodem_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1346,7 +1506,7 @@ func (x *ChannelInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelInfo.ProtoReflect.Descriptor instead.
 func (*ChannelInfo) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{20}
+	return file_omnimodem_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ChannelInfo) GetChannel() uint32 {
@@ -1429,7 +1589,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_omnimodem_proto_msgTypes[21]
+	mi := &file_omnimodem_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1441,7 +1601,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[21]
+	mi := &file_omnimodem_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1454,7 +1614,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{21}
+	return file_omnimodem_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Event) GetKind() isEvent_Kind {
@@ -1683,7 +1843,7 @@ type SpectrumFrame struct {
 
 func (x *SpectrumFrame) Reset() {
 	*x = SpectrumFrame{}
-	mi := &file_omnimodem_proto_msgTypes[22]
+	mi := &file_omnimodem_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1695,7 +1855,7 @@ func (x *SpectrumFrame) String() string {
 func (*SpectrumFrame) ProtoMessage() {}
 
 func (x *SpectrumFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[22]
+	mi := &file_omnimodem_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1708,7 +1868,7 @@ func (x *SpectrumFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpectrumFrame.ProtoReflect.Descriptor instead.
 func (*SpectrumFrame) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{22}
+	return file_omnimodem_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SpectrumFrame) GetChannel() uint32 {
@@ -1776,7 +1936,7 @@ type ChannelConfigured struct {
 
 func (x *ChannelConfigured) Reset() {
 	*x = ChannelConfigured{}
-	mi := &file_omnimodem_proto_msgTypes[23]
+	mi := &file_omnimodem_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1788,7 +1948,7 @@ func (x *ChannelConfigured) String() string {
 func (*ChannelConfigured) ProtoMessage() {}
 
 func (x *ChannelConfigured) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[23]
+	mi := &file_omnimodem_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1801,7 +1961,7 @@ func (x *ChannelConfigured) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelConfigured.ProtoReflect.Descriptor instead.
 func (*ChannelConfigured) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{23}
+	return file_omnimodem_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ChannelConfigured) GetChannel() uint32 {
@@ -1823,7 +1983,7 @@ type ClockOffset struct {
 
 func (x *ClockOffset) Reset() {
 	*x = ClockOffset{}
-	mi := &file_omnimodem_proto_msgTypes[24]
+	mi := &file_omnimodem_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1835,7 +1995,7 @@ func (x *ClockOffset) String() string {
 func (*ClockOffset) ProtoMessage() {}
 
 func (x *ClockOffset) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[24]
+	mi := &file_omnimodem_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1848,7 +2008,7 @@ func (x *ClockOffset) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClockOffset.ProtoReflect.Descriptor instead.
 func (*ClockOffset) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{24}
+	return file_omnimodem_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ClockOffset) GetOffsetS() float64 {
@@ -1882,7 +2042,7 @@ type TransmitStarted struct {
 
 func (x *TransmitStarted) Reset() {
 	*x = TransmitStarted{}
-	mi := &file_omnimodem_proto_msgTypes[25]
+	mi := &file_omnimodem_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1894,7 +2054,7 @@ func (x *TransmitStarted) String() string {
 func (*TransmitStarted) ProtoMessage() {}
 
 func (x *TransmitStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[25]
+	mi := &file_omnimodem_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1907,7 +2067,7 @@ func (x *TransmitStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransmitStarted.ProtoReflect.Descriptor instead.
 func (*TransmitStarted) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{25}
+	return file_omnimodem_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *TransmitStarted) GetChannel() uint32 {
@@ -1934,7 +2094,7 @@ type TransmitComplete struct {
 
 func (x *TransmitComplete) Reset() {
 	*x = TransmitComplete{}
-	mi := &file_omnimodem_proto_msgTypes[26]
+	mi := &file_omnimodem_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1946,7 +2106,7 @@ func (x *TransmitComplete) String() string {
 func (*TransmitComplete) ProtoMessage() {}
 
 func (x *TransmitComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[26]
+	mi := &file_omnimodem_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1959,7 +2119,7 @@ func (x *TransmitComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransmitComplete.ProtoReflect.Descriptor instead.
 func (*TransmitComplete) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{26}
+	return file_omnimodem_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *TransmitComplete) GetChannel() uint32 {
@@ -1992,7 +2152,7 @@ type RxFrame struct {
 
 func (x *RxFrame) Reset() {
 	*x = RxFrame{}
-	mi := &file_omnimodem_proto_msgTypes[27]
+	mi := &file_omnimodem_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2004,7 +2164,7 @@ func (x *RxFrame) String() string {
 func (*RxFrame) ProtoMessage() {}
 
 func (x *RxFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[27]
+	mi := &file_omnimodem_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2017,7 +2177,7 @@ func (x *RxFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RxFrame.ProtoReflect.Descriptor instead.
 func (*RxFrame) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{27}
+	return file_omnimodem_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *RxFrame) GetChannel() uint32 {
@@ -2063,7 +2223,7 @@ type Image struct {
 
 func (x *Image) Reset() {
 	*x = Image{}
-	mi := &file_omnimodem_proto_msgTypes[28]
+	mi := &file_omnimodem_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2075,7 +2235,7 @@ func (x *Image) String() string {
 func (*Image) ProtoMessage() {}
 
 func (x *Image) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[28]
+	mi := &file_omnimodem_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2088,7 +2248,7 @@ func (x *Image) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Image.ProtoReflect.Descriptor instead.
 func (*Image) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{28}
+	return file_omnimodem_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Image) GetWidth() uint32 {
@@ -2115,7 +2275,7 @@ type AudioLevel struct {
 
 func (x *AudioLevel) Reset() {
 	*x = AudioLevel{}
-	mi := &file_omnimodem_proto_msgTypes[29]
+	mi := &file_omnimodem_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2127,7 +2287,7 @@ func (x *AudioLevel) String() string {
 func (*AudioLevel) ProtoMessage() {}
 
 func (x *AudioLevel) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[29]
+	mi := &file_omnimodem_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2140,7 +2300,7 @@ func (x *AudioLevel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AudioLevel.ProtoReflect.Descriptor instead.
 func (*AudioLevel) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{29}
+	return file_omnimodem_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *AudioLevel) GetChannel() uint32 {
@@ -2167,7 +2327,7 @@ type Status struct {
 
 func (x *Status) Reset() {
 	*x = Status{}
-	mi := &file_omnimodem_proto_msgTypes[30]
+	mi := &file_omnimodem_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2179,7 +2339,7 @@ func (x *Status) String() string {
 func (*Status) ProtoMessage() {}
 
 func (x *Status) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[30]
+	mi := &file_omnimodem_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2192,7 +2352,7 @@ func (x *Status) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Status.ProtoReflect.Descriptor instead.
 func (*Status) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{30}
+	return file_omnimodem_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Status) GetChannel() uint32 {
@@ -2217,7 +2377,7 @@ type ListDevicesRequest struct {
 
 func (x *ListDevicesRequest) Reset() {
 	*x = ListDevicesRequest{}
-	mi := &file_omnimodem_proto_msgTypes[31]
+	mi := &file_omnimodem_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2229,7 +2389,7 @@ func (x *ListDevicesRequest) String() string {
 func (*ListDevicesRequest) ProtoMessage() {}
 
 func (x *ListDevicesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[31]
+	mi := &file_omnimodem_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2242,7 +2402,7 @@ func (x *ListDevicesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDevicesRequest.ProtoReflect.Descriptor instead.
 func (*ListDevicesRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{31}
+	return file_omnimodem_proto_rawDescGZIP(), []int{33}
 }
 
 type DeviceInfo struct {
@@ -2257,7 +2417,7 @@ type DeviceInfo struct {
 
 func (x *DeviceInfo) Reset() {
 	*x = DeviceInfo{}
-	mi := &file_omnimodem_proto_msgTypes[32]
+	mi := &file_omnimodem_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2269,7 +2429,7 @@ func (x *DeviceInfo) String() string {
 func (*DeviceInfo) ProtoMessage() {}
 
 func (x *DeviceInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[32]
+	mi := &file_omnimodem_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2282,7 +2442,7 @@ func (x *DeviceInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeviceInfo.ProtoReflect.Descriptor instead.
 func (*DeviceInfo) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{32}
+	return file_omnimodem_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *DeviceInfo) GetDeviceId() string {
@@ -2322,7 +2482,7 @@ type ListDevicesResponse struct {
 
 func (x *ListDevicesResponse) Reset() {
 	*x = ListDevicesResponse{}
-	mi := &file_omnimodem_proto_msgTypes[33]
+	mi := &file_omnimodem_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2334,7 +2494,7 @@ func (x *ListDevicesResponse) String() string {
 func (*ListDevicesResponse) ProtoMessage() {}
 
 func (x *ListDevicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[33]
+	mi := &file_omnimodem_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2347,7 +2507,7 @@ func (x *ListDevicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDevicesResponse.ProtoReflect.Descriptor instead.
 func (*ListDevicesResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{33}
+	return file_omnimodem_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ListDevicesResponse) GetDevices() []*DeviceInfo {
@@ -2373,7 +2533,7 @@ type ConfigureAudioRequest struct {
 
 func (x *ConfigureAudioRequest) Reset() {
 	*x = ConfigureAudioRequest{}
-	mi := &file_omnimodem_proto_msgTypes[34]
+	mi := &file_omnimodem_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2385,7 +2545,7 @@ func (x *ConfigureAudioRequest) String() string {
 func (*ConfigureAudioRequest) ProtoMessage() {}
 
 func (x *ConfigureAudioRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[34]
+	mi := &file_omnimodem_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2398,7 +2558,7 @@ func (x *ConfigureAudioRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureAudioRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureAudioRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{34}
+	return file_omnimodem_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ConfigureAudioRequest) GetChannel() uint32 {
@@ -2453,7 +2613,7 @@ type ConfigureAudioResponse struct {
 
 func (x *ConfigureAudioResponse) Reset() {
 	*x = ConfigureAudioResponse{}
-	mi := &file_omnimodem_proto_msgTypes[35]
+	mi := &file_omnimodem_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2465,7 +2625,7 @@ func (x *ConfigureAudioResponse) String() string {
 func (*ConfigureAudioResponse) ProtoMessage() {}
 
 func (x *ConfigureAudioResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[35]
+	mi := &file_omnimodem_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2478,7 +2638,7 @@ func (x *ConfigureAudioResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureAudioResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureAudioResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{35}
+	return file_omnimodem_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ConfigureAudioResponse) GetActualSampleRate() uint32 {
@@ -2509,7 +2669,7 @@ type ConfigurePttRequest struct {
 
 func (x *ConfigurePttRequest) Reset() {
 	*x = ConfigurePttRequest{}
-	mi := &file_omnimodem_proto_msgTypes[36]
+	mi := &file_omnimodem_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2521,7 +2681,7 @@ func (x *ConfigurePttRequest) String() string {
 func (*ConfigurePttRequest) ProtoMessage() {}
 
 func (x *ConfigurePttRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[36]
+	mi := &file_omnimodem_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2534,7 +2694,7 @@ func (x *ConfigurePttRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigurePttRequest.ProtoReflect.Descriptor instead.
 func (*ConfigurePttRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{36}
+	return file_omnimodem_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ConfigurePttRequest) GetChannel() uint32 {
@@ -2587,7 +2747,7 @@ type ConfigurePttResponse struct {
 
 func (x *ConfigurePttResponse) Reset() {
 	*x = ConfigurePttResponse{}
-	mi := &file_omnimodem_proto_msgTypes[37]
+	mi := &file_omnimodem_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2599,7 +2759,7 @@ func (x *ConfigurePttResponse) String() string {
 func (*ConfigurePttResponse) ProtoMessage() {}
 
 func (x *ConfigurePttResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[37]
+	mi := &file_omnimodem_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2612,7 +2772,7 @@ func (x *ConfigurePttResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigurePttResponse.ProtoReflect.Descriptor instead.
 func (*ConfigurePttResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{37}
+	return file_omnimodem_proto_rawDescGZIP(), []int{39}
 }
 
 type KeyPttRequest struct {
@@ -2625,7 +2785,7 @@ type KeyPttRequest struct {
 
 func (x *KeyPttRequest) Reset() {
 	*x = KeyPttRequest{}
-	mi := &file_omnimodem_proto_msgTypes[38]
+	mi := &file_omnimodem_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2637,7 +2797,7 @@ func (x *KeyPttRequest) String() string {
 func (*KeyPttRequest) ProtoMessage() {}
 
 func (x *KeyPttRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[38]
+	mi := &file_omnimodem_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2650,7 +2810,7 @@ func (x *KeyPttRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyPttRequest.ProtoReflect.Descriptor instead.
 func (*KeyPttRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{38}
+	return file_omnimodem_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *KeyPttRequest) GetChannel() uint32 {
@@ -2675,7 +2835,7 @@ type KeyPttResponse struct {
 
 func (x *KeyPttResponse) Reset() {
 	*x = KeyPttResponse{}
-	mi := &file_omnimodem_proto_msgTypes[39]
+	mi := &file_omnimodem_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2687,7 +2847,7 @@ func (x *KeyPttResponse) String() string {
 func (*KeyPttResponse) ProtoMessage() {}
 
 func (x *KeyPttResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[39]
+	mi := &file_omnimodem_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2700,7 +2860,7 @@ func (x *KeyPttResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyPttResponse.ProtoReflect.Descriptor instead.
 func (*KeyPttResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{39}
+	return file_omnimodem_proto_rawDescGZIP(), []int{41}
 }
 
 type SuggestUdevRuleRequest struct {
@@ -2712,7 +2872,7 @@ type SuggestUdevRuleRequest struct {
 
 func (x *SuggestUdevRuleRequest) Reset() {
 	*x = SuggestUdevRuleRequest{}
-	mi := &file_omnimodem_proto_msgTypes[40]
+	mi := &file_omnimodem_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2724,7 +2884,7 @@ func (x *SuggestUdevRuleRequest) String() string {
 func (*SuggestUdevRuleRequest) ProtoMessage() {}
 
 func (x *SuggestUdevRuleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[40]
+	mi := &file_omnimodem_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2737,7 +2897,7 @@ func (x *SuggestUdevRuleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SuggestUdevRuleRequest.ProtoReflect.Descriptor instead.
 func (*SuggestUdevRuleRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{40}
+	return file_omnimodem_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *SuggestUdevRuleRequest) GetDeviceId() string {
@@ -2757,7 +2917,7 @@ type SuggestUdevRuleResponse struct {
 
 func (x *SuggestUdevRuleResponse) Reset() {
 	*x = SuggestUdevRuleResponse{}
-	mi := &file_omnimodem_proto_msgTypes[41]
+	mi := &file_omnimodem_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2769,7 +2929,7 @@ func (x *SuggestUdevRuleResponse) String() string {
 func (*SuggestUdevRuleResponse) ProtoMessage() {}
 
 func (x *SuggestUdevRuleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[41]
+	mi := &file_omnimodem_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2782,7 +2942,7 @@ func (x *SuggestUdevRuleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SuggestUdevRuleResponse.ProtoReflect.Descriptor instead.
 func (*SuggestUdevRuleResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{41}
+	return file_omnimodem_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *SuggestUdevRuleResponse) GetRule() string {
@@ -2809,7 +2969,7 @@ type DeviceArrived struct {
 
 func (x *DeviceArrived) Reset() {
 	*x = DeviceArrived{}
-	mi := &file_omnimodem_proto_msgTypes[42]
+	mi := &file_omnimodem_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2821,7 +2981,7 @@ func (x *DeviceArrived) String() string {
 func (*DeviceArrived) ProtoMessage() {}
 
 func (x *DeviceArrived) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[42]
+	mi := &file_omnimodem_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2834,7 +2994,7 @@ func (x *DeviceArrived) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeviceArrived.ProtoReflect.Descriptor instead.
 func (*DeviceArrived) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{42}
+	return file_omnimodem_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *DeviceArrived) GetDeviceId() string {
@@ -2860,7 +3020,7 @@ type DeviceDeparted struct {
 
 func (x *DeviceDeparted) Reset() {
 	*x = DeviceDeparted{}
-	mi := &file_omnimodem_proto_msgTypes[43]
+	mi := &file_omnimodem_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2872,7 +3032,7 @@ func (x *DeviceDeparted) String() string {
 func (*DeviceDeparted) ProtoMessage() {}
 
 func (x *DeviceDeparted) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[43]
+	mi := &file_omnimodem_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2885,7 +3045,7 @@ func (x *DeviceDeparted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeviceDeparted.ProtoReflect.Descriptor instead.
 func (*DeviceDeparted) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{43}
+	return file_omnimodem_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *DeviceDeparted) GetDeviceId() string {
@@ -2905,7 +3065,7 @@ type PttState struct {
 
 func (x *PttState) Reset() {
 	*x = PttState{}
-	mi := &file_omnimodem_proto_msgTypes[44]
+	mi := &file_omnimodem_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2917,7 +3077,7 @@ func (x *PttState) String() string {
 func (*PttState) ProtoMessage() {}
 
 func (x *PttState) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[44]
+	mi := &file_omnimodem_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2930,7 +3090,7 @@ func (x *PttState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PttState.ProtoReflect.Descriptor instead.
 func (*PttState) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{44}
+	return file_omnimodem_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *PttState) GetChannel() uint32 {
@@ -2956,7 +3116,7 @@ type GetMetricsRequest struct {
 
 func (x *GetMetricsRequest) Reset() {
 	*x = GetMetricsRequest{}
-	mi := &file_omnimodem_proto_msgTypes[45]
+	mi := &file_omnimodem_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2968,7 +3128,7 @@ func (x *GetMetricsRequest) String() string {
 func (*GetMetricsRequest) ProtoMessage() {}
 
 func (x *GetMetricsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[45]
+	mi := &file_omnimodem_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2981,7 +3141,7 @@ func (x *GetMetricsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMetricsRequest.ProtoReflect.Descriptor instead.
 func (*GetMetricsRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{45}
+	return file_omnimodem_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *GetMetricsRequest) GetChannel() uint32 {
@@ -3000,7 +3160,7 @@ type GetMetricsResponse struct {
 
 func (x *GetMetricsResponse) Reset() {
 	*x = GetMetricsResponse{}
-	mi := &file_omnimodem_proto_msgTypes[46]
+	mi := &file_omnimodem_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3012,7 +3172,7 @@ func (x *GetMetricsResponse) String() string {
 func (*GetMetricsResponse) ProtoMessage() {}
 
 func (x *GetMetricsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[46]
+	mi := &file_omnimodem_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3025,7 +3185,7 @@ func (x *GetMetricsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMetricsResponse.ProtoReflect.Descriptor instead.
 func (*GetMetricsResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{46}
+	return file_omnimodem_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *GetMetricsResponse) GetMetrics() []*ChannelMetrics {
@@ -3051,7 +3211,7 @@ type ChannelMetrics struct {
 
 func (x *ChannelMetrics) Reset() {
 	*x = ChannelMetrics{}
-	mi := &file_omnimodem_proto_msgTypes[47]
+	mi := &file_omnimodem_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3063,7 +3223,7 @@ func (x *ChannelMetrics) String() string {
 func (*ChannelMetrics) ProtoMessage() {}
 
 func (x *ChannelMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[47]
+	mi := &file_omnimodem_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3076,7 +3236,7 @@ func (x *ChannelMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelMetrics.ProtoReflect.Descriptor instead.
 func (*ChannelMetrics) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{47}
+	return file_omnimodem_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ChannelMetrics) GetChannel() uint32 {
@@ -3144,7 +3304,7 @@ type TxLeaseRequest struct {
 
 func (x *TxLeaseRequest) Reset() {
 	*x = TxLeaseRequest{}
-	mi := &file_omnimodem_proto_msgTypes[48]
+	mi := &file_omnimodem_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3156,7 +3316,7 @@ func (x *TxLeaseRequest) String() string {
 func (*TxLeaseRequest) ProtoMessage() {}
 
 func (x *TxLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[48]
+	mi := &file_omnimodem_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3169,7 +3329,7 @@ func (x *TxLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TxLeaseRequest.ProtoReflect.Descriptor instead.
 func (*TxLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{48}
+	return file_omnimodem_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *TxLeaseRequest) GetChannel() uint32 {
@@ -3189,7 +3349,7 @@ type TxLeaseResponse struct {
 
 func (x *TxLeaseResponse) Reset() {
 	*x = TxLeaseResponse{}
-	mi := &file_omnimodem_proto_msgTypes[49]
+	mi := &file_omnimodem_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3201,7 +3361,7 @@ func (x *TxLeaseResponse) String() string {
 func (*TxLeaseResponse) ProtoMessage() {}
 
 func (x *TxLeaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[49]
+	mi := &file_omnimodem_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3214,7 +3374,7 @@ func (x *TxLeaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TxLeaseResponse.ProtoReflect.Descriptor instead.
 func (*TxLeaseResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{49}
+	return file_omnimodem_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *TxLeaseResponse) GetGranted() bool {
@@ -3242,7 +3402,7 @@ type ConfigureKissListenerRequest struct {
 
 func (x *ConfigureKissListenerRequest) Reset() {
 	*x = ConfigureKissListenerRequest{}
-	mi := &file_omnimodem_proto_msgTypes[50]
+	mi := &file_omnimodem_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3254,7 +3414,7 @@ func (x *ConfigureKissListenerRequest) String() string {
 func (*ConfigureKissListenerRequest) ProtoMessage() {}
 
 func (x *ConfigureKissListenerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[50]
+	mi := &file_omnimodem_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3267,7 +3427,7 @@ func (x *ConfigureKissListenerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureKissListenerRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureKissListenerRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{50}
+	return file_omnimodem_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ConfigureKissListenerRequest) GetChannel() uint32 {
@@ -3301,7 +3461,7 @@ type ConfigureKissListenerResponse struct {
 
 func (x *ConfigureKissListenerResponse) Reset() {
 	*x = ConfigureKissListenerResponse{}
-	mi := &file_omnimodem_proto_msgTypes[51]
+	mi := &file_omnimodem_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3313,7 +3473,7 @@ func (x *ConfigureKissListenerResponse) String() string {
 func (*ConfigureKissListenerResponse) ProtoMessage() {}
 
 func (x *ConfigureKissListenerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[51]
+	mi := &file_omnimodem_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3326,7 +3486,7 @@ func (x *ConfigureKissListenerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureKissListenerResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureKissListenerResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{51}
+	return file_omnimodem_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ConfigureKissListenerResponse) GetBoundAddr() string {
@@ -3354,7 +3514,7 @@ type SetAudioGainRequest struct {
 
 func (x *SetAudioGainRequest) Reset() {
 	*x = SetAudioGainRequest{}
-	mi := &file_omnimodem_proto_msgTypes[52]
+	mi := &file_omnimodem_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3366,7 +3526,7 @@ func (x *SetAudioGainRequest) String() string {
 func (*SetAudioGainRequest) ProtoMessage() {}
 
 func (x *SetAudioGainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[52]
+	mi := &file_omnimodem_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3379,7 +3539,7 @@ func (x *SetAudioGainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAudioGainRequest.ProtoReflect.Descriptor instead.
 func (*SetAudioGainRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{52}
+	return file_omnimodem_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *SetAudioGainRequest) GetChannel() uint32 {
@@ -3411,7 +3571,7 @@ type SetAudioGainResponse struct {
 
 func (x *SetAudioGainResponse) Reset() {
 	*x = SetAudioGainResponse{}
-	mi := &file_omnimodem_proto_msgTypes[53]
+	mi := &file_omnimodem_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3423,7 +3583,7 @@ func (x *SetAudioGainResponse) String() string {
 func (*SetAudioGainResponse) ProtoMessage() {}
 
 func (x *SetAudioGainResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[53]
+	mi := &file_omnimodem_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3436,7 +3596,7 @@ func (x *SetAudioGainResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAudioGainResponse.ProtoReflect.Descriptor instead.
 func (*SetAudioGainResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{53}
+	return file_omnimodem_proto_rawDescGZIP(), []int{55}
 }
 
 type ConfigureSpectrumRequest struct {
@@ -3454,7 +3614,7 @@ type ConfigureSpectrumRequest struct {
 
 func (x *ConfigureSpectrumRequest) Reset() {
 	*x = ConfigureSpectrumRequest{}
-	mi := &file_omnimodem_proto_msgTypes[54]
+	mi := &file_omnimodem_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3466,7 +3626,7 @@ func (x *ConfigureSpectrumRequest) String() string {
 func (*ConfigureSpectrumRequest) ProtoMessage() {}
 
 func (x *ConfigureSpectrumRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[54]
+	mi := &file_omnimodem_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3479,7 +3639,7 @@ func (x *ConfigureSpectrumRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureSpectrumRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureSpectrumRequest) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{54}
+	return file_omnimodem_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ConfigureSpectrumRequest) GetChannel() uint32 {
@@ -3544,7 +3704,7 @@ type ConfigureSpectrumResponse struct {
 
 func (x *ConfigureSpectrumResponse) Reset() {
 	*x = ConfigureSpectrumResponse{}
-	mi := &file_omnimodem_proto_msgTypes[55]
+	mi := &file_omnimodem_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3556,7 +3716,7 @@ func (x *ConfigureSpectrumResponse) String() string {
 func (*ConfigureSpectrumResponse) ProtoMessage() {}
 
 func (x *ConfigureSpectrumResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_omnimodem_proto_msgTypes[55]
+	mi := &file_omnimodem_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3569,7 +3729,7 @@ func (x *ConfigureSpectrumResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureSpectrumResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureSpectrumResponse) Descriptor() ([]byte, []int) {
-	return file_omnimodem_proto_rawDescGZIP(), []int{55}
+	return file_omnimodem_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *ConfigureSpectrumResponse) GetBinCount() uint32 {
@@ -3617,7 +3777,7 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
 	"\x04mode\x18\x03 \x01(\tR\x04mode\x129\n" +
 	"\vmode_params\x18\x04 \x01(\v2\x18.omnimodem.v1.ModeParamsR\n" +
-	"modeParams\"\xfb\x04\n" +
+	"modeParams\"\xd8\x05\n" +
 	"\n" +
 	"ModeParams\x12(\n" +
 	"\x02cw\x18\x01 \x01(\v2\x16.omnimodem.v1.CwParamsH\x00R\x02cw\x12.\n" +
@@ -3632,7 +3792,9 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\tcontestia\x18\n" +
 	" \x01(\v2\x1d.omnimodem.v1.ContestiaParamsH\x00R\tcontestia\x12.\n" +
 	"\x04thor\x18\v \x01(\v2\x18.omnimodem.v1.ThorParamsH\x00R\x04thor\x12.\n" +
-	"\x04mt63\x18\f \x01(\v2\x18.omnimodem.v1.Mt63ParamsH\x00R\x04mt63B\b\n" +
+	"\x04mt63\x18\f \x01(\v2\x18.omnimodem.v1.Mt63ParamsH\x00R\x04mt63\x12.\n" +
+	"\x04ifkp\x18\r \x01(\v2\x18.omnimodem.v1.IfkpParamsH\x00R\x04ifkp\x12+\n" +
+	"\x03fsq\x18\x0e \x01(\v2\x17.omnimodem.v1.FsqParamsH\x00R\x03fsqB\b\n" +
 	"\x06params\"5\n" +
 	"\bCwParams\x12\x10\n" +
 	"\x03wpm\x18\x01 \x01(\rR\x03wpm\x12\x17\n" +
@@ -3672,7 +3834,16 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\n" +
 	"Mt63Params\x12\x18\n" +
 	"\asubmode\x18\x01 \x01(\tR\asubmode\x12\x1b\n" +
-	"\tcenter_hz\x18\x02 \x01(\x02R\bcenterHz\" \n" +
+	"\tcenter_hz\x18\x02 \x01(\x02R\bcenterHz\"?\n" +
+	"\n" +
+	"IfkpParams\x12\x14\n" +
+	"\x05speed\x18\x01 \x01(\tR\x05speed\x12\x1b\n" +
+	"\tcenter_hz\x18\x02 \x01(\x02R\bcenterHz\"r\n" +
+	"\tFsqParams\x12\x14\n" +
+	"\x05speed\x18\x01 \x01(\tR\x05speed\x12\x1b\n" +
+	"\tcenter_hz\x18\x02 \x01(\x02R\bcenterHz\x12\x16\n" +
+	"\x06mycall\x18\x03 \x01(\tR\x06mycall\x12\x1a\n" +
+	"\bdirected\x18\x04 \x01(\bR\bdirected\" \n" +
 	"\x0eAfsk1200Params\x12\x0e\n" +
 	"\x02tx\x18\x01 \x01(\bR\x02tx\"4\n" +
 	"\x18ConfigureChannelResponse\x12\x18\n" +
@@ -3893,7 +4064,7 @@ func file_omnimodem_proto_rawDescGZIP() []byte {
 }
 
 var file_omnimodem_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_omnimodem_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
+var file_omnimodem_proto_msgTypes = make([]protoimpl.MessageInfo, 58)
 var file_omnimodem_proto_goTypes = []any{
 	(PttMethod)(0),                        // 0: omnimodem.v1.PttMethod
 	(*ConfigureChannelRequest)(nil),       // 1: omnimodem.v1.ConfigureChannelRequest
@@ -3909,49 +4080,51 @@ var file_omnimodem_proto_goTypes = []any{
 	(*ContestiaParams)(nil),               // 11: omnimodem.v1.ContestiaParams
 	(*ThorParams)(nil),                    // 12: omnimodem.v1.ThorParams
 	(*Mt63Params)(nil),                    // 13: omnimodem.v1.Mt63Params
-	(*Afsk1200Params)(nil),                // 14: omnimodem.v1.Afsk1200Params
-	(*ConfigureChannelResponse)(nil),      // 15: omnimodem.v1.ConfigureChannelResponse
-	(*GetStateRequest)(nil),               // 16: omnimodem.v1.GetStateRequest
-	(*TransmitRequest)(nil),               // 17: omnimodem.v1.TransmitRequest
-	(*TransmitResponse)(nil),              // 18: omnimodem.v1.TransmitResponse
-	(*SubscribeRequest)(nil),              // 19: omnimodem.v1.SubscribeRequest
-	(*ModemState)(nil),                    // 20: omnimodem.v1.ModemState
-	(*ChannelInfo)(nil),                   // 21: omnimodem.v1.ChannelInfo
-	(*Event)(nil),                         // 22: omnimodem.v1.Event
-	(*SpectrumFrame)(nil),                 // 23: omnimodem.v1.SpectrumFrame
-	(*ChannelConfigured)(nil),             // 24: omnimodem.v1.ChannelConfigured
-	(*ClockOffset)(nil),                   // 25: omnimodem.v1.ClockOffset
-	(*TransmitStarted)(nil),               // 26: omnimodem.v1.TransmitStarted
-	(*TransmitComplete)(nil),              // 27: omnimodem.v1.TransmitComplete
-	(*RxFrame)(nil),                       // 28: omnimodem.v1.RxFrame
-	(*Image)(nil),                         // 29: omnimodem.v1.Image
-	(*AudioLevel)(nil),                    // 30: omnimodem.v1.AudioLevel
-	(*Status)(nil),                        // 31: omnimodem.v1.Status
-	(*ListDevicesRequest)(nil),            // 32: omnimodem.v1.ListDevicesRequest
-	(*DeviceInfo)(nil),                    // 33: omnimodem.v1.DeviceInfo
-	(*ListDevicesResponse)(nil),           // 34: omnimodem.v1.ListDevicesResponse
-	(*ConfigureAudioRequest)(nil),         // 35: omnimodem.v1.ConfigureAudioRequest
-	(*ConfigureAudioResponse)(nil),        // 36: omnimodem.v1.ConfigureAudioResponse
-	(*ConfigurePttRequest)(nil),           // 37: omnimodem.v1.ConfigurePttRequest
-	(*ConfigurePttResponse)(nil),          // 38: omnimodem.v1.ConfigurePttResponse
-	(*KeyPttRequest)(nil),                 // 39: omnimodem.v1.KeyPttRequest
-	(*KeyPttResponse)(nil),                // 40: omnimodem.v1.KeyPttResponse
-	(*SuggestUdevRuleRequest)(nil),        // 41: omnimodem.v1.SuggestUdevRuleRequest
-	(*SuggestUdevRuleResponse)(nil),       // 42: omnimodem.v1.SuggestUdevRuleResponse
-	(*DeviceArrived)(nil),                 // 43: omnimodem.v1.DeviceArrived
-	(*DeviceDeparted)(nil),                // 44: omnimodem.v1.DeviceDeparted
-	(*PttState)(nil),                      // 45: omnimodem.v1.PttState
-	(*GetMetricsRequest)(nil),             // 46: omnimodem.v1.GetMetricsRequest
-	(*GetMetricsResponse)(nil),            // 47: omnimodem.v1.GetMetricsResponse
-	(*ChannelMetrics)(nil),                // 48: omnimodem.v1.ChannelMetrics
-	(*TxLeaseRequest)(nil),                // 49: omnimodem.v1.TxLeaseRequest
-	(*TxLeaseResponse)(nil),               // 50: omnimodem.v1.TxLeaseResponse
-	(*ConfigureKissListenerRequest)(nil),  // 51: omnimodem.v1.ConfigureKissListenerRequest
-	(*ConfigureKissListenerResponse)(nil), // 52: omnimodem.v1.ConfigureKissListenerResponse
-	(*SetAudioGainRequest)(nil),           // 53: omnimodem.v1.SetAudioGainRequest
-	(*SetAudioGainResponse)(nil),          // 54: omnimodem.v1.SetAudioGainResponse
-	(*ConfigureSpectrumRequest)(nil),      // 55: omnimodem.v1.ConfigureSpectrumRequest
-	(*ConfigureSpectrumResponse)(nil),     // 56: omnimodem.v1.ConfigureSpectrumResponse
+	(*IfkpParams)(nil),                    // 14: omnimodem.v1.IfkpParams
+	(*FsqParams)(nil),                     // 15: omnimodem.v1.FsqParams
+	(*Afsk1200Params)(nil),                // 16: omnimodem.v1.Afsk1200Params
+	(*ConfigureChannelResponse)(nil),      // 17: omnimodem.v1.ConfigureChannelResponse
+	(*GetStateRequest)(nil),               // 18: omnimodem.v1.GetStateRequest
+	(*TransmitRequest)(nil),               // 19: omnimodem.v1.TransmitRequest
+	(*TransmitResponse)(nil),              // 20: omnimodem.v1.TransmitResponse
+	(*SubscribeRequest)(nil),              // 21: omnimodem.v1.SubscribeRequest
+	(*ModemState)(nil),                    // 22: omnimodem.v1.ModemState
+	(*ChannelInfo)(nil),                   // 23: omnimodem.v1.ChannelInfo
+	(*Event)(nil),                         // 24: omnimodem.v1.Event
+	(*SpectrumFrame)(nil),                 // 25: omnimodem.v1.SpectrumFrame
+	(*ChannelConfigured)(nil),             // 26: omnimodem.v1.ChannelConfigured
+	(*ClockOffset)(nil),                   // 27: omnimodem.v1.ClockOffset
+	(*TransmitStarted)(nil),               // 28: omnimodem.v1.TransmitStarted
+	(*TransmitComplete)(nil),              // 29: omnimodem.v1.TransmitComplete
+	(*RxFrame)(nil),                       // 30: omnimodem.v1.RxFrame
+	(*Image)(nil),                         // 31: omnimodem.v1.Image
+	(*AudioLevel)(nil),                    // 32: omnimodem.v1.AudioLevel
+	(*Status)(nil),                        // 33: omnimodem.v1.Status
+	(*ListDevicesRequest)(nil),            // 34: omnimodem.v1.ListDevicesRequest
+	(*DeviceInfo)(nil),                    // 35: omnimodem.v1.DeviceInfo
+	(*ListDevicesResponse)(nil),           // 36: omnimodem.v1.ListDevicesResponse
+	(*ConfigureAudioRequest)(nil),         // 37: omnimodem.v1.ConfigureAudioRequest
+	(*ConfigureAudioResponse)(nil),        // 38: omnimodem.v1.ConfigureAudioResponse
+	(*ConfigurePttRequest)(nil),           // 39: omnimodem.v1.ConfigurePttRequest
+	(*ConfigurePttResponse)(nil),          // 40: omnimodem.v1.ConfigurePttResponse
+	(*KeyPttRequest)(nil),                 // 41: omnimodem.v1.KeyPttRequest
+	(*KeyPttResponse)(nil),                // 42: omnimodem.v1.KeyPttResponse
+	(*SuggestUdevRuleRequest)(nil),        // 43: omnimodem.v1.SuggestUdevRuleRequest
+	(*SuggestUdevRuleResponse)(nil),       // 44: omnimodem.v1.SuggestUdevRuleResponse
+	(*DeviceArrived)(nil),                 // 45: omnimodem.v1.DeviceArrived
+	(*DeviceDeparted)(nil),                // 46: omnimodem.v1.DeviceDeparted
+	(*PttState)(nil),                      // 47: omnimodem.v1.PttState
+	(*GetMetricsRequest)(nil),             // 48: omnimodem.v1.GetMetricsRequest
+	(*GetMetricsResponse)(nil),            // 49: omnimodem.v1.GetMetricsResponse
+	(*ChannelMetrics)(nil),                // 50: omnimodem.v1.ChannelMetrics
+	(*TxLeaseRequest)(nil),                // 51: omnimodem.v1.TxLeaseRequest
+	(*TxLeaseResponse)(nil),               // 52: omnimodem.v1.TxLeaseResponse
+	(*ConfigureKissListenerRequest)(nil),  // 53: omnimodem.v1.ConfigureKissListenerRequest
+	(*ConfigureKissListenerResponse)(nil), // 54: omnimodem.v1.ConfigureKissListenerResponse
+	(*SetAudioGainRequest)(nil),           // 55: omnimodem.v1.SetAudioGainRequest
+	(*SetAudioGainResponse)(nil),          // 56: omnimodem.v1.SetAudioGainResponse
+	(*ConfigureSpectrumRequest)(nil),      // 57: omnimodem.v1.ConfigureSpectrumRequest
+	(*ConfigureSpectrumResponse)(nil),     // 58: omnimodem.v1.ConfigureSpectrumResponse
 }
 var file_omnimodem_proto_depIdxs = []int32{
 	2,  // 0: omnimodem.v1.ConfigureChannelRequest.mode_params:type_name -> omnimodem.v1.ModeParams
@@ -3959,7 +4132,7 @@ var file_omnimodem_proto_depIdxs = []int32{
 	4,  // 2: omnimodem.v1.ModeParams.rtty:type_name -> omnimodem.v1.RttyParams
 	5,  // 3: omnimodem.v1.ModeParams.psk31:type_name -> omnimodem.v1.Psk31Params
 	7,  // 4: omnimodem.v1.ModeParams.olivia:type_name -> omnimodem.v1.OliviaParams
-	14, // 5: omnimodem.v1.ModeParams.afsk1200:type_name -> omnimodem.v1.Afsk1200Params
+	16, // 5: omnimodem.v1.ModeParams.afsk1200:type_name -> omnimodem.v1.Afsk1200Params
 	6,  // 6: omnimodem.v1.ModeParams.psk:type_name -> omnimodem.v1.PskParams
 	8,  // 7: omnimodem.v1.ModeParams.dominoex:type_name -> omnimodem.v1.DominoParams
 	9,  // 8: omnimodem.v1.ModeParams.hell:type_name -> omnimodem.v1.HellParams
@@ -3967,60 +4140,62 @@ var file_omnimodem_proto_depIdxs = []int32{
 	11, // 10: omnimodem.v1.ModeParams.contestia:type_name -> omnimodem.v1.ContestiaParams
 	12, // 11: omnimodem.v1.ModeParams.thor:type_name -> omnimodem.v1.ThorParams
 	13, // 12: omnimodem.v1.ModeParams.mt63:type_name -> omnimodem.v1.Mt63Params
-	21, // 13: omnimodem.v1.ModemState.channels:type_name -> omnimodem.v1.ChannelInfo
-	0,  // 14: omnimodem.v1.ChannelInfo.ptt_method:type_name -> omnimodem.v1.PttMethod
-	20, // 15: omnimodem.v1.Event.snapshot:type_name -> omnimodem.v1.ModemState
-	24, // 16: omnimodem.v1.Event.channel_configured:type_name -> omnimodem.v1.ChannelConfigured
-	26, // 17: omnimodem.v1.Event.transmit_started:type_name -> omnimodem.v1.TransmitStarted
-	27, // 18: omnimodem.v1.Event.transmit_complete:type_name -> omnimodem.v1.TransmitComplete
-	28, // 19: omnimodem.v1.Event.rx_frame:type_name -> omnimodem.v1.RxFrame
-	30, // 20: omnimodem.v1.Event.audio_level:type_name -> omnimodem.v1.AudioLevel
-	31, // 21: omnimodem.v1.Event.status:type_name -> omnimodem.v1.Status
-	43, // 22: omnimodem.v1.Event.device_arrived:type_name -> omnimodem.v1.DeviceArrived
-	44, // 23: omnimodem.v1.Event.device_departed:type_name -> omnimodem.v1.DeviceDeparted
-	45, // 24: omnimodem.v1.Event.ptt_state:type_name -> omnimodem.v1.PttState
-	25, // 25: omnimodem.v1.Event.clock_offset:type_name -> omnimodem.v1.ClockOffset
-	48, // 26: omnimodem.v1.Event.channel_metrics:type_name -> omnimodem.v1.ChannelMetrics
-	23, // 27: omnimodem.v1.Event.spectrum_frame:type_name -> omnimodem.v1.SpectrumFrame
-	29, // 28: omnimodem.v1.RxFrame.image:type_name -> omnimodem.v1.Image
-	33, // 29: omnimodem.v1.ListDevicesResponse.devices:type_name -> omnimodem.v1.DeviceInfo
-	0,  // 30: omnimodem.v1.ConfigurePttRequest.method:type_name -> omnimodem.v1.PttMethod
-	48, // 31: omnimodem.v1.GetMetricsResponse.metrics:type_name -> omnimodem.v1.ChannelMetrics
-	1,  // 32: omnimodem.v1.ModemControl.ConfigureChannel:input_type -> omnimodem.v1.ConfigureChannelRequest
-	16, // 33: omnimodem.v1.ModemControl.GetState:input_type -> omnimodem.v1.GetStateRequest
-	17, // 34: omnimodem.v1.ModemControl.Transmit:input_type -> omnimodem.v1.TransmitRequest
-	19, // 35: omnimodem.v1.ModemControl.SubscribeEvents:input_type -> omnimodem.v1.SubscribeRequest
-	32, // 36: omnimodem.v1.ModemControl.ListDevices:input_type -> omnimodem.v1.ListDevicesRequest
-	35, // 37: omnimodem.v1.ModemControl.ConfigureAudio:input_type -> omnimodem.v1.ConfigureAudioRequest
-	37, // 38: omnimodem.v1.ModemControl.ConfigurePtt:input_type -> omnimodem.v1.ConfigurePttRequest
-	39, // 39: omnimodem.v1.ModemControl.KeyPtt:input_type -> omnimodem.v1.KeyPttRequest
-	41, // 40: omnimodem.v1.ModemControl.SuggestUdevRule:input_type -> omnimodem.v1.SuggestUdevRuleRequest
-	46, // 41: omnimodem.v1.ModemControl.GetMetrics:input_type -> omnimodem.v1.GetMetricsRequest
-	49, // 42: omnimodem.v1.ModemControl.AcquireTxLease:input_type -> omnimodem.v1.TxLeaseRequest
-	49, // 43: omnimodem.v1.ModemControl.ReleaseTxLease:input_type -> omnimodem.v1.TxLeaseRequest
-	51, // 44: omnimodem.v1.ModemControl.ConfigureKissListener:input_type -> omnimodem.v1.ConfigureKissListenerRequest
-	53, // 45: omnimodem.v1.ModemControl.SetAudioGain:input_type -> omnimodem.v1.SetAudioGainRequest
-	55, // 46: omnimodem.v1.ModemControl.ConfigureSpectrum:input_type -> omnimodem.v1.ConfigureSpectrumRequest
-	15, // 47: omnimodem.v1.ModemControl.ConfigureChannel:output_type -> omnimodem.v1.ConfigureChannelResponse
-	20, // 48: omnimodem.v1.ModemControl.GetState:output_type -> omnimodem.v1.ModemState
-	18, // 49: omnimodem.v1.ModemControl.Transmit:output_type -> omnimodem.v1.TransmitResponse
-	22, // 50: omnimodem.v1.ModemControl.SubscribeEvents:output_type -> omnimodem.v1.Event
-	34, // 51: omnimodem.v1.ModemControl.ListDevices:output_type -> omnimodem.v1.ListDevicesResponse
-	36, // 52: omnimodem.v1.ModemControl.ConfigureAudio:output_type -> omnimodem.v1.ConfigureAudioResponse
-	38, // 53: omnimodem.v1.ModemControl.ConfigurePtt:output_type -> omnimodem.v1.ConfigurePttResponse
-	40, // 54: omnimodem.v1.ModemControl.KeyPtt:output_type -> omnimodem.v1.KeyPttResponse
-	42, // 55: omnimodem.v1.ModemControl.SuggestUdevRule:output_type -> omnimodem.v1.SuggestUdevRuleResponse
-	47, // 56: omnimodem.v1.ModemControl.GetMetrics:output_type -> omnimodem.v1.GetMetricsResponse
-	50, // 57: omnimodem.v1.ModemControl.AcquireTxLease:output_type -> omnimodem.v1.TxLeaseResponse
-	50, // 58: omnimodem.v1.ModemControl.ReleaseTxLease:output_type -> omnimodem.v1.TxLeaseResponse
-	52, // 59: omnimodem.v1.ModemControl.ConfigureKissListener:output_type -> omnimodem.v1.ConfigureKissListenerResponse
-	54, // 60: omnimodem.v1.ModemControl.SetAudioGain:output_type -> omnimodem.v1.SetAudioGainResponse
-	56, // 61: omnimodem.v1.ModemControl.ConfigureSpectrum:output_type -> omnimodem.v1.ConfigureSpectrumResponse
-	47, // [47:62] is the sub-list for method output_type
-	32, // [32:47] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	14, // 13: omnimodem.v1.ModeParams.ifkp:type_name -> omnimodem.v1.IfkpParams
+	15, // 14: omnimodem.v1.ModeParams.fsq:type_name -> omnimodem.v1.FsqParams
+	23, // 15: omnimodem.v1.ModemState.channels:type_name -> omnimodem.v1.ChannelInfo
+	0,  // 16: omnimodem.v1.ChannelInfo.ptt_method:type_name -> omnimodem.v1.PttMethod
+	22, // 17: omnimodem.v1.Event.snapshot:type_name -> omnimodem.v1.ModemState
+	26, // 18: omnimodem.v1.Event.channel_configured:type_name -> omnimodem.v1.ChannelConfigured
+	28, // 19: omnimodem.v1.Event.transmit_started:type_name -> omnimodem.v1.TransmitStarted
+	29, // 20: omnimodem.v1.Event.transmit_complete:type_name -> omnimodem.v1.TransmitComplete
+	30, // 21: omnimodem.v1.Event.rx_frame:type_name -> omnimodem.v1.RxFrame
+	32, // 22: omnimodem.v1.Event.audio_level:type_name -> omnimodem.v1.AudioLevel
+	33, // 23: omnimodem.v1.Event.status:type_name -> omnimodem.v1.Status
+	45, // 24: omnimodem.v1.Event.device_arrived:type_name -> omnimodem.v1.DeviceArrived
+	46, // 25: omnimodem.v1.Event.device_departed:type_name -> omnimodem.v1.DeviceDeparted
+	47, // 26: omnimodem.v1.Event.ptt_state:type_name -> omnimodem.v1.PttState
+	27, // 27: omnimodem.v1.Event.clock_offset:type_name -> omnimodem.v1.ClockOffset
+	50, // 28: omnimodem.v1.Event.channel_metrics:type_name -> omnimodem.v1.ChannelMetrics
+	25, // 29: omnimodem.v1.Event.spectrum_frame:type_name -> omnimodem.v1.SpectrumFrame
+	31, // 30: omnimodem.v1.RxFrame.image:type_name -> omnimodem.v1.Image
+	35, // 31: omnimodem.v1.ListDevicesResponse.devices:type_name -> omnimodem.v1.DeviceInfo
+	0,  // 32: omnimodem.v1.ConfigurePttRequest.method:type_name -> omnimodem.v1.PttMethod
+	50, // 33: omnimodem.v1.GetMetricsResponse.metrics:type_name -> omnimodem.v1.ChannelMetrics
+	1,  // 34: omnimodem.v1.ModemControl.ConfigureChannel:input_type -> omnimodem.v1.ConfigureChannelRequest
+	18, // 35: omnimodem.v1.ModemControl.GetState:input_type -> omnimodem.v1.GetStateRequest
+	19, // 36: omnimodem.v1.ModemControl.Transmit:input_type -> omnimodem.v1.TransmitRequest
+	21, // 37: omnimodem.v1.ModemControl.SubscribeEvents:input_type -> omnimodem.v1.SubscribeRequest
+	34, // 38: omnimodem.v1.ModemControl.ListDevices:input_type -> omnimodem.v1.ListDevicesRequest
+	37, // 39: omnimodem.v1.ModemControl.ConfigureAudio:input_type -> omnimodem.v1.ConfigureAudioRequest
+	39, // 40: omnimodem.v1.ModemControl.ConfigurePtt:input_type -> omnimodem.v1.ConfigurePttRequest
+	41, // 41: omnimodem.v1.ModemControl.KeyPtt:input_type -> omnimodem.v1.KeyPttRequest
+	43, // 42: omnimodem.v1.ModemControl.SuggestUdevRule:input_type -> omnimodem.v1.SuggestUdevRuleRequest
+	48, // 43: omnimodem.v1.ModemControl.GetMetrics:input_type -> omnimodem.v1.GetMetricsRequest
+	51, // 44: omnimodem.v1.ModemControl.AcquireTxLease:input_type -> omnimodem.v1.TxLeaseRequest
+	51, // 45: omnimodem.v1.ModemControl.ReleaseTxLease:input_type -> omnimodem.v1.TxLeaseRequest
+	53, // 46: omnimodem.v1.ModemControl.ConfigureKissListener:input_type -> omnimodem.v1.ConfigureKissListenerRequest
+	55, // 47: omnimodem.v1.ModemControl.SetAudioGain:input_type -> omnimodem.v1.SetAudioGainRequest
+	57, // 48: omnimodem.v1.ModemControl.ConfigureSpectrum:input_type -> omnimodem.v1.ConfigureSpectrumRequest
+	17, // 49: omnimodem.v1.ModemControl.ConfigureChannel:output_type -> omnimodem.v1.ConfigureChannelResponse
+	22, // 50: omnimodem.v1.ModemControl.GetState:output_type -> omnimodem.v1.ModemState
+	20, // 51: omnimodem.v1.ModemControl.Transmit:output_type -> omnimodem.v1.TransmitResponse
+	24, // 52: omnimodem.v1.ModemControl.SubscribeEvents:output_type -> omnimodem.v1.Event
+	36, // 53: omnimodem.v1.ModemControl.ListDevices:output_type -> omnimodem.v1.ListDevicesResponse
+	38, // 54: omnimodem.v1.ModemControl.ConfigureAudio:output_type -> omnimodem.v1.ConfigureAudioResponse
+	40, // 55: omnimodem.v1.ModemControl.ConfigurePtt:output_type -> omnimodem.v1.ConfigurePttResponse
+	42, // 56: omnimodem.v1.ModemControl.KeyPtt:output_type -> omnimodem.v1.KeyPttResponse
+	44, // 57: omnimodem.v1.ModemControl.SuggestUdevRule:output_type -> omnimodem.v1.SuggestUdevRuleResponse
+	49, // 58: omnimodem.v1.ModemControl.GetMetrics:output_type -> omnimodem.v1.GetMetricsResponse
+	52, // 59: omnimodem.v1.ModemControl.AcquireTxLease:output_type -> omnimodem.v1.TxLeaseResponse
+	52, // 60: omnimodem.v1.ModemControl.ReleaseTxLease:output_type -> omnimodem.v1.TxLeaseResponse
+	54, // 61: omnimodem.v1.ModemControl.ConfigureKissListener:output_type -> omnimodem.v1.ConfigureKissListenerResponse
+	56, // 62: omnimodem.v1.ModemControl.SetAudioGain:output_type -> omnimodem.v1.SetAudioGainResponse
+	58, // 63: omnimodem.v1.ModemControl.ConfigureSpectrum:output_type -> omnimodem.v1.ConfigureSpectrumResponse
+	49, // [49:64] is the sub-list for method output_type
+	34, // [34:49] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_omnimodem_proto_init() }
@@ -4041,8 +4216,10 @@ func file_omnimodem_proto_init() {
 		(*ModeParams_Contestia)(nil),
 		(*ModeParams_Thor)(nil),
 		(*ModeParams_Mt63)(nil),
+		(*ModeParams_Ifkp)(nil),
+		(*ModeParams_Fsq)(nil),
 	}
-	file_omnimodem_proto_msgTypes[21].OneofWrappers = []any{
+	file_omnimodem_proto_msgTypes[23].OneofWrappers = []any{
 		(*Event_Snapshot)(nil),
 		(*Event_ChannelConfigured)(nil),
 		(*Event_TransmitStarted)(nil),
@@ -4063,7 +4240,7 @@ func file_omnimodem_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_omnimodem_proto_rawDesc), len(file_omnimodem_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   56,
+			NumMessages:   58,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

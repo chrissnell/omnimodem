@@ -96,6 +96,8 @@ message ModeParams {
     ContestiaParams contestia = 10;
     ThorParams thor = 11;
     Mt63Params mt63 = 12;
+    IfkpParams ifkp = 13;
+    FsqParams fsq = 14;
   }
 }
 
@@ -172,6 +174,26 @@ message ThorParams {
 message Mt63Params {
   string submode = 1;   // mt63::Mt63Variant label, e.g. "mt63_1000l"
   float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi IFKP family (ifkp / ifkp-slow / ifkp-fast). 33-tone IFK MFSK with
+// the self-framing IFKP Varicode. `speed` is the mode label; `center_hz` the
+// audio carrier.
+message IfkpParams {
+  string speed = 1;     // ifkp::IfkpSpeed label, e.g. "ifkp-slow"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi FSQ / FSQCALL family (fsq-1.5 / fsq-2 / fsq / fsq-4.5 / fsq-6).
+// 33-tone IFK with a CRC8-keyed directed protocol. `speed` is the mode label;
+// `center_hz` the audio carrier; `mycall` the operator callsign in the directed
+// header; `directed` whether to send the CRC8 directed header + selective-call
+// framing (off ⇒ raw keyboard mode).
+message FsqParams {
+  string speed = 1;     // fsq::FsqSpeed label, e.g. "fsq" (= fsq-3)
+  float  center_hz = 2; // audio center frequency
+  string mycall = 3;    // operator callsign for the directed header
+  bool   directed = 4;  // append the CRC8 directed header + FSQEOT framing
 }
 
 message Afsk1200Params {
