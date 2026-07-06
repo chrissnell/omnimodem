@@ -221,6 +221,8 @@ message ChannelInfo {
   PttMethod ptt_method = 8;    // configured PTT method (UNSPECIFIED if unset)
   bool rsid_tx = 9;            // prepend the mode's RSID burst before each TX
   bool rsid_rx = 10;           // run the RSID detector over received audio
+  uint32 ptt_tx_delay_ms = 11; // per-channel PTT keying lead-in (ms)
+  uint32 ptt_tx_tail_ms = 12;  // per-channel PTT keying tail/hold (ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +373,13 @@ message ConfigurePttRequest {
   string node = 4;            // resolved node / chip path (serial/cm108/gpio)
   uint32 pin_or_line = 5;     // cm108 GPIO pin (1-8) or gpiochip line offset
   bool invert = 6;
+  // Per-channel PTT keying timing. TX delay is a keyed-but-silent lead-in
+  // before audio starts (lets the rig's PTT close); TX tail holds the key
+  // asserted after audio drains before releasing. Both apply to every mode
+  // on this channel. A full ConfigurePtt replaces the binding, so clients
+  // should always send the current values (0 is a valid explicit setting).
+  uint32 tx_delay_ms = 7;
+  uint32 tx_tail_ms = 8;
 }
 
 message ConfigurePttResponse {}

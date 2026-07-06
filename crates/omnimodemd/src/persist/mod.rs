@@ -55,7 +55,9 @@ impl Store {
                  tx_device_id  TEXT NOT NULL DEFAULT '',
                  tx_sample_rate INTEGER NOT NULL DEFAULT 0,
                  rsid_tx       INTEGER NOT NULL DEFAULT 0,
-                 rsid_rx       INTEGER NOT NULL DEFAULT 0
+                 rsid_rx       INTEGER NOT NULL DEFAULT 0,
+                 ptt_tx_delay_ms INTEGER NOT NULL DEFAULT 300,
+                 ptt_tx_tail_ms  INTEGER NOT NULL DEFAULT 50
              );",
         )?;
         // Idempotent migration for a DB created by the Phase-1 build, whose
@@ -75,6 +77,10 @@ impl Store {
             "ALTER TABLE channels ADD COLUMN tx_sample_rate INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN rsid_tx INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN rsid_rx INTEGER NOT NULL DEFAULT 0",
+            // PTT keying timing. Existing bound rows backfill to the sensible
+            // defaults so an upgrade doesn't silently zero an operator's lead-in.
+            "ALTER TABLE channels ADD COLUMN ptt_tx_delay_ms INTEGER NOT NULL DEFAULT 300",
+            "ALTER TABLE channels ADD COLUMN ptt_tx_tail_ms INTEGER NOT NULL DEFAULT 50",
         ] {
             match conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -88,13 +94,14 @@ impl Store {
 
     /// Insert or update a channel config (idempotent on channel id).
     pub fn upsert_channel(&self, cfg: &ChannelConfig) -> Result<(), StoreError> {
-        let (method, ptt_dev, node, pin, invert) = encode_ptt(&cfg.ptt);
+        let (method, ptt_dev, node, pin, invert, tx_delay, tx_tail) = encode_ptt(&cfg.ptt);
         self.conn.execute(
             "INSERT INTO channels
                  (id, name, mode, device_id, sample_rate, fanout,
                   ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert,
-                  tx_device_id, tx_sample_rate, rsid_tx, rsid_rx)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                  tx_device_id, tx_sample_rate, rsid_tx, rsid_rx,
+                  ptt_tx_delay_ms, ptt_tx_tail_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  mode = excluded.mode,
@@ -109,7 +116,9 @@ impl Store {
                  tx_device_id = excluded.tx_device_id,
                  tx_sample_rate = excluded.tx_sample_rate,
                  rsid_tx = excluded.rsid_tx,
-                 rsid_rx = excluded.rsid_rx;",
+                 rsid_rx = excluded.rsid_rx,
+                 ptt_tx_delay_ms = excluded.ptt_tx_delay_ms,
+                 ptt_tx_tail_ms = excluded.ptt_tx_tail_ms;",
             rusqlite::params![
                 cfg.id.0,
                 cfg.name,
@@ -126,6 +135,8 @@ impl Store {
                 cfg.tx_sample_rate,
                 cfg.rsid_tx as i64,
                 cfg.rsid_rx as i64,
+                tx_delay,
+                tx_tail,
             ],
         )?;
         Ok(())
@@ -136,7 +147,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, mode, device_id, sample_rate, fanout,
                     ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert,
-                    tx_device_id, tx_sample_rate, rsid_tx, rsid_rx
+                    tx_device_id, tx_sample_rate, rsid_tx, rsid_rx,
+                    ptt_tx_delay_ms, ptt_tx_tail_ms
              FROM channels ORDER BY id;",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -145,6 +157,9 @@ impl Store {
             let node: String = row.get(8)?;
             let pin: i64 = row.get(9)?;
             let invert: i64 = row.get(10)?;
+            // Columns 13/14 are rsid_tx/rsid_rx; PTT timing follows at 15/16.
+            let tx_delay: i64 = row.get(15)?;
+            let tx_tail: i64 = row.get(16)?;
             let capture_dev = DeviceId::parse(&row.get::<_, String>(3)?)
                 .unwrap_or_else(DeviceId::placeholder);
             // Empty tx_device_id == legacy / single-rig row: TX follows capture.
@@ -163,7 +178,7 @@ impl Store {
                 fanout: row.get(5)?,
                 tx_device_id,
                 tx_sample_rate: row.get(12)?,
-                ptt: decode_ptt(&method, &ptt_dev, &node, pin, invert),
+                ptt: decode_ptt(&method, &ptt_dev, &node, pin, invert, tx_delay, tx_tail),
                 rsid_tx: row.get::<_, i64>(13)? != 0,
                 rsid_rx: row.get::<_, i64>(14)? != 0,
             })
@@ -177,10 +192,11 @@ impl Store {
 }
 
 /// Flatten an optional `PttConfig` into the persisted columns. An empty method
-/// string means "no PTT binding".
-fn encode_ptt(ptt: &Option<PttConfig>) -> (String, String, String, i64, i64) {
+/// string means "no PTT binding". Returns
+/// `(method, device_id, node, pin, invert, tx_delay_ms, tx_tail_ms)`.
+fn encode_ptt(ptt: &Option<PttConfig>) -> (String, String, String, i64, i64, i64, i64) {
     let Some(p) = ptt else {
-        return (String::new(), String::new(), String::new(), 0, 0);
+        return (String::new(), String::new(), String::new(), 0, 0, 0, 0);
     };
     let dev = p.device_id.to_canonical_string();
     let (method, node, pin) = match &p.method {
@@ -191,11 +207,19 @@ fn encode_ptt(ptt: &Option<PttConfig>) -> (String, String, String, i64, i64) {
         PttMethod::Cm108 { node, pin } => ("cm108".to_string(), node.clone(), *pin as i64),
         PttMethod::Gpio { chip, line } => ("gpio".to_string(), chip.clone(), *line as i64),
     };
-    (method, dev, node, pin, p.invert as i64)
+    (method, dev, node, pin, p.invert as i64, p.tx_delay_ms as i64, p.tx_tail_ms as i64)
 }
 
 /// Rebuild a `PttConfig` from the persisted columns; `None` when no binding.
-fn decode_ptt(method: &str, dev: &str, node: &str, pin: i64, invert: i64) -> Option<PttConfig> {
+fn decode_ptt(
+    method: &str,
+    dev: &str,
+    node: &str,
+    pin: i64,
+    invert: i64,
+    tx_delay: i64,
+    tx_tail: i64,
+) -> Option<PttConfig> {
     if method.is_empty() {
         return None;
     }
@@ -212,6 +236,8 @@ fn decode_ptt(method: &str, dev: &str, node: &str, pin: i64, invert: i64) -> Opt
         device_id: DeviceId::parse(dev).unwrap_or_else(DeviceId::placeholder),
         method: m,
         invert: invert != 0,
+        tx_delay_ms: tx_delay.max(0) as u32,
+        tx_tail_ms: tx_tail.max(0) as u32,
     })
 }
 
@@ -311,13 +337,13 @@ mod tests {
         c.ptt = Some(PttConfig {
             device_id: DeviceId::Serial { by_id: "usb-FTDI_x".into() },
             method: PttMethod::Cm108 { node: "/dev/hidraw0".into(), pin: 3 },
-            invert: true,
+            invert: true, tx_delay_ms: 250, tx_tail_ms: 40,
         });
         store.upsert_channel(&c).unwrap();
 
         let loaded = store.load_channels().unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0], c);
+        assert_eq!(loaded[0], c); // full equality includes the PTT timing
     }
 
     #[test]
@@ -354,5 +380,40 @@ mod tests {
         let loaded = store.load_channels().unwrap();
         assert_eq!(loaded[0].tx_device_id, loaded[0].device_id);
         assert_eq!(loaded[0].tx_sample_rate, 0);
+    }
+
+    #[test]
+    fn legacy_bound_row_backfills_ptt_timing_defaults() {
+        // A row created before the PTT-timing columns existed, with a real PTT
+        // binding: the ALTER migration must backfill the sensible defaults so an
+        // upgrade doesn't silently zero the operator's keying lead-in.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channels (
+                 id            INTEGER PRIMARY KEY,
+                 name          TEXT NOT NULL,
+                 mode          TEXT NOT NULL,
+                 device_id     TEXT NOT NULL,
+                 sample_rate   INTEGER NOT NULL DEFAULT 48000,
+                 fanout        INTEGER NOT NULL DEFAULT 1,
+                 ptt_method    TEXT NOT NULL DEFAULT '',
+                 ptt_device_id TEXT NOT NULL DEFAULT '',
+                 ptt_node      TEXT NOT NULL DEFAULT '',
+                 ptt_pin       INTEGER NOT NULL DEFAULT 0,
+                 ptt_invert    INTEGER NOT NULL DEFAULT 0,
+                 tx_device_id  TEXT NOT NULL DEFAULT '',
+                 tx_sample_rate INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO channels
+                 (id, name, mode, device_id, ptt_method, ptt_device_id, ptt_node)
+                 VALUES (9, 'legacy-ptt', 'none', 'virtual:virtual:0',
+                         'serial_rts', 'virtual:virtual:0', '/dev/ttyUSB0');",
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        let loaded = store.load_channels().unwrap();
+        let ptt = loaded[0].ptt.as_ref().expect("binding survives migration");
+        assert_eq!(ptt.tx_delay_ms, crate::ptt::registry::DEFAULT_TX_DELAY_MS);
+        assert_eq!(ptt.tx_tail_ms, crate::ptt::registry::DEFAULT_TX_TAIL_MS);
     }
 }

@@ -95,6 +95,8 @@ async fn phase2_exit_criterion_roundtrip() {
             node: "/dev/ttyUSB-mock".into(),
             pin_or_line: 0,
             invert: false,
+            tx_delay_ms: 0,
+            tx_tail_ms: 0,
         })
         .await
         .unwrap();
