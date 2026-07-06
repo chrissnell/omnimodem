@@ -1,9 +1,8 @@
 //! IFKP in-band picture sub-protocol — header codec (T2) + shared pixel-FSK
-//! path ([`super::picture::PictureCodec`]). The TX encode side (T4) is wired;
-//! the RX loopback gate (T5) is deferred until the shared discriminator gains a
-//! rate-robust analytic front-end (see `PictureCodec::decode` — the current
-//! low-pass is tuned for the 8 kHz families and is not selective enough at
-//! IFKP's 16 kHz).
+//! path ([`super::picture::PictureCodec`]). Both the TX encode (T4) and the RX
+//! loopback (T5) run over the shared engine: `PictureCodec::decode` now uses a
+//! rate-robust analytic (Hilbert) front-end, so the discriminator is image-free
+//! at IFKP's 16 kHz and the loopback closes (grey + colour tests below).
 //!
 //! An IFKP picture is announced by a `pic%X` token in the text stream, where the
 //! single mode char `X` selects both a fixed image size and colour/grey (upper =
@@ -203,23 +202,55 @@ mod tests {
         codec(1500.0, 386.0, false)
     }
 
-    // The TX encode path is exercised here (it reuses the shared, MFSK-validated
-    // engine); the RX loopback gate is intentionally deferred. At IFKP's 16 kHz
-    // sample rate with a low carrier the shared discriminator's low-pass front-end
-    // is not selective enough (the 2fc image crowds the pixel-rate sidebands), so
-    // a rate-robust analytic front-end is the next T5 step before the IFKP/FSQ
-    // loopback can assert a raster tolerance. Header/parse/plane are already
-    // bit-exact above.
+    // Loopback (audio domain, tolerance — Doctrine §3) at IFKP's 16 kHz. Closed by
+    // the analytic front-end in `PictureCodec::decode`; the same gate MFSK holds.
     #[test]
-    fn encode_produces_pixel_audio() {
-        let (w, h) = (8usize, 2usize);
-        let rgb: Vec<u8> = (0..(w * h * 3) as u8).collect();
-        // Output = prologue (2·spp) + n_pixels·spp + epilogue (2·spp); grey sends
-        // w·h pixels, colour sends w·h·3.
-        let prol = 2 * SPP;
-        let grey = test_codec().encode(&rgb, w, h, false, SPP);
-        assert_eq!(grey.len(), 2 * prol + w * h * SPP);
-        let color = test_codec().encode(&rgb, w, h, true, SPP);
-        assert_eq!(color.len(), 2 * prol + w * h * 3 * SPP);
+    fn grey_loopback_recovers_raster() {
+        use crate::types::FramePayload;
+        let (w, h) = (16usize, 4usize);
+        let total = w * h;
+        let mut rgb = Vec::new();
+        for i in 0..total {
+            let v = (i * 255 / (total - 1)) as u8;
+            rgb.extend_from_slice(&[v, v, v]);
+        }
+        let audio = test_codec().encode(&rgb, w, h, false, SPP);
+        let frame = test_codec().decode(&audio, w, h, false, SPP);
+        let FramePayload::Image { width, channels, pixels } = frame.payload else {
+            panic!("expected Image");
+        };
+        assert_eq!((width, channels), (w as u16, 1));
+        // BT.601 grey of a grey ramp is the ramp itself.
+        let want: Vec<u8> = rgb.chunks_exact(3).map(|p| p[0]).collect();
+        let errs: Vec<i32> =
+            pixels.iter().zip(&want).map(|(&g, &e)| (g as i32 - e as i32).abs()).collect();
+        let max_err = *errs.iter().max().unwrap();
+        let mean_err = errs.iter().sum::<i32>() as f64 / errs.len() as f64;
+        assert!(max_err <= 14, "IFKP grey loopback max pixel error {max_err} > 14");
+        assert!(mean_err <= 4.0, "IFKP grey loopback mean pixel error {mean_err} > 4");
+    }
+
+    #[test]
+    fn color_loopback_recovers_planes() {
+        use crate::types::FramePayload;
+        let (w, h) = (8usize, 1usize);
+        // Planes chosen so the R→G→B raster is one continuous ramp (no glitches)
+        // while each channel keeps a distinct value.
+        let mut rgb = Vec::new();
+        for x in 0..w {
+            let r = 60 + x * 4;
+            let g = 60 + (w + x) * 4;
+            let b = 60 + (2 * w + x) * 4;
+            rgb.extend_from_slice(&[r as u8, g as u8, b as u8]);
+        }
+        let audio = test_codec().encode(&rgb, w, h, true, SPP);
+        let frame = test_codec().decode(&audio, w, h, true, SPP);
+        let FramePayload::Image { width, channels, pixels } = frame.payload else {
+            panic!("expected Image");
+        };
+        assert_eq!((width, channels), (w as u16, 3));
+        let max_err =
+            pixels.iter().zip(&rgb).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
+        assert!(max_err <= 14, "IFKP colour loopback max pixel error {max_err} > 14");
     }
 }

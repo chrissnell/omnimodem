@@ -53,6 +53,16 @@ impl PixelScale {
         }
     }
 
+    /// The occupied one-sided pixel band (Hz) — the largest deviation magnitude a
+    /// pixel can produce. Used to size the baseband clean-up low-pass so it passes
+    /// the whole pixel band while rejecting residue. `Deviation256` spans
+    /// ±bandwidth/2 about `fc`.
+    pub fn occupied_bandwidth_hz(self) -> f64 {
+        match self {
+            PixelScale::Deviation256 { bandwidth_hz } => bandwidth_hz / 2.0,
+        }
+    }
+
     /// RX: measured frequency **deviation** from the picture carrier (Hz) → byte.
     /// Truncating clamp to 0..=255, mirroring the reference `(int)CLAMP(...)`.
     /// ref: thor.cxx:974 `byte = pixel*256.0/bandwidth + 128; (int)CLAMP(0,255)`.
@@ -174,9 +184,18 @@ pub struct PictureCodec {
     pub label: &'static str,
 }
 
-/// Carrier lead-in/out (in samples) so the RX down-converter, low-pass, and
-/// discriminator settle before/after pixel timing — the role fldigi's
-/// `send_prologue`/`send_epilogue` + flush delay play.
+/// Tap count of the analytic-front-end Hilbert transformer (odd; group delay
+/// [`ANALYTIC_DELAY`]). 31 taps give a flat quadrature across the pixel band at
+/// every family's carrier while keeping the group delay short enough to sit
+/// inside the carrier lead-out at the fastest (2 spp) rate.
+const ANALYTIC_TAPS: usize = 31;
+/// Group delay of the analytic front-end, in samples.
+const ANALYTIC_DELAY: usize = (ANALYTIC_TAPS - 1) / 2;
+
+/// Carrier lead-in (in samples) so the RX analytic front-end and discriminator
+/// settle before pixel timing — the role fldigi's `send_prologue` + flush delay
+/// play. The lead-*out* additionally covers the front-end group delay so the last
+/// pixel's (delay-shifted) read window stays in bounds at any `spp`.
 fn prologue_samples(spp: usize) -> usize {
     2 * spp
 }
@@ -200,7 +219,7 @@ impl PictureCodec {
         let rate = self.samplerate;
         let mut osc = crate::frontend::osc::Oscillator::new(self.carrier_hz, rate);
         let prologue = prologue_samples(spp);
-        let mut out = Vec::with_capacity(stream.len() * spp + 2 * prologue);
+        let mut out = Vec::with_capacity(stream.len() * spp + 2 * prologue + ANALYTIC_DELAY);
         for _ in 0..prologue {
             out.push(osc.next().0); // carrier lead-in
         }
@@ -212,7 +231,9 @@ impl PictureCodec {
             }
         }
         osc.set_freq(self.carrier_hz, rate);
-        for _ in 0..prologue {
+        // Lead-out covers the settling tail *and* the RX front-end group delay so
+        // the last pixel's delay-shifted read window is fully populated.
+        for _ in 0..prologue + ANALYTIC_DELAY {
             out.push(osc.next().0); // carrier lead-out
         }
         out
@@ -221,42 +242,53 @@ impl PictureCodec {
     /// **Demodulator.** Decode pixel-FSK audio into a `FramePayload::Image` for
     /// the `width`×`height` (`color`) raster at `spp` samples/pixel.
     pub fn decode(&self, audio: &[f32], width: usize, height: usize, color: bool, spp: usize) -> Frame {
-        use crate::frontend::fir::{design_lowpass, Fir};
-        use crate::frontend::nco::DownConverter;
+        use crate::frontend::fir::{design_hilbert, Fir};
+        use crate::frontend::osc::Oscillator;
         let rate = self.samplerate;
         let n_pixels = if color { width * height * 3 } else { width * height };
+        let n = audio.len();
 
-        // A real input tone leaves an image at −(2fc+dev) that moves with the
-        // pixel, so attenuate it across a band with a short linear-phase FIR
-        // low-pass (integer group delay, compensated) rather than a point null.
-        // NOTE: tuned for the 8 kHz families (MFSK/THOR). At IFKP's 16 kHz with a
-        // low carrier the 2fc image crowds the pixel-rate sidebands and this
-        // low-pass is not selective enough — the shared demod needs a rate-robust
-        // analytic (image-free) front-end before the IFKP/FSQ loopback closes.
-        let mut dc = DownConverter::new(self.carrier_hz, rate);
-        let base: Vec<Cplx> = audio.iter().map(|&x| dc.push(x)).collect();
-        let n = base.len();
-        let taps = design_lowpass(9, self.carrier_hz, rate);
-        let delay = (taps.len() - 1) / 2;
-        let (mut fi, mut fq) = (Fir::new(taps.clone()), Fir::new(taps));
-        let smooth: Vec<Cplx> =
-            base.iter().map(|z| Cplx::new(fi.push(z.re), fq.push(z.im))).collect();
+        // Rate-robust analytic front-end. A real tone mixed straight to baseband
+        // leaves an image at −(2fc+dev) that moves with the pixel and crowds the
+        // pixel-rate sidebands at high sample-rate / low-carrier ratios (IFKP's
+        // 16 kHz, FSQ's 12 kHz). Instead form the **analytic** signal first — the
+        // real audio plus its Hilbert quadrature — which has no negative-frequency
+        // content, so the down-conversion to baseband is image-free at any rate.
+        // The Hilbert FIR's group delay is compensated on the real branch. No
+        // baseband low-pass follows: the FM sidebands span roughly deviation plus
+        // the pixel rate (rate/spp), so a narrow post-filter would distort the
+        // discriminant; the per-pixel averaging below is the smoother.
+        let mut fq = Fir::new(design_hilbert(ANALYTIC_TAPS));
+        let delay = ANALYTIC_DELAY;
+        let mut osc = Oscillator::new(self.carrier_hz, rate);
+        let mut base = vec![Cplx::new(0.0, 0.0); n];
+        for i in 0..n {
+            let q = fq.push(audio[i]); // Hilbert quadrature (group delay = delay)
+            let re = if i >= delay { audio[i - delay] } else { 0.0 }; // delayed real branch
+            let (c, s) = osc.next();
+            // Analytic (re + j q) mixed down by fc: a · (cos − j sin).
+            base[i] = Cplx::new(re, q) * Cplx::new(c, -s);
+        }
         let mut inst = vec![0.0f64; n];
         for i in 1..n {
-            inst[i] = (smooth[i] * smooth[i - 1].conj()).arg() as f64 * rate as f64
+            inst[i] = (base[i] * base[i - 1].conj()).arg() as f64 * rate as f64
                 / std::f64::consts::TAU;
         }
 
+        // Skip a short settling guard at each pixel's start: the analytic FM step
+        // between pixels lands its transient in the first sample(s), which biases a
+        // whole-span average — worst at the short 8-sample pixels of the 16 kHz /
+        // 12 kHz families. Guard ≈ ⅛ of the pixel, always leaving ≥1 sample.
         let prologue = prologue_samples(spp);
+        let guard = (spp / 8).min(spp.saturating_sub(1));
         let byte_at = |pixel: usize| -> u8 {
-            let lo = prologue + pixel * spp + delay;
-            let hi = (lo + spp).min(n);
-            if lo >= n {
+            let lo = prologue + pixel * spp + delay + guard;
+            let hi = (prologue + pixel * spp + delay + spp).min(n);
+            if lo >= hi {
                 return 128;
             }
-            // Average the discriminator over the whole pixel span; the residual
-            // image and the leading phase-step transient both average down.
-            let dev = inst[lo..hi].iter().sum::<f64>() / (hi - lo).max(1) as f64;
+            // Average the discriminator over the settled remainder of the pixel.
+            let dev = inst[lo..hi].iter().sum::<f64>() / (hi - lo) as f64;
             self.scale.rx_byte(dev, self.reverse)
         };
 
@@ -338,6 +370,40 @@ mod tests {
         assert_eq!(color_tx_raster(&rgb, 2, PlaneOrder::Rgb), vec![1, 4, 2, 5, 3, 6]);
         // BGR: all B (3,6), all G (2,5), all R (1,4).
         assert_eq!(color_tx_raster(&rgb, 2, PlaneOrder::Bgr), vec![3, 6, 2, 5, 1, 4]);
+    }
+
+    #[test]
+    fn analytic_front_end_is_rate_robust() {
+        use crate::types::FramePayload;
+        // The analytic (image-free) front-end must close the pixel-FSK loopback at
+        // every family's sample rate — 8 kHz (MFSK/THOR), 12 kHz (FSQ), 16 kHz
+        // (IFKP) — with the same tolerance, since there is no 2fc image to reject
+        // at any rate. A grey ramp round-trips within a few LSB regardless of rate.
+        let (w, h) = (16usize, 4usize);
+        let total = w * h;
+        let mut rgb = Vec::new();
+        for i in 0..total {
+            let v = (i * 255 / (total - 1)) as u8;
+            rgb.extend_from_slice(&[v, v, v]);
+        }
+        let want: Vec<u8> = rgb.chunks_exact(3).map(|p| p[0]).collect();
+        for &rate in &[8000.0f32, 12000.0, 16000.0] {
+            let codec = PictureCodec {
+                samplerate: rate,
+                carrier_hz: 1500.0,
+                reverse: false,
+                scale: PixelScale::Deviation256 { bandwidth_hz: 316.0 },
+                luma: LumaKind::Std,
+                order: PlaneOrder::Rgb,
+                label: "test-pic",
+            };
+            let audio = codec.encode(&rgb, w, h, false, 8);
+            let frame = codec.decode(&audio, w, h, false, 8);
+            let FramePayload::Image { pixels, .. } = frame.payload else { panic!("Image") };
+            let max_err =
+                pixels.iter().zip(&want).map(|(&g, &e)| (g as i32 - e as i32).abs()).max().unwrap();
+            assert!(max_err <= 14, "rate {rate}: max pixel error {max_err} > 14");
+        }
     }
 
     #[test]
