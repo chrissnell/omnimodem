@@ -327,8 +327,8 @@ func (v *operateView) Render(w, h int) string {
 	if v.raster != nil {
 		// Facsimile: a scrolling raster of the received image columns, then the
 		// text compose line (the mode paints typed text into pixels on TX).
-		b.WriteString(fmt.Sprintf("%s · facsimile raster · %d cols\n\n",
-			strings.ToUpper(v.modeLabel), len(v.raster.cols)))
+		b.WriteString(fmt.Sprintf("%s · facsimile raster · %s\n\n",
+			strings.ToUpper(v.modeLabel), v.raster.status()))
 		b.WriteString(v.raster.render(w) + "\n\n")
 		b.WriteString("› " + v.compose)
 		if v.tx.active() {

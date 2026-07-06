@@ -88,6 +88,12 @@ var modes = []modeInfo{
 	{"hellx5", "image", 0, []modeParam{{"center", 1500}}},
 	{"hellx9", "image", 0, []modeParam{{"center", 1500}}},
 	{"hell80", "image", 0, []modeParam{{"center", 1500}}},
+	// The MMSSTV SSTV colour line-scan family (Scottie wired). No tunable params —
+	// the VIS + scan frequencies are fixed by the SSTV standard. RX emits a colour
+	// raster (ImageRgb); TX paints an RGB picture onto the wire.
+	{"scottie1", "image", 0, nil},
+	{"scottie2", "image", 0, nil},
+	{"scottiedx", "image", 0, nil},
 	// The fldigi MFSK family: M-ary FSK + K=7 conv + interleave + MFSK Varicode.
 	{"mfsk4", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mfsk8", "chat", 0, []modeParam{{"center", 1500}}},

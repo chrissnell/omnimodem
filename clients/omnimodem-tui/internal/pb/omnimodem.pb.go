@@ -2056,7 +2056,8 @@ func (x *RxFrame) GetImage() *Image {
 type Image struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Width         uint32                 `protobuf:"varint,1,opt,name=width,proto3" json:"width,omitempty"` // pixels per row (Hell: 14, the column height)
-	Gray          []byte                 `protobuf:"bytes,2,opt,name=gray,proto3" json:"gray,omitempty"`    // row-major 8-bit luminance
+	Gray          []byte                 `protobuf:"bytes,2,opt,name=gray,proto3" json:"gray,omitempty"`    // row-major 8-bit luminance (mono modes: Hell, WEFAX)
+	Rgb           []byte                 `protobuf:"bytes,3,opt,name=rgb,proto3" json:"rgb,omitempty"`      // row-major 3-bytes-per-pixel R,G,B (colour modes: SSTV). Exactly one of gray/rgb is set.
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2101,6 +2102,13 @@ func (x *Image) GetWidth() uint32 {
 func (x *Image) GetGray() []byte {
 	if x != nil {
 		return x.Gray
+	}
+	return nil
+}
+
+func (x *Image) GetRgb() []byte {
+	if x != nil {
+		return x.Rgb
 	}
 	return nil
 }
@@ -3745,10 +3753,11 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12!\n" +
 	"\ftimestamp_ns\x18\x03 \x01(\x04R\vtimestampNs\x12)\n" +
-	"\x05image\x18\x04 \x01(\v2\x13.omnimodem.v1.ImageR\x05image\"1\n" +
+	"\x05image\x18\x04 \x01(\v2\x13.omnimodem.v1.ImageR\x05image\"C\n" +
 	"\x05Image\x12\x14\n" +
 	"\x05width\x18\x01 \x01(\rR\x05width\x12\x12\n" +
-	"\x04gray\x18\x02 \x01(\fR\x04gray\":\n" +
+	"\x04gray\x18\x02 \x01(\fR\x04gray\x12\x10\n" +
+	"\x03rgb\x18\x03 \x01(\fR\x03rgb\":\n" +
 	"\n" +
 	"AudioLevel\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +

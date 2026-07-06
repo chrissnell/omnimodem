@@ -26,6 +26,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"thormicro", "thor4", "thor5", "thor8", "thor11", "thor16", "thor22",
 		"thor25x4", "thor50x1", "thor50x2", "thor100",
 		"feldhell", "slowhell", "hellx5", "hellx9", "hell80",
+		"scottie1", "scottie2", "scottiedx",
 		"mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
 		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l",
 		"contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
@@ -239,6 +240,39 @@ func TestHellImageShapeRendersRaster(t *testing.T) {
 		t.Fatalf("raster should render on-pixels as blocks, got %q", got)
 	}
 	if got := v.Render(80, 24); !strings.Contains(got, "FELDHELL") {
+		t.Fatalf("raster header should name the mode, got %q", firstLine(got))
+	}
+}
+
+// SSTV attaches the same image surface but receives a colour frame (proto Image
+// `rgb`); the raster renders it and the header reports colour dimensions.
+func TestSstvImageShapeRendersColorRaster(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "scottie1"}
+	m.sel = 0
+	v := newOperateView(m)
+	if v.raster == nil {
+		t.Fatal("scottie1 should attach a raster surface")
+	}
+	if v.seq != nil || v.beacon {
+		t.Fatal("scottie1 must not be a sequencer/beacon")
+	}
+	// A 4x2 colour frame (row-major, 3 bytes/pixel).
+	rgb := make([]byte, 4*2*3)
+	for i := range rgb {
+		rgb[i] = 200
+	}
+	v.raster.push(&pb.Image{Width: 4, Rgb: rgb})
+	if !v.raster.isColor() {
+		t.Fatal("an rgb frame must select the colour raster path")
+	}
+	if got := v.raster.status(); !strings.Contains(got, "colour 4x2") {
+		t.Fatalf("status should report colour dimensions, got %q", got)
+	}
+	if got := v.raster.render(80); len(got) == 0 || strings.Contains(got, "waiting") {
+		t.Fatalf("colour raster should render, got %q", got)
+	}
+	if got := v.Render(80, 24); !strings.Contains(got, "SCOTTIE1") {
 		t.Fatalf("raster header should name the mode, got %q", firstLine(got))
 	}
 }
