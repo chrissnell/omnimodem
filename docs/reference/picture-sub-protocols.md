@@ -24,8 +24,8 @@ number of samples, no varicode, no FEC. Reference: fldigi 4.1.23 @ `61b97f413`
 | Colour raster payload | `FramePayload::Image { width, channels, pixels }` in `crates/dsp/src/types.rs`; proto `Image` in `proto/omnimodem.proto` |
 | Daemon picture-send dispatch | `crates/omnimodemd/src/mode/picture_tx.rs` |
 | gRPC transport (`TransmitImage`) | `proto/omnimodem.proto`; `crates/omnimodemd/src/grpc/service.rs`; `Command::TransmitImage` + `transmit_image()` in `crates/omnimodemd/src/core/{command,mod}.rs`; prebuilt-audio job in `crates/omnimodemd/src/core/tx_worker.rs` |
-| TUI raster display (live path folds RGB→luma into the mono scroll surface) | `clients/omnimodem-tui/internal/app/{view_operate.go,raster.go}` |
-| TUI truecolor `▀` half-block renderer (staged for the colour/SSTV follow-up — not yet wired into a view) | `clients/omnimodem-tui/internal/app/imgrender.go` (`renderImageHalfBlock`) |
+| TUI picture picker + live truecolor `▀` half-block TX preview | `clients/omnimodem-tui/internal/ui/{imagepicker.go,imgrender.go}` (`RenderImageHalfBlock`), wired at `internal/app/view_operate.go` |
+| TUI RX raster scroll surface (Hell/WEFAX; folds RGB→luma) | `clients/omnimodem-tui/internal/app/{view_operate.go,raster.go}` |
 | Golden vectors | `crates/dsp/tests/vectors/{mfsk,thor,ifkp,fsq}pic.json` (drivers `scratch/refvectors/build_*pic.sh`) |
 | Conformance | `crates/dsp/tests/ber.rs` (SNR sweep), `crates/dsp/tests/kat.rs` (`picture_cross_decode_doc`) |
 
