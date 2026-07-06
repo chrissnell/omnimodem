@@ -327,7 +327,11 @@ impl FecBDecoder {
         }
 
         if self.state == State::SyncSetup {
+            // A resync clears the error count AND the LTRS/FIGS shift, so stale
+            // figures state can't corrupt the first chars after re-locking.
+            // ref: navtex.cxx:1639-1642.
             self.error_count = 0;
+            self.figs_shift = false;
             self.state = State::Sync;
         }
 
@@ -596,5 +600,31 @@ mod tests {
         }
         let text = String::from_utf8_lossy(&dec.take()).to_string();
         assert!(text.contains(msg), "decoded {text:?}");
+    }
+
+    /// A resync must clear the LTRS/FIGS shift (navtex.cxx:1639-1642): a message
+    /// that leaves the decoder in figures mode, then a loss of lock, then a
+    /// letters-only message must decode as letters — not figures — even though
+    /// the second stream carries no leading LTRS.
+    #[test]
+    fn fecb_resync_resets_figs_shift() {
+        let c = Ccir476::new();
+        let figs_msg = "12 907"; // pure figures — leaves the decoder in FIGS
+        let ltrs_msg = "CQ DE"; // pure letters, encoded assuming LTRS state
+        let mut bits = Vec::new();
+        for _ in 0..3 {
+            bits.extend(codes_to_bits(&create_fec(&c.encode(figs_msg))));
+        }
+        // A long invalid-code burst forces the decoder to lose lock and resync.
+        bits.extend(std::iter::repeat_n(true, 300)); // all-mark → weight-7, never valid
+        for _ in 0..3 {
+            bits.extend(codes_to_bits(&create_fec(&c.encode(ltrs_msg))));
+        }
+        let mut dec = FecBDecoder::new();
+        for b in bits {
+            dec.feed_bit(if b { 1.0 } else { -1.0 });
+        }
+        let text = String::from_utf8_lossy(&dec.take()).to_string();
+        assert!(text.contains(ltrs_msg), "letters after resync mis-decoded: {text:?}");
     }
 }

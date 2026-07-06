@@ -7,8 +7,8 @@
 //! instantaneous frequency, so the RX output is a raster (`FramePayload::Image`,
 //! the Phase-10 shape), never characters.
 //!
-//! **Geometry** (wefax.cxx:258-265, 1251-1265): image width = `round(IOC·π)`
-//! (576 → 1809 px, 288 → 905 px); WEFAX-576 runs at 120 LPM with a 300 Hz APT
+//! **Geometry** (wefax.cxx:258-265, 1251-1265): image width = `int(IOC·π)`
+//! (576 → 1809 px, 288 → 904 px); WEFAX-576 runs at 120 LPM with a 300 Hz APT
 //! start tone, WEFAX-288 at 60 LPM with 675 Hz; APT stop is 450 Hz. Samples per
 //! line = `rate·60/LPM`.
 //!

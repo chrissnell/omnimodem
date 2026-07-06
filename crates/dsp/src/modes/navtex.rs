@@ -122,6 +122,8 @@ impl Modulator for NavtexMod {
         let sps = (NAVTEX_RATE as f32 / BAUD).round() as usize;
         // Mark = center + shift/2 = center + 85; bit 1 → mark (navtex.cxx:1782-1784).
         let fsk = Fsk2::new(NAVTEX_RATE as f32, sps, self.center_hz, SHIFT_HZ);
+        // NAVTEX and SITOR-B share the identical CCIR-476 FEC-B wire codec, so the
+        // variant does not change the transmitted bits (only the decoder label).
         let _ = self.variant;
         Ok(fsk.modulate(&bits))
     }
