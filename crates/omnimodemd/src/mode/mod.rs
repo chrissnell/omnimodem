@@ -30,6 +30,11 @@ pub enum ModeConfig {
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
     Hell { submode: String, center_hz: f32 },
+    /// SSTV (MMSSTV parity): analog line-scan picture modes. `submode` is an
+    /// `sstv::SstvMode` label (currently the wired Scottie family:
+    /// `scottie1`/`scottie2`/`scottiedx`). A colour facsimile mode — RX emits an
+    /// `ImageRgb` raster; the on-air frequencies are fixed by the SSTV standard.
+    Sstv { submode: String },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
     Jt65,
@@ -100,6 +105,9 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::sstv::scottie::from_label(m).is_some() => {
+                Some(ModeConfig::Sstv { submode: m.to_string() })
+            }
             m if omnimodem_dsp::modes::mfsk::MfskVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Mfsk {
                     submode: m.to_string(),
@@ -150,6 +158,7 @@ impl ModeConfig {
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Thor { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Sstv { submode } => submode.clone(),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
             // The tones/bw live in the Contestia label itself (contestia8_500).
@@ -186,6 +195,9 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("hell")
             }
+            ModeConfig::Sstv { submode } => omnimodem_dsp::modes::sstv::scottie::from_label(submode)
+                .map(|v| v.label())
+                .unwrap_or("sstv"),
             ModeConfig::Mfsk { submode, .. } => {
                 omnimodem_dsp::modes::mfsk::MfskVariant::from_label(submode)
                     .map(|v| v.label())
@@ -402,6 +414,23 @@ mod tests {
         let c = ModeConfig::Hell { submode: "hell80".into(), center_hz: 1500.0 };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         assert_eq!(ModeConfig::parse("hellx99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_wired_sstv_family() {
+        // The wired Scottie submodes resolve to a colour facsimile mode.
+        for label in ["scottie1", "scottie2", "scottiedx"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Sstv { submode: label.into() })
+            );
+        }
+        // Canonical mode string round-trips.
+        let c = ModeConfig::Sstv { submode: "scottie1".into() };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        // Unwired SSTV submodes (real modes, not yet ported) are not exposed.
+        assert_eq!(ModeConfig::parse("martin1"), None);
+        assert_eq!(ModeConfig::parse("robot36"), None);
     }
 
     #[test]

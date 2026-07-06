@@ -678,6 +678,14 @@ pub mod scottie {
         }
     }
 
+    /// Resolve a label to a Scottie submode, but only the ones wired here
+    /// (`scottie1`/`scottie2`/`scottiedx`) — so the daemon never exposes an
+    /// unimplemented SSTV mode.
+    pub fn from_label(s: &str) -> Option<SstvMode> {
+        let m = SstvMode::from_label(s)?;
+        super::modulator::scottie_tw(m).map(|_| m)
+    }
+
     /// Scottie transmitter: an RGB picture → SSTV audio.
     pub struct ScottieMod {
         mode: SstvMode,

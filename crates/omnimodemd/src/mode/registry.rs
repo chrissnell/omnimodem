@@ -20,6 +20,7 @@ use omnimodem_dsp::modes::{
     olivia::{OliviaDemod, OliviaMod},
     psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
+    sstv::scottie::{ScottieDemod, ScottieMod},
     thor::{ThorDemod, ThorMod, ThorVariant},
     wspr::{WsprDemod, WsprMod},
 };
@@ -67,6 +68,11 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(HellDemod::new(v, *center_hz)))
+        }
+        ModeConfig::Sstv { submode } => {
+            let m = omnimodem_dsp::modes::sstv::scottie::from_label(submode)
+                .expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(ScottieDemod::new(m)))
         }
         ModeConfig::Mfsk { submode, center_hz } => {
             let v = MfskVariant::from_label(submode).expect("validated by ModeConfig::parse");
@@ -126,6 +132,11 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Hell { submode, center_hz } => {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(HellMod::new(v, *center_hz)))
+        }
+        ModeConfig::Sstv { submode } => {
+            let m = omnimodem_dsp::modes::sstv::scottie::from_label(submode)
+                .expect("validated by ModeConfig::parse");
+            Some(Box::new(ScottieMod::new(m)))
         }
         ModeConfig::Mfsk { submode, center_hz } => {
             let v = MfskVariant::from_label(submode).expect("validated by ModeConfig::parse");

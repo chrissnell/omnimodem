@@ -7,12 +7,15 @@
 
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 
-/// A decoded raster payload (Hell, WEFAX, picture sub-protocols): `gray` is
-/// row-major 8-bit luminance, `gray.len() == width * rows`.
-#[derive(Debug, Clone)]
+/// A decoded raster payload. Mono modes (Hell, WEFAX) set `gray` (row-major 8-bit
+/// luminance, `gray.len() == width * rows`); colour modes (SSTV) set `rgb`
+/// (row-major 3 bytes/pixel R,G,B, `rgb.len() == width * rows * 3`). Exactly one
+/// is non-empty.
+#[derive(Debug, Clone, Default)]
 pub struct RxImage {
     pub width: u16,
     pub gray: Vec<u8>,
+    pub rgb: Vec<u8>,
 }
 
 /// LOSSLESS class. Carried on a dedicated broadcast; a subscriber that lags is

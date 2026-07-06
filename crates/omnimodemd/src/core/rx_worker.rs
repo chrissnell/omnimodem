@@ -327,7 +327,13 @@ fn emit(frames: &broadcast::Sender<FrameEvent>, channel: ChannelId, payload: &Fr
         FramePayload::Image { width, gray } => FrameEvent::RxFrame {
             channel,
             data: Vec::new(),
-            image: Some(RxImage { width: *width, gray: gray.clone() }),
+            image: Some(RxImage { width: *width, gray: gray.clone(), rgb: Vec::new() }),
+            timestamp_ns: 0,
+        },
+        FramePayload::ImageRgb { width, rgb } => FrameEvent::RxFrame {
+            channel,
+            data: Vec::new(),
+            image: Some(RxImage { width: *width, gray: Vec::new(), rgb: rgb.clone() }),
             timestamp_ns: 0,
         },
         other => FrameEvent::RxFrame {
@@ -385,8 +391,8 @@ fn frame_bytes(p: &FramePayload) -> Vec<u8> {
         FramePayload::Packet(b) | FramePayload::Vocoder(b) => b.clone(),
         FramePayload::Text(t) => t.clone().into_bytes(),
         FramePayload::Message77(m) => m.to_vec(),
-        FramePayload::Image { .. } => {
-            debug_assert!(false, "Image payloads are emitted via the typed proto Image message");
+        FramePayload::Image { .. } | FramePayload::ImageRgb { .. } => {
+            debug_assert!(false, "raster payloads are emitted via the typed proto Image message");
             Vec::new()
         }
     }

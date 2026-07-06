@@ -288,7 +288,8 @@ message RxFrame {
 // which append rows/columns incrementally.
 message Image {
   uint32 width = 1;  // pixels per row (Hell: 14, the column height)
-  bytes  gray = 2;   // row-major 8-bit luminance
+  bytes  gray = 2;   // row-major 8-bit luminance (mono modes: Hell, WEFAX)
+  bytes  rgb  = 3;   // row-major 3-bytes-per-pixel R,G,B (colour modes: SSTV). Exactly one of gray/rgb is set.
 }
 
 message AudioLevel {

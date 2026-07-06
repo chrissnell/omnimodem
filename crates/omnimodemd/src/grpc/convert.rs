@@ -150,7 +150,8 @@ pub fn frame_event_to_proto(ev: FrameEvent) -> proto::Event {
                 channel: channel.0,
                 data,
                 timestamp_ns,
-                image: image.map(|i| proto::Image { width: i.width as u32, gray: i.gray }),
+                image: image
+                    .map(|i| proto::Image { width: i.width as u32, gray: i.gray, rgb: i.rgb }),
             })
         }
     };
@@ -277,7 +278,11 @@ mod tests {
         let ev = FrameEvent::RxFrame {
             channel: ChannelId(3),
             data: Vec::new(),
-            image: Some(RxImage { width: 14, gray: vec![0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255] }),
+            image: Some(RxImage {
+                width: 14,
+                gray: vec![0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255],
+                rgb: Vec::new(),
+            }),
             timestamp_ns: 42,
         };
         let proto::event::Kind::RxFrame(rf) =
