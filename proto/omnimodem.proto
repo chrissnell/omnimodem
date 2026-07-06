@@ -79,6 +79,13 @@ message ConfigureChannelRequest {
   // When present, its oneof variant selects the mode and its values; `mode` is
   // then ignored. Absent ⇒ the `mode` string is used as-is (backward compatible).
   ModeParams mode_params = 4;
+  // RSID (Reed-Solomon Identifier). When set, the daemon prepends the active
+  // mode's RSID burst ahead of each transmission (`rsid_tx`) and/or runs an RSID
+  // detector over the received audio, surfacing matches as RsidDetected events
+  // (`rsid_rx`). Both default off; proto3 scalars have no presence, so a client
+  // that reconfigures a channel should resend the current values.
+  bool rsid_tx = 5;
+  bool rsid_rx = 6;
 }
 
 // Typed per-mode parameters. The set oneof variant selects the mode.
@@ -212,6 +219,8 @@ message ChannelInfo {
   string tx_device_id = 6;     // TX (playback) device; empty == same as RX
   string ptt_device_id = 7;    // PTT device; empty when deviceless (None/Vox) or unset
   PttMethod ptt_method = 8;    // configured PTT method (UNSPECIFIED if unset)
+  bool rsid_tx = 9;            // prepend the mode's RSID burst before each TX
+  bool rsid_rx = 10;           // run the RSID detector over received audio
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +242,18 @@ message Event {
     ClockOffset clock_offset = 11;      // LOSSY
     ChannelMetrics channel_metrics = 12; // LOSSY
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
+    RsidDetected rsid_detected = 14;     // LOSSY class
   }
+}
+
+// A received RSID burst was identified. LOSSY class — advisory, the operator
+// (or a client auto-switch) acts on the identified mode + audio offset.
+message RsidDetected {
+  uint32 channel   = 1;
+  string tag       = 2;   // fldigi RSID tag, always known (e.g. "MFSK16")
+  string mode      = 3;   // omnimodem mode string, empty if the mode is unported
+  float  freq_hz   = 4;   // detected audio offset of the burst
+  bool   extended  = 5;   // true: from the extended (ESCAPE-prefixed) table
 }
 
 // One waterfall line: a magnitude spectrum over the channel's audio passband.

@@ -53,7 +53,9 @@ impl Store {
                  ptt_pin       INTEGER NOT NULL DEFAULT 0,
                  ptt_invert    INTEGER NOT NULL DEFAULT 0,
                  tx_device_id  TEXT NOT NULL DEFAULT '',
-                 tx_sample_rate INTEGER NOT NULL DEFAULT 0
+                 tx_sample_rate INTEGER NOT NULL DEFAULT 0,
+                 rsid_tx       INTEGER NOT NULL DEFAULT 0,
+                 rsid_rx       INTEGER NOT NULL DEFAULT 0
              );",
         )?;
         // Idempotent migration for a DB created by the Phase-1 build, whose
@@ -71,6 +73,8 @@ impl Store {
             "ALTER TABLE channels ADD COLUMN ptt_invert INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN tx_device_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE channels ADD COLUMN tx_sample_rate INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE channels ADD COLUMN rsid_tx INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE channels ADD COLUMN rsid_rx INTEGER NOT NULL DEFAULT 0",
         ] {
             match conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -89,8 +93,8 @@ impl Store {
             "INSERT INTO channels
                  (id, name, mode, device_id, sample_rate, fanout,
                   ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert,
-                  tx_device_id, tx_sample_rate)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                  tx_device_id, tx_sample_rate, rsid_tx, rsid_rx)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  mode = excluded.mode,
@@ -103,7 +107,9 @@ impl Store {
                  ptt_pin = excluded.ptt_pin,
                  ptt_invert = excluded.ptt_invert,
                  tx_device_id = excluded.tx_device_id,
-                 tx_sample_rate = excluded.tx_sample_rate;",
+                 tx_sample_rate = excluded.tx_sample_rate,
+                 rsid_tx = excluded.rsid_tx,
+                 rsid_rx = excluded.rsid_rx;",
             rusqlite::params![
                 cfg.id.0,
                 cfg.name,
@@ -118,6 +124,8 @@ impl Store {
                 invert,
                 cfg.tx_device_id.to_canonical_string(),
                 cfg.tx_sample_rate,
+                cfg.rsid_tx as i64,
+                cfg.rsid_rx as i64,
             ],
         )?;
         Ok(())
@@ -128,7 +136,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, mode, device_id, sample_rate, fanout,
                     ptt_method, ptt_device_id, ptt_node, ptt_pin, ptt_invert,
-                    tx_device_id, tx_sample_rate
+                    tx_device_id, tx_sample_rate, rsid_tx, rsid_rx
              FROM channels ORDER BY id;",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -156,6 +164,8 @@ impl Store {
                 tx_device_id,
                 tx_sample_rate: row.get(12)?,
                 ptt: decode_ptt(&method, &ptt_dev, &node, pin, invert),
+                rsid_tx: row.get::<_, i64>(13)? != 0,
+                rsid_rx: row.get::<_, i64>(14)? != 0,
             })
         })?;
         let mut out = Vec::new();
@@ -220,6 +230,8 @@ mod tests {
             tx_device_id: DeviceId::placeholder(),
             tx_sample_rate: 0,
             ptt: None,
+            rsid_tx: false,
+            rsid_rx: false,
         }
     }
 
@@ -235,6 +247,21 @@ mod tests {
         assert_eq!(loaded[0].name, "vfo-a");
         assert_eq!(loaded[1].name, "vfo-b");
         assert_eq!(loaded[0].device_id, DeviceId::placeholder());
+    }
+
+    #[test]
+    fn rsid_flags_roundtrip() {
+        let store = Store::open_in_memory().unwrap();
+        let mut c = cfg(0, "vfo-a");
+        c.rsid_tx = true;
+        c.rsid_rx = true;
+        store.upsert_channel(&c).unwrap();
+        let loaded = store.load_channels().unwrap();
+        assert!(loaded[0].rsid_tx && loaded[0].rsid_rx);
+        // Default is off on a plain row.
+        store.upsert_channel(&cfg(1, "vfo-b")).unwrap();
+        let loaded = store.load_channels().unwrap();
+        assert!(!loaded[1].rsid_tx && !loaded[1].rsid_rx);
     }
 
     #[test]

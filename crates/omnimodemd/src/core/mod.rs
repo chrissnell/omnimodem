@@ -245,13 +245,15 @@ fn handle_command(
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
     match cmd {
-        Command::ConfigureChannel { id, name, mode, reply } => {
+        Command::ConfigureChannel { id, name, mode, rsid_tx, rsid_rx, reply } => {
             // Validate the mode string against the parametric registry before
             // persisting, so a typo can't silently configure nothing. The
             // string remains the persisted form (gRPC proto unchanged); it is
             // resolved to a `ModeConfig` at use.
             let res = match crate::mode::ModeConfig::parse(&mode) {
-                Some(_) => supervisor.configure_channel(id, name, mode).map_err(Into::into),
+                Some(_) => supervisor
+                    .configure_channel(id, name, mode, rsid_tx, rsid_rx)
+                    .map_err(Into::into),
                 None => Err(CoreError::UnknownMode(mode)),
             };
             if res.is_ok() {
@@ -543,6 +545,8 @@ fn try_spawn_workers(
     let gain = live.gains.entry(channel).or_default().clone();
     // Shared spectrum control (cloned into the RX worker; default OFF).
     let spectrum = live.spectra.entry(channel).or_default().clone();
+    // Per-channel RSID enables: (tx = prepend our burst, rx = detect inbound).
+    let (rsid_tx, rsid_rx) = supervisor.channel_rsid(channel);
 
     // RX worker: needs a capture and a real demod. Consume the held capture.
     if !live.rx_workers.contains_key(&channel) {
@@ -556,7 +560,7 @@ fn try_spawn_workers(
                 DemodKind::Streaming(demod) => {
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(),
+                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(), rsid_rx,
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -564,6 +568,7 @@ fn try_spawn_workers(
                     let w = RxWorker::spawn_windowed(
                         channel, rig, capture, bd, interlock.clone(), frames.clone(),
                         telemetry.clone(), metrics, window_s, gain.clone(), spectrum.clone(),
+                        rsid_rx,
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -588,6 +593,10 @@ fn try_spawn_workers(
             let sink = live.sinks.remove(&channel).unwrap();
             let driver = live.drivers.remove(&channel).unwrap();
             let slot_s = registry::tx_slot_s(&mode);
+            // Resolve the mode's RSID burst once at spawn (key + audio offset).
+            let rsid = (rsid_tx)
+                .then(|| mode.rsid_key().map(|k| (k, mode.rsid_center_hz())))
+                .flatten();
             let w = tx_worker::spawn(TxWorkerCfg {
                 channel,
                 rig,
@@ -601,6 +610,7 @@ fn try_spawn_workers(
                 slot_s,
                 gain: gain.clone(),
                 spectrum: spectrum.clone(),
+                rsid,
             });
             live.tx_workers.insert(channel, w);
         }
@@ -852,6 +862,8 @@ mod tests {
                     id: ChannelId(0),
                     name: "vfo-a".into(),
                     mode: "none".into(),
+                    rsid_tx: false,
+                    rsid_rx: false,
                     reply: tx,
                 })
                 .unwrap();
@@ -1072,6 +1084,8 @@ mod tests {
                     id: ChannelId(0),
                     name: "vfo-a".into(),
                     mode: "none".into(),
+                    rsid_tx: false,
+                    rsid_rx: false,
                     reply: tx,
                 })
                 .unwrap();
@@ -1133,7 +1147,14 @@ mod tests {
     async fn configure_channel(core: &CoreHandle, id: ChannelId, mode: &str) {
         let (tx, rx) = oneshot::channel();
         core.commands
-            .send(Command::ConfigureChannel { id, name: "ch".into(), mode: mode.into(), reply: tx })
+            .send(Command::ConfigureChannel {
+                id,
+                name: "ch".into(),
+                mode: mode.into(),
+                rsid_tx: false,
+                rsid_rx: false,
+                reply: tx,
+            })
             .unwrap();
         rx.await.unwrap().unwrap();
     }
@@ -1579,6 +1600,8 @@ mod tests {
                     method: PttMethod::None,
                     invert: false,
                 }),
+                rsid_tx: false,
+                rsid_rx: false,
             })
             .unwrap();
         let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/config"
@@ -25,6 +26,9 @@ type chanLive struct {
 	pttKeyed    bool
 	clockSync   bool
 	clockOff    float64
+	rsidTx      bool   // prepend the mode's RSID burst before each TX
+	rsidRx      bool   // run the RSID detector over received audio
+	lastRsid    string // most recently identified RSID (tag @ freq), "" if none
 }
 
 // Model is the root window manager: it owns the client, the event stream, shared
@@ -112,6 +116,7 @@ func (m *Model) applyEvent(ev *pb.Event) {
 				deviceID: ci.GetDeviceId(), running: ci.GetRunning(),
 				txDeviceID: ci.GetTxDeviceId(), pttDeviceID: ci.GetPttDeviceId(),
 				pttMethod: ci.GetPttMethod(),
+				rsidTx:    ci.GetRsidTx(), rsidRx: ci.GetRsidRx(),
 			}
 		}
 	case *pb.Event_AudioLevel:
@@ -125,6 +130,15 @@ func (m *Model) applyEvent(ev *pb.Event) {
 		}
 	case *pb.Event_ChannelConfigured:
 		ensure(k.ChannelConfigured.GetChannel())
+	case *pb.Event_RsidDetected:
+		d := k.RsidDetected
+		label := d.GetTag()
+		if d.GetMode() != "" {
+			label = d.GetMode()
+		}
+		summary := fmt.Sprintf("%s @ %.0f Hz", label, d.GetFreqHz())
+		ensure(d.GetChannel()).lastRsid = summary
+		m.toast = ui.NewToast("RSID: "+summary, ui.SeverityInfo)
 	}
 }
 

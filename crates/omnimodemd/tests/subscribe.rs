@@ -36,7 +36,7 @@ async fn snapshot_then_live_events() {
 
     // Pre-configure a channel so the snapshot is non-empty.
     client
-        .configure_channel(ConfigureChannelRequest { channel: 0, name: "vfo-a".into(), mode: "none".into(), mode_params: None })
+        .configure_channel(ConfigureChannelRequest { channel: 0, name: "vfo-a".into(), mode: "none".into(), mode_params: None, ..Default::default() })
         .await
         .unwrap();
 

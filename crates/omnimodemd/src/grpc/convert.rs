@@ -107,6 +107,8 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
                 tx_device_id,
                 ptt_device_id,
                 ptt_method,
+                rsid_tx: c.rsid_tx,
+                rsid_rx: c.rsid_rx,
             }
         })
         .collect();
@@ -237,6 +239,15 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             bins,
             transmit,
         }),
+        TelemetryEvent::RsidDetected { channel, tag, mode, freq_hz, extended } => {
+            Kind::RsidDetected(proto::RsidDetected {
+                channel: channel.0,
+                tag,
+                mode,
+                freq_hz,
+                extended,
+            })
+        }
     };
     proto::Event { kind: Some(kind) }
 }
@@ -346,6 +357,8 @@ mod tests {
             tx_device_id: tx,
             tx_sample_rate: 0,
             ptt,
+            rsid_tx: false,
+            rsid_rx: false,
         }
     }
 
