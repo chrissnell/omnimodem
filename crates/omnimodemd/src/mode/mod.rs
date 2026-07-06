@@ -418,10 +418,11 @@ mod tests {
 
     #[test]
     fn parse_resolves_wired_sstv_family() {
-        // The wired SSTV submodes (RGB-sequential + Robot colour + B/W) resolve to a facsimile mode.
+        // The wired SSTV submodes (RGB-sequential + Robot colour + B/W + Pasokon) resolve to a facsimile mode.
         for label in [
             "scottie1", "scottie2", "scottiedx", "martin1", "martin2",
-            "sc2-180", "sc2-120", "sc2-60", "robot72", "robot36", "robot24", "bw8", "bw12",
+            "sc2-180", "sc2-120", "sc2-60", "robot72", "robot36", "robot24",
+            "bw8", "bw12", "p3", "p5", "p7",
         ] {
             assert_eq!(
                 ModeConfig::parse(label),
@@ -429,11 +430,11 @@ mod tests {
             );
         }
         // Canonical mode string round-trips.
-        let c = ModeConfig::Sstv { submode: "bw8".into() };
+        let c = ModeConfig::Sstv { submode: "p3".into() };
         assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
         // Unwired SSTV submodes (not yet ported) are not exposed.
         assert_eq!(ModeConfig::parse("pd90"), None);
-        assert_eq!(ModeConfig::parse("p3"), None);
+        assert_eq!(ModeConfig::parse("mr73"), None);
     }
 
     #[test]
