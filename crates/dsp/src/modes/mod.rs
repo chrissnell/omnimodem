@@ -18,6 +18,7 @@ pub mod ft4;
 pub mod fst4;
 pub mod ifk33;
 pub mod ifkp;
+pub mod ifkp_pic;
 pub mod jt65;
 pub mod jt9;
 pub mod mfsk;

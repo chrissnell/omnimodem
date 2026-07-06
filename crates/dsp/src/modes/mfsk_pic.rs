@@ -7,188 +7,32 @@
 //! ⇒ 8). The pixel raster that follows is sent as raw carrier-FSK (each 8-bit
 //! pixel → a frequency held for `spp` samples) using the shared scaling/luma/
 //! plane-order primitives in [`super::picture`]. This module provides the
-//! bit-exact header build/parse plus the [`MfskPicMod`]/[`MfskPicDemod`] pixel
-//! path; wiring the header emission onto the live MFSK text state machine and a
-//! daemon picture-send trigger is T6.
+//! bit-exact header build/parse and configures the shared [`PictureCodec`] with
+//! MFSK's conventions ([`codec`]); wiring the header emission onto the live MFSK
+//! text state machine and a daemon picture-send trigger is T6.
 //!
 //! Reference: `fldigi/src/mfsk/mfsk-pic.cxx` (TX header builders :205-207,
 //! :246-248) and `fldigi/src/mfsk/mfsk.cxx` (`check_picture_header` RX parser
 //! :366-422), upstream 4.1.23 @ `61b97f413`. Golden vectors:
 //! `tests/vectors/mfskpic.json` (driver `scratch/refvectors/build_mfskpic.sh`).
 
-use crate::frontend::fir::{design_lowpass, Fir};
-use crate::frontend::nco::DownConverter;
-use crate::frontend::osc::Oscillator;
-use crate::modes::picture::{color_tx_raster, luma_mfsk, rx_pixel_index, PixelScale, PlaneOrder};
-use crate::types::{Cplx, Frame, FrameMeta, FramePayload};
+use crate::modes::picture::{LumaKind, PictureCodec, PixelScale, PlaneOrder};
 
-/// Working parameters for the MFSK picture pixel-FSK path. The carrier and
-/// occupied `bandwidth_hz` come from the hosting MFSK submode
-/// (`bandwidth = (numtones-1)·tonespacing`, mfsk.cxx:330); `reverse` mirrors
-/// fldigi's `reverse`/`CAP_REV` sideband flip (mfsk.cxx:1000-1002).
-#[derive(Debug, Clone, Copy)]
-pub struct MfskPicParams {
-    pub samplerate: f32,
-    pub carrier_hz: f32,
-    pub bandwidth_hz: f64,
-    pub reverse: bool,
-}
-
-impl MfskPicParams {
-    fn scale(&self) -> PixelScale {
-        PixelScale::Deviation256 { bandwidth_hz: self.bandwidth_hz }
-    }
-}
-
-/// Carrier lead-in emitted before the first pixel so the RX down-converter,
-/// low-pass, and phase discriminator settle before pixel timing begins — the role
-/// fldigi's `send_prologue` + viterbi-flush delay play (mfsk.cxx:1141). Sized in
-/// pixels; the demod skips the same lead-in.
-fn prologue_samples(spp: usize) -> usize {
-    2 * spp
-}
-
-/// The ordered on-air pixel byte stream for an image: colour → the R→G→B plane
-/// raster (mfsk-pic.cxx:196-202); grey → one integer-luma byte per pixel
-/// (mfsk-pic.cxx:239). `rgb` is row-major interleaved RGB, `rgb.len()==w*h*3`.
-fn tx_pixel_stream(rgb: &[u8], width: usize, color: bool) -> Vec<u8> {
-    if color {
-        color_tx_raster(rgb, width, PlaneOrder::Rgb)
-    } else {
-        rgb.chunks_exact(3).map(|p| luma_mfsk(p[0], p[1], p[2])).collect()
-    }
-}
-
-/// MFSK picture **modulator** (T4). Emits the raw pixel-FSK audio: each pixel
-/// value is held for `spp` samples at `carrier + deviation(px)`, continuous
-/// phase. ref: mfsk.cxx:988-1012 (`sendpic`). The header text that precedes it
-/// is emitted through the MFSK varicode path when this is wired onto the modem
-/// (T6); the pixel audio is this self-contained carrier-FSK stream.
-pub struct MfskPicMod {
-    p: MfskPicParams,
-}
-
-impl MfskPicMod {
-    pub fn new(p: MfskPicParams) -> Self {
-        MfskPicMod { p }
-    }
-
-    /// Encode an image (`rgb` interleaved, `width`×`height`) as pixel-FSK audio
-    /// at `spp` samples per pixel.
-    pub fn encode(&self, rgb: &[u8], width: usize, height: usize, color: bool, spp: usize) -> Vec<f32> {
-        debug_assert_eq!(rgb.len(), width * height * 3);
-        let stream = tx_pixel_stream(rgb, width, color);
-        let rate = self.p.samplerate;
-        let scale = self.p.scale();
-        let mut osc = Oscillator::new(self.p.carrier_hz, rate);
-        let prologue = prologue_samples(spp);
-        let mut out = Vec::with_capacity((stream.len() * spp) + prologue);
-        // Carrier lead-in (zero deviation) so the RX settles before pixel timing.
-        for _ in 0..prologue {
-            let (c, _) = osc.next();
-            out.push(c);
-        }
-        for &px in &stream {
-            let f = self.p.carrier_hz + scale.tx_deviation_hz(px, self.p.reverse) as f32;
-            osc.set_freq(f, rate);
-            for _ in 0..spp {
-                let (c, _) = osc.next();
-                out.push(c);
-            }
-        }
-        // Carrier lead-out so the last pixel's (delay-shifted) RX window is valid.
-        osc.set_freq(self.p.carrier_hz, rate);
-        for _ in 0..prologue {
-            let (c, _) = osc.next();
-            out.push(c);
-        }
-        out
-    }
-}
-
-/// MFSK picture **demodulator** (T5). Given the pixel-FSK audio and the parsed
-/// header, down-converts to baseband, measures each pixel's instantaneous
-/// frequency (phase difference averaged over the pixel's central span), maps it
-/// back to a byte, and reassembles a `FramePayload::Image`. ref: mfsk.cxx:424-460
-/// (`recvpic`).
-pub struct MfskPicDemod {
-    p: MfskPicParams,
-}
-
-impl MfskPicDemod {
-    pub fn new(p: MfskPicParams) -> Self {
-        MfskPicDemod { p }
-    }
-
-    /// Decode `audio` into the raster described by `hdr`, at `spp` samples per
-    /// pixel (the header's `rxspp`).
-    pub fn decode(&self, audio: &[f32], hdr: MfskPicHeader, spp: usize) -> Frame {
-        let rate = self.p.samplerate;
-        let scale = self.p.scale();
-        let (w, h) = (hdr.width as usize, hdr.height as usize);
-        let n_pixels = if hdr.color { w * h * 3 } else { w * h };
-
-        // Down-convert to complex baseband. A real input tone leaves the wanted
-        // near-DC term plus an image at −(2fc+dev) that *moves with the pixel*, so
-        // it must be attenuated across a band, not nulled at a point. A short
-        // symmetric (linear-phase) FIR low-pass passes the ±bw/2 pixel deviation
-        // and rejects the image; its integer group delay is compensated exactly.
-        let mut dc = DownConverter::new(self.p.carrier_hz, rate);
-        let base: Vec<Cplx> = audio.iter().map(|&x| dc.push(x)).collect();
-        let n = base.len();
-        // Cutoff between the deviation band and the image: ~carrier (well above
-        // ±bw/2, well below 2fc). 9 taps → delay 4, tolerable at spp≥8.
-        let taps = design_lowpass(9, self.p.carrier_hz, rate);
-        let delay = (taps.len() - 1) / 2;
-        let (mut fi, mut fq) = (Fir::new(taps.clone()), Fir::new(taps));
-        let smooth: Vec<Cplx> =
-            base.iter().map(|z| Cplx::new(fi.push(z.re), fq.push(z.im))).collect();
-        // Instantaneous frequency per sample = phase step arg(z[n]·conj(z[n-1])) → Hz.
-        let mut inst = vec![0.0f64; n];
-        for i in 1..n {
-            inst[i] = (smooth[i] * smooth[i - 1].conj()).arg() as f64 * rate as f64
-                / std::f64::consts::TAU;
-        }
-
-        // Pixel timing starts after the carrier lead-in; shift the read window by
-        // the FIR's integer group delay.
-        let prologue = prologue_samples(spp);
-        // Per-pixel: average the instantaneous frequency over the pixel's
-        // (delay-compensated) sample span, then map deviation → byte.
-        let byte_at = |pixel: usize| -> u8 {
-            let lo = prologue + pixel * spp + delay;
-            let hi = (lo + spp).min(n);
-            if lo >= n {
-                return 128;
-            }
-            // Average the discriminator over the whole pixel span: the FIR-
-            // suppressed residual image and the phase-step transient at the
-            // leading edge both average down over the span.
-            let dev = inst[lo..hi].iter().sum::<f64>() / (hi - lo).max(1) as f64;
-            scale.rx_byte(dev, self.p.reverse)
-        };
-
-        let (channels, pixels) = if hdr.color {
-            // Reassemble interleaved RGB from the R→G→B plane-ordered stream.
-            let mut recon = vec![0u8; n_pixels];
-            let mut k = 0usize;
-            for row in 0..h {
-                for slot in 0..3 {
-                    for col in 0..w {
-                        recon[rx_pixel_index(PlaneOrder::Rgb, slot, col, row, w)] = byte_at(k);
-                        k += 1;
-                    }
-                }
-            }
-            (3u8, recon)
-        } else {
-            (1u8, (0..n_pixels).map(byte_at).collect())
-        };
-
-        Frame {
-            payload: FramePayload::Image { width: hdr.width as u16, channels, pixels },
-            meta: FrameMeta { crc_ok: true, decoder: Some("mfsk-pic".into()), ..Default::default() },
-        }
+/// Build the shared pixel-FSK codec configured for MFSK pictures: linear
+/// `Deviation256` scaling over the submode's occupied `bandwidth_hz`
+/// (`(numtones-1)*tonespacing`, mfsk.cxx:330), MFSK integer luma, R->G->B planes.
+/// `reverse` mirrors fldigi's `reverse`/`CAP_REV` sideband flip
+/// (mfsk.cxx:1000-1002). The pixel raster path (T4/T5) is the shared engine; this
+/// module supplies MFSK's header codec and conventions.
+pub fn codec(carrier_hz: f32, bandwidth_hz: f64, samplerate: f32, reverse: bool) -> PictureCodec {
+    PictureCodec {
+        samplerate,
+        carrier_hz,
+        reverse,
+        scale: PixelScale::Deviation256 { bandwidth_hz },
+        luma: LumaKind::Mfsk,
+        order: PlaneOrder::Rgb,
+        label: "mfsk-pic",
     }
 }
 
@@ -282,6 +126,7 @@ pub fn parse_header(window: &str) -> Option<MfskPicHeader> {
 mod tests {
     use super::*;
     use crate::modes::picture::{color_tx_raster, luma_mfsk, PlaneOrder};
+    use crate::types::FramePayload;
 
     const VECTORS: &str = include_str!("../../tests/vectors/mfskpic.json");
 
@@ -357,9 +202,9 @@ mod tests {
         assert_eq!(got, want, "MFSK integer luma differs from fldigi");
     }
 
-    fn test_params() -> MfskPicParams {
+    fn test_codec() -> PictureCodec {
         // MFSK16-ish: 8 kHz, carrier 1500, ~316 Hz occupied bandwidth.
-        MfskPicParams { samplerate: 8000.0, carrier_hz: 1500.0, bandwidth_hz: 316.0, reverse: false }
+        codec(1500.0, 316.0, 8000.0, false)
     }
 
     // Loopback (audio domain, tolerance — Doctrine §3): a grey image encoded to
@@ -376,9 +221,8 @@ mod tests {
             let v = (i * 255 / (total - 1)) as u8;
             rgb.extend_from_slice(&[v, v, v]);
         }
-        let hdr = MfskPicHeader { width: w as u32, height: h as u32, color: false, rxspp: 8 };
-        let audio = MfskPicMod::new(test_params()).encode(&rgb, w, h, false, 8);
-        let frame = MfskPicDemod::new(test_params()).decode(&audio, hdr, 8);
+        let audio = test_codec().encode(&rgb, w, h, false, 8);
+        let frame = test_codec().decode(&audio, w, h, false, 8);
         let FramePayload::Image { width, channels, pixels } = frame.payload else {
             panic!("expected Image");
         };
@@ -412,9 +256,8 @@ mod tests {
             let b = 60 + (2 * w + x) * 4; // 124..152
             rgb.extend_from_slice(&[r as u8, g as u8, b as u8]);
         }
-        let hdr = MfskPicHeader { width: w as u32, height: h as u32, color: true, rxspp: 8 };
-        let audio = MfskPicMod::new(test_params()).encode(&rgb, w, h, true, 8);
-        let frame = MfskPicDemod::new(test_params()).decode(&audio, hdr, 8);
+        let audio = test_codec().encode(&rgb, w, h, true, 8);
+        let frame = test_codec().decode(&audio, w, h, true, 8);
         let FramePayload::Image { width, channels, pixels } = frame.payload else {
             panic!("expected Image");
         };

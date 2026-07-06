@@ -21,6 +21,8 @@
 //!   golden vectors extracted from the unmodified fldigi dump (see the phase
 //!   plan §2), not from self-referential asserts.
 
+use crate::types::{Cplx, Frame, FrameMeta, FramePayload};
+
 /// Pixel ↔ frequency-deviation scaling. Each family picks one; the deviation is
 /// relative to the mode's picture carrier `fc`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,6 +132,155 @@ pub fn color_tx_raster(rgb: &[u8], width: usize, order: PlaneOrder) -> Vec<u8> {
 /// row `row`. ref: mfsk.cxx:436-445, fsq.cxx:1226-1241 (`RGB[]` mapping).
 pub fn rx_pixel_index(order: PlaneOrder, rgb_slot: usize, col: usize, row: usize, width: usize) -> usize {
     order.plane_at(rgb_slot) + 3 * (col + row * width)
+}
+
+/// Which luma reduction a family uses when transmitting a colour image as grey.
+/// Kept distinct (Doctrine §2): MFSK is an integer reduction, the others BT.601.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LumaKind {
+    /// `(31R+61G+8B)/100` (mfsk-pic.cxx:239).
+    Mfsk,
+    /// `0.3R+0.6G+0.1B` (thor/ifkp/fsq).
+    Std,
+}
+
+impl LumaKind {
+    pub fn luma(self, r: u8, g: u8, b: u8) -> u8 {
+        match self {
+            LumaKind::Mfsk => luma_mfsk(r, g, b),
+            LumaKind::Std => luma_std(r, g, b),
+        }
+    }
+}
+
+/// Mode-agnostic in-band **pixel-FSK picture codec**: the raster is sent as raw
+/// carrier-FSK, one frequency per 8-bit pixel held for `spp` samples, with a
+/// carrier prologue/epilogue so the receiver settles. The four families
+/// (MFSK/THOR/IFKP/FSQ) differ only in their FSK `scale`, `luma` reduction, and
+/// colour-plane `order` — supply those and reuse this engine. The in-band header
+/// that announces the picture is each mode's own concern (its text codec).
+///
+/// ref: the `sendpic`/`recvpic` loops — mfsk.cxx:988-1012/424-460,
+/// thor.cxx:1324-1362/943-975, ifkp.cxx:807-850/556-617.
+#[derive(Debug, Clone, Copy)]
+pub struct PictureCodec {
+    pub samplerate: f32,
+    pub carrier_hz: f32,
+    pub reverse: bool,
+    pub scale: PixelScale,
+    pub luma: LumaKind,
+    pub order: PlaneOrder,
+    /// `FrameMeta::decoder` label for decoded rasters (e.g. `"mfsk-pic"`).
+    pub label: &'static str,
+}
+
+/// Carrier lead-in/out (in samples) so the RX down-converter, low-pass, and
+/// discriminator settle before/after pixel timing — the role fldigi's
+/// `send_prologue`/`send_epilogue` + flush delay play.
+fn prologue_samples(spp: usize) -> usize {
+    2 * spp
+}
+
+impl PictureCodec {
+    /// The ordered on-air pixel byte stream: colour → the plane raster in this
+    /// family's order; grey → one luma byte per pixel. `rgb` is row-major
+    /// interleaved RGB (`rgb.len() == width*height*3`).
+    fn pixel_stream(&self, rgb: &[u8], width: usize, color: bool) -> Vec<u8> {
+        if color {
+            color_tx_raster(rgb, width, self.order)
+        } else {
+            rgb.chunks_exact(3).map(|p| self.luma.luma(p[0], p[1], p[2])).collect()
+        }
+    }
+
+    /// **Modulator.** Encode an image as pixel-FSK audio at `spp` samples/pixel.
+    pub fn encode(&self, rgb: &[u8], width: usize, height: usize, color: bool, spp: usize) -> Vec<f32> {
+        debug_assert_eq!(rgb.len(), width * height * 3);
+        let stream = self.pixel_stream(rgb, width, color);
+        let rate = self.samplerate;
+        let mut osc = crate::frontend::osc::Oscillator::new(self.carrier_hz, rate);
+        let prologue = prologue_samples(spp);
+        let mut out = Vec::with_capacity(stream.len() * spp + 2 * prologue);
+        for _ in 0..prologue {
+            out.push(osc.next().0); // carrier lead-in
+        }
+        for &px in &stream {
+            let f = self.carrier_hz + self.scale.tx_deviation_hz(px, self.reverse) as f32;
+            osc.set_freq(f, rate);
+            for _ in 0..spp {
+                out.push(osc.next().0);
+            }
+        }
+        osc.set_freq(self.carrier_hz, rate);
+        for _ in 0..prologue {
+            out.push(osc.next().0); // carrier lead-out
+        }
+        out
+    }
+
+    /// **Demodulator.** Decode pixel-FSK audio into a `FramePayload::Image` for
+    /// the `width`×`height` (`color`) raster at `spp` samples/pixel.
+    pub fn decode(&self, audio: &[f32], width: usize, height: usize, color: bool, spp: usize) -> Frame {
+        use crate::frontend::fir::{design_lowpass, Fir};
+        use crate::frontend::nco::DownConverter;
+        let rate = self.samplerate;
+        let n_pixels = if color { width * height * 3 } else { width * height };
+
+        // A real input tone leaves an image at −(2fc+dev) that moves with the
+        // pixel, so attenuate it across a band with a short linear-phase FIR
+        // low-pass (integer group delay, compensated) rather than a point null.
+        // NOTE: tuned for the 8 kHz families (MFSK/THOR). At IFKP's 16 kHz with a
+        // low carrier the 2fc image crowds the pixel-rate sidebands and this
+        // low-pass is not selective enough — the shared demod needs a rate-robust
+        // analytic (image-free) front-end before the IFKP/FSQ loopback closes.
+        let mut dc = DownConverter::new(self.carrier_hz, rate);
+        let base: Vec<Cplx> = audio.iter().map(|&x| dc.push(x)).collect();
+        let n = base.len();
+        let taps = design_lowpass(9, self.carrier_hz, rate);
+        let delay = (taps.len() - 1) / 2;
+        let (mut fi, mut fq) = (Fir::new(taps.clone()), Fir::new(taps));
+        let smooth: Vec<Cplx> =
+            base.iter().map(|z| Cplx::new(fi.push(z.re), fq.push(z.im))).collect();
+        let mut inst = vec![0.0f64; n];
+        for i in 1..n {
+            inst[i] = (smooth[i] * smooth[i - 1].conj()).arg() as f64 * rate as f64
+                / std::f64::consts::TAU;
+        }
+
+        let prologue = prologue_samples(spp);
+        let byte_at = |pixel: usize| -> u8 {
+            let lo = prologue + pixel * spp + delay;
+            let hi = (lo + spp).min(n);
+            if lo >= n {
+                return 128;
+            }
+            // Average the discriminator over the whole pixel span; the residual
+            // image and the leading phase-step transient both average down.
+            let dev = inst[lo..hi].iter().sum::<f64>() / (hi - lo).max(1) as f64;
+            self.scale.rx_byte(dev, self.reverse)
+        };
+
+        let (channels, pixels) = if color {
+            let mut recon = vec![0u8; n_pixels];
+            let mut k = 0usize;
+            for row in 0..height {
+                for slot in 0..3 {
+                    for col in 0..width {
+                        recon[rx_pixel_index(self.order, slot, col, row, width)] = byte_at(k);
+                        k += 1;
+                    }
+                }
+            }
+            (3u8, recon)
+        } else {
+            (1u8, (0..n_pixels).map(byte_at).collect())
+        };
+
+        Frame {
+            payload: FramePayload::Image { width: width as u16, channels, pixels },
+            meta: FrameMeta { crc_ok: true, decoder: Some(self.label.into()), ..Default::default() },
+        }
+    }
 }
 
 #[cfg(test)]
