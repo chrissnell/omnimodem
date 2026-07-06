@@ -127,6 +127,13 @@ var modes = []modeInfo{
 	{"ml240", "image", 0, nil},
 	{"ml280", "image", 0, nil},
 	{"ml320", "image", 0, nil},
+	{"mp73-n", "image", 0, nil},
+	{"mp110-n", "image", 0, nil},
+	{"mp140-n", "image", 0, nil},
+	{"mc110-n", "image", 0, nil},
+	{"mc140-n", "image", 0, nil},
+	{"mc180-n", "image", 0, nil},
+	{"avt90", "image", 0, nil},
 	// The fldigi MFSK family: M-ary FSK + K=7 conv + interleave + MFSK Varicode.
 	{"mfsk4", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mfsk8", "chat", 0, []modeParam{{"center", 1500}}},

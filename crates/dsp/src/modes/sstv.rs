@@ -741,6 +741,120 @@ pub mod modulator {
         Some(out)
     }
 
+    /// Narrow-band pixel → frequency. ref: ComLib.cpp:3497 `ColorToFreqNarrow`
+    /// (`d*NARROW_BW/256 + NARROW_LOW`; NARROW_BW=256, so `d + 2044`, range 2044–2299 Hz).
+    pub fn color_to_freq_narrow(v: u8) -> u16 {
+        v as u16 + 2044
+    }
+
+    fn pixels_narrow(out: &mut Vec<Symbol>, vals: impl Iterator<Item = u8>, dt: f64) {
+        for v in vals {
+            out.push(Symbol { freq_hz: color_to_freq_narrow(v), ms: dt });
+        }
+    }
+
+    /// Narrow-band parameters `(is_mn, sync, porch, tw)`. MN (MP-N) is the PD structure
+    /// (Y-odd·R-Y·B-Y·Y-even, two rows/scan); MC (MC-N) is RGB-sequential. Both use 1900 Hz
+    /// sync + a 2044 Hz porch. ref: LineMN Main.cpp:6356 / LineMC 6380, dispatch 6722-6734.
+    pub fn narrow_params(mode: SstvMode) -> Option<(bool, f64, f64, f64)> {
+        use SstvMode::*;
+        Some(match mode {
+            Mn73 => (true, 9.0, 1.0, 140.0),
+            Mn110 => (true, 9.0, 1.0, 212.0),
+            Mn140 => (true, 9.0, 1.0, 270.0),
+            Mc110 => (false, 8.0, 0.5, 140.0),
+            Mc140 => (false, 8.0, 0.5, 180.0),
+            Mc180 => (false, 8.0, 0.5, 232.0),
+            _ => return None,
+        })
+    }
+
+    /// One MN (MP-N) scan line: sync(1900)·porch(2044)·Y(odd)·R-Y·B-Y·Y(even), narrow tones.
+    fn mn_line(out: &mut Vec<Symbol>, odd: &[Rgb], even: &[Rgb], sync: f64, porch: f64, tw: f64) {
+        let dt = tw / odd.len() as f64;
+        let (y_o, ry, by) = ry_channels(odd);
+        let (y_e, _, _) = ry_channels(even);
+        out.push(Symbol { freq_hz: 1900, ms: sync });
+        out.push(Symbol { freq_hz: 2044, ms: porch });
+        pixels_narrow(out, y_o.iter().copied(), dt);
+        pixels_narrow(out, ry.iter().copied(), dt);
+        pixels_narrow(out, by.iter().copied(), dt);
+        pixels_narrow(out, y_e.iter().copied(), dt);
+    }
+
+    /// One MC (MC-N) scan line: sync(1900)·porch(2044)·R·G·B, narrow tones.
+    fn mc_line(out: &mut Vec<Symbol>, row: &[Rgb], sync: f64, porch: f64, tw: f64) {
+        let dt = tw / row.len() as f64;
+        out.push(Symbol { freq_hz: 1900, ms: sync });
+        out.push(Symbol { freq_hz: 2044, ms: porch });
+        pixels_narrow(out, row.iter().map(|p| p.r), dt);
+        pixels_narrow(out, row.iter().map(|p| p.g), dt);
+        pixels_narrow(out, row.iter().map(|p| p.b), dt);
+    }
+
+    /// Full narrow-band transmission (N-VIS header, then MN pairs or MC single lines).
+    pub fn narrow_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
+        let (is_mn, sync, porch, tw) = narrow_params(mode)?;
+        let mut out = header(mode);
+        if is_mn {
+            let mut i = 0;
+            while i + 1 < rows.len() {
+                mn_line(&mut out, &rows[i], &rows[i + 1], sync, porch, tw);
+                i += 2;
+            }
+        } else {
+            for row in rows {
+                mc_line(&mut out, row, sync, porch, tw);
+            }
+        }
+        Some(out)
+    }
+
+    /// AVT 90 has NO per-line sync. Its frame is anchored by a header: the VIS sent 3× then a
+    /// 32-symbol special sync burst. This returns that header's total duration (ms), so the RX
+    /// can free-run the line clock from it. ref: the AVT emit Main.cpp:7089/7107-7119.
+    pub fn avt_header_ms() -> f64 {
+        let vis: f64 = header(SstvMode::Avt90).iter().map(|s| s.ms).sum();
+        let sync = 32.0 * (9.7646 + 16.0 * 9.7646);
+        3.0 * vis + sync + 0.30514375
+    }
+
+    /// One AVT 90 scan line: R·G·B, each 125 ms over the row, no sync/porch. ref: LineAVT
+    /// Main.cpp:6156.
+    pub fn avt_line(out: &mut Vec<Symbol>, row: &[Rgb]) {
+        let dt = 125.0 / row.len() as f64;
+        pixels(out, row.iter().map(|p| p.r), TAG_R, dt);
+        pixels(out, row.iter().map(|p| p.g), TAG_G, dt);
+        pixels(out, row.iter().map(|p| p.b), TAG_B, dt);
+    }
+
+    /// Full AVT 90 transmission: 3× VIS, the special sync burst, then R/G/B lines.
+    pub fn avt_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
+        if mode != SstvMode::Avt90 {
+            return None;
+        }
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            out.extend(header(mode));
+        }
+        // Special sync: 32 iterations of a 1900 Hz mark + a 16-bit 1600/2200 pattern.
+        let mut sd: u16 = 0x5fa0;
+        for _ in 0..32 {
+            out.push(Symbol { freq_hz: 1900, ms: 9.7646 });
+            let mut d = sd;
+            for _ in 0..16 {
+                out.push(Symbol { freq_hz: if d & 0x8000 != 0 { 1600 } else { 2200 }, ms: 9.7646 });
+                d <<= 1;
+            }
+            sd = ((sd & 0xff00).wrapping_sub(0x0100)) | ((sd & 0x00ff).wrapping_add(0x0001));
+        }
+        out.push(Symbol { freq_hz: 0, ms: 0.30514375 });
+        for row in rows {
+            avt_line(&mut out, row);
+        }
+        Some(out)
+    }
+
     /// Any wired analog line-scan mode → its symbol stream.
     pub fn line_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
         rgb_symbols(mode, rows)
@@ -748,6 +862,8 @@ pub mod modulator {
             .or_else(|| mono_symbols(mode, rows))
             .or_else(|| pd_symbols(mode, rows))
             .or_else(|| mr_symbols(mode, rows))
+            .or_else(|| narrow_symbols(mode, rows))
+            .or_else(|| avt_symbols(mode, rows))
     }
 
     /// Whether this mode is wired end-to-end here (for the daemon/TUI to expose).
@@ -758,6 +874,8 @@ pub mod modulator {
             || mono_params(mode).is_some()
             || pd_params(mode).is_some()
             || mr_params(mode).is_some()
+            || narrow_params(mode).is_some()
+            || mode == SstvMode::Avt90
     }
 
     /// FNV-1a over a symbol stream, each symbol serialized as `freq(i32 LE) ++ ms(f64 LE
@@ -893,6 +1011,12 @@ pub mod demod {
         v.clamp(0.0, 255.0) as u8
     }
 
+    /// Inverse of `ColorToFreqNarrow` (ref: ComLib.cpp:3497): narrow scan frequency → value.
+    /// NARROW_BW is 256, so this is just `freq - 2044`.
+    fn freq_to_value_narrow(freq_hz: f32) -> u8 {
+        (freq_hz - 2044.0).clamp(0.0, 255.0) as u8
+    }
+
     /// Run the discriminator over the whole PCM buffer.
     pub fn discriminate(pcm: &[f32]) -> Vec<f32> {
         let mut d = Discriminator::new();
@@ -902,12 +1026,12 @@ pub mod demod {
     /// Centre-sample indices of sustained 1200 Hz sync pulses (freq well below the 1500 Hz
     /// black floor for at least `min_ms`). Picks up both VIS and per-line syncs; callers
     /// select the line syncs by position.
-    pub fn find_sync_centers(freq: &[f32], min_ms: f64) -> Vec<usize> {
+    pub fn find_sync_centers(freq: &[f32], min_ms: f64, threshold_hz: f32) -> Vec<usize> {
         let min_len = (SAMPLE_RATE as f64 * min_ms / 1000.0) as usize;
         let mut out = Vec::new();
         let mut run_start: Option<usize> = None;
         for (i, &f) in freq.iter().enumerate() {
-            if f < 1350.0 {
+            if f < threshold_hz {
                 run_start.get_or_insert(i);
             } else if let Some(s) = run_start.take() {
                 if i - s >= min_len {
@@ -1145,8 +1269,13 @@ pub mod demod {
         // (Robot 24: rows == 2·scan_lines). ref: the smR24 gp2 duplicate, Main.cpp:3937.
         let rows_per_scan = (geom.rows / geom.scan_lines).max(1) as usize;
         let header_end = ms_to_samp(header_ms(mode)) as i64;
-        let all: Vec<usize> =
-            find_sync_centers(freq, min_sync_ms).into_iter().filter(|&s| s as i64 >= header_end).collect();
+        // Wide sync is 1200/1500 Hz below the 1500 Hz scan floor; narrow sync is 1900 Hz below
+        // the 2044 Hz narrow floor. Pick the threshold that separates sync from scan.
+        let sync_threshold = if mode.is_narrow() { 2000.0 } else { 1350.0 };
+        let all: Vec<usize> = find_sync_centers(freq, min_sync_ms, sync_threshold)
+            .into_iter()
+            .filter(|&s| s as i64 >= header_end)
+            .collect();
         let period = ms_to_samp(period_ms);
         let first = ms_to_samp(first_ms) as i64 + DISC_GROUP_DELAY;
         let win = (period * 0.3) as i64;
@@ -1231,11 +1360,70 @@ pub mod demod {
         }))
     }
 
+    /// Narrow-band decode (MN = PD structure, MC = RGB), 2044–2300 Hz tones + 1900 Hz sync.
+    /// ref: LineMN Main.cpp:6356 / LineMC 6380.
+    fn decode_frame_narrow(freq: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
+        let (is_mn, sync, porch, tw) = super::modulator::narrow_params(mode)?;
+        let header = header_ms(mode);
+        let base = sync + porch - sync / 2.0; // first channel start, relative to sync centre
+        if is_mn {
+            Some(run_frame(freq, mode, 5.0, sync + porch + 4.0 * tw, header + sync / 2.0, |f, sc, _k, w| {
+                let yo = sample_conv(f, sc, base, tw, w, freq_to_value_narrow);
+                let ry = sample_conv(f, sc, base + tw, tw, w, freq_to_value_narrow);
+                let by = sample_conv(f, sc, base + 2.0 * tw, tw, w, freq_to_value_narrow);
+                let ye = sample_conv(f, sc, base + 3.0 * tw, tw, w, freq_to_value_narrow);
+                let mut rows = Vec::with_capacity(2 * w);
+                for x in 0..w {
+                    rows.push(yc_to_rgb(yo[x] as i32, ry[x] as i32 - 128, by[x] as i32 - 128));
+                }
+                for x in 0..w {
+                    rows.push(yc_to_rgb(ye[x] as i32, ry[x] as i32 - 128, by[x] as i32 - 128));
+                }
+                rows
+            }))
+        } else {
+            Some(run_frame(freq, mode, 5.0, sync + porch + 3.0 * tw, header + sync / 2.0, |f, sc, _k, w| {
+                let r = sample_conv(f, sc, base, tw, w, freq_to_value_narrow);
+                let g = sample_conv(f, sc, base + tw, tw, w, freq_to_value_narrow);
+                let b = sample_conv(f, sc, base + 2.0 * tw, tw, w, freq_to_value_narrow);
+                (0..w).map(|x| Rgb { r: r[x], g: g[x], b: b[x] }).collect()
+            }))
+        }
+    }
+
+    /// AVT 90 decode: no per-line sync, so free-run the line clock from the header. Each line
+    /// is R·G·B (125 ms each) anchored at the line start. ref: LineAVT Main.cpp:6156.
+    fn decode_frame_avt(freq: &[f32], mode: super::SstvMode) -> (u16, Vec<u8>) {
+        let geom = mode.geometry();
+        let width = geom.width as usize;
+        let period = ms_to_samp(375.0); // 3 × 125 ms channels
+        let first = ms_to_samp(super::modulator::avt_header_ms()) as i64 + DISC_GROUP_DELAY;
+        let mut rgb = Vec::with_capacity(width * geom.rows as usize * 3);
+        for k in 0..geom.scan_lines as usize {
+            let line_start = (first + (k as f64 * period) as i64).max(0) as usize;
+            let r = sample_channel(freq, line_start, 0.0, 125.0, width);
+            let g = sample_channel(freq, line_start, 125.0, 125.0, width);
+            let b = sample_channel(freq, line_start, 250.0, 125.0, width);
+            for x in 0..width {
+                rgb.push(r[x]);
+                rgb.push(g[x]);
+                rgb.push(b[x]);
+            }
+        }
+        (geom.width, rgb)
+    }
+
     /// Decode a full analog line-scan frame from PCM to a row-major RGB raster (3 bytes/pixel),
     /// dispatching on the mode's colour model. Returns `(width, rgb)`; rows beyond the captured
     /// audio decode to black.
     pub fn decode_frame(pcm: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
         let freq = discriminate(pcm);
+        if mode.is_narrow() {
+            return decode_frame_narrow(&freq, mode);
+        }
+        if mode == super::SstvMode::Avt90 {
+            return Some(decode_frame_avt(&freq, mode));
+        }
         match mode.color_model() {
             super::ColorModel::Rgb => {
                 let lay = layout(mode)?;
@@ -1599,6 +1787,28 @@ mod tests {
         assert_family_loopback(SstvMode::Pd50, 8);
         assert_family_loopback(SstvMode::Pd120, 8);
         assert_family_loopback(SstvMode::Mp73, 8);
+    }
+
+    #[test]
+    fn all_43_submodes_are_wired() {
+        // Every mode in SSTVModeList is ported end-to-end (modulator + demodulator path).
+        for &m in SstvMode::all() {
+            assert!(super::modulator::wired(m), "{} is not wired", m.label());
+        }
+        assert_eq!(SstvMode::all().iter().filter(|&&m| super::modulator::wired(m)).count(), 43);
+    }
+
+    #[test]
+    fn avt_audio_loopback_recovers_colorbars() {
+        // AVT 90 has no per-line sync; the RX free-runs from the header. RGB, no colour math.
+        assert_family_loopback(SstvMode::Avt90, 8);
+    }
+
+    #[test]
+    fn narrow_audio_loopback_recovers_colorbars() {
+        // Narrow-band: 2044–2300 Hz scan + 1900 Hz sync. MN = PD colour-difference, MC = RGB.
+        assert_family_loopback(SstvMode::Mn73, 8);
+        assert_family_loopback(SstvMode::Mc110, 8);
     }
 
     #[test]

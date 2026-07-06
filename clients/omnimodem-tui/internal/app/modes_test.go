@@ -31,6 +31,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"pd50", "pd90", "pd120", "pd160", "pd180", "pd240", "pd290",
 		"mp73", "mp115", "mp140", "mp175",
 		"mr73", "mr90", "mr115", "mr140", "mr175", "ml180", "ml240", "ml280", "ml320",
+		"mp73-n", "mp110-n", "mp140-n", "mc110-n", "mc140-n", "mc180-n", "avt90",
 		"mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
 		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l",
 		"contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
