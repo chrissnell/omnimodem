@@ -102,6 +102,8 @@ var modes = []modeInfo{
 	{"robot72", "image", 0, nil},
 	{"robot36", "image", 0, nil},
 	{"robot24", "image", 0, nil},
+	{"bw8", "image", 0, nil},
+	{"bw12", "image", 0, nil},
 	// The fldigi MFSK family: M-ary FSK + K=7 conv + interleave + MFSK Varicode.
 	{"mfsk4", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mfsk8", "chat", 0, []modeParam{{"center", 1500}}},

@@ -575,14 +575,53 @@ pub mod modulator {
         Some(out)
     }
 
-    /// Any wired analog line-scan mode → its symbol stream (RGB-sequential or Robot).
+    /// B/W (monochrome) parameters: `(ts, tw)` — sync length and Y scan window, ms.
+    /// ref: the TX dispatch Main.cpp:6716-6719 (`LineRM(mp, 6.0, 58.89709 / 92.0)`).
+    pub fn mono_params(mode: SstvMode) -> Option<(f64, f64)> {
+        match mode {
+            SstvMode::Bw8 => Some((6.0, 58.89709)),
+            SstvMode::Bw12 => Some((6.0, 92.0)),
+            _ => None,
+        }
+    }
+
+    /// One B/W scan line. ref: Main.cpp:6338 `LineRM`: sync(ts)·porch(ts/3)·Y(tw). `y_avg` is
+    /// the per-pixel luma, already averaged from the two source rows this line represents.
+    pub fn mono_line(out: &mut Vec<Symbol>, y_avg: &[u8; 320], ts: f64, tw: f64) {
+        out.push(Symbol { freq_hz: 1200, ms: ts });
+        out.push(Symbol { freq_hz: 1500, ms: ts / 3.0 });
+        pixels(out, y_avg.iter().copied(), 0, tw / 320.0);
+    }
+
+    /// Full B/W transmission. ref: LineRM averages two source rows' luma into one on-air line
+    /// (`YY = (YY + Y[x]) / 2`), so `rows` are consumed in pairs.
+    pub fn mono_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
+        let (ts, tw) = mono_params(mode)?;
+        let mut out = header(mode);
+        let mut i = 0;
+        while i + 1 < rows.len() {
+            let mut y_avg = [0u8; 320];
+            for (x, ya) in y_avg.iter_mut().enumerate() {
+                let y0 = get_ry(rows[i][x]).0 as u16;
+                let y1 = get_ry(rows[i + 1][x]).0 as u16;
+                *ya = ((y0 + y1) / 2) as u8;
+            }
+            mono_line(&mut out, &y_avg, ts, tw);
+            i += 2;
+        }
+        Some(out)
+    }
+
+    /// Any wired analog line-scan mode → its symbol stream (RGB-sequential, Robot, or B/W).
     pub fn line_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
-        rgb_symbols(mode, rows).or_else(|| robot_symbols(mode, rows))
+        rgb_symbols(mode, rows)
+            .or_else(|| robot_symbols(mode, rows))
+            .or_else(|| mono_symbols(mode, rows))
     }
 
     /// Whether this mode is wired end-to-end here (for the daemon/TUI to expose).
     pub fn wired(mode: SstvMode) -> bool {
-        rgb_params(mode).is_some() || robot_supported(mode)
+        rgb_params(mode).is_some() || robot_supported(mode) || mono_params(mode).is_some()
     }
 
     /// FNV-1a over a symbol stream, each symbol serialized as `freq(i32 LE) ++ ms(f64 LE
@@ -748,8 +787,15 @@ pub mod demod {
     }
 
     /// Sample one channel: 320 pixels across `[start_ms, start_ms+tw]` relative to the sync
-    /// centre, reading the discriminator at each pixel's centre and mapping to luminance.
-    fn sample_channel(freq: &[f32], sync_center: usize, start_ms: f64, tw_ms: f64) -> [u8; 320] {
+    /// centre, reading the discriminator at each pixel's centre and mapping each to a value
+    /// via `conv` (luminance for colour channels, the stretched luma for B/W).
+    fn sample_conv(
+        freq: &[f32],
+        sync_center: usize,
+        start_ms: f64,
+        tw_ms: f64,
+        conv: impl Fn(f32) -> u8,
+    ) -> [u8; 320] {
         let base = sync_center as f64 + ms_to_samp(start_ms);
         let dt = ms_to_samp(tw_ms) / 320.0;
         let mut out = [0u8; 320];
@@ -760,9 +806,21 @@ pub mod demod {
             } else {
                 freq.get(cf.round() as usize).copied().unwrap_or(1500.0)
             };
-            *px = freq_to_value(f);
+            *px = conv(f);
         }
         out
+    }
+
+    fn sample_channel(freq: &[f32], sync_center: usize, start_ms: f64, tw_ms: f64) -> [u8; 320] {
+        sample_conv(freq, sync_center, start_ms, tw_ms, freq_to_value)
+    }
+
+    /// B/W display value: recover the luma then apply MMSSTV's contrast stretch (`×256/224`
+    /// about mid-scale), which maps the 16..235 luma range back toward 0..255. ref: the smRM8
+    /// /smRM12 raster path Main.cpp:4012-4020 (`d *= 256/(256-32); d += 128`).
+    fn mono_value(freq_hz: f32) -> u8 {
+        let v = freq_to_value(freq_hz) as f64;
+        ((v - 128.0) * 256.0 / 224.0 + 128.0).clamp(0.0, 255.0) as u8
     }
 
     /// Total VIS-header duration (ms) for a mode, from its `vis::header` symbols.
@@ -971,6 +1029,22 @@ pub mod demod {
         })
     }
 
+    /// B/W decode: sample the single luma channel and emit grey (R=G=B). ref: LineRM
+    /// Main.cpp:6338 (sync(ts)·porch·Y(tw)); Y starts `ts + ts/3` in, at the sync centre +ts/2.
+    fn decode_frame_mono(freq: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
+        let (ts, tw) = super::modulator::mono_params(mode)?;
+        let header = header_ms(mode);
+        let y_start = ts + ts / 3.0 - ts / 2.0; // porch end, relative to sync centre
+        Some(run_frame(freq, mode, 4.0, tw + ts + ts / 3.0, header + ts / 2.0, |f, sc, _k| {
+            let y = sample_conv(f, sc, y_start, tw, mono_value);
+            let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+            for (x, px) in row.iter_mut().enumerate() {
+                *px = Rgb { r: y[x], g: y[x], b: y[x] };
+            }
+            row
+        }))
+    }
+
     /// Decode a full analog line-scan frame from PCM to a row-major RGB raster (3 bytes/pixel),
     /// dispatching on the mode's colour model. Returns `(width, rgb)`; rows beyond the captured
     /// audio decode to black.
@@ -992,6 +1066,7 @@ pub mod demod {
                     decode_line_yc(f, sc, &lay)
                 }))
             }
+            super::ColorModel::Mono => decode_frame_mono(&freq, mode),
             _ => None,
         }
     }
@@ -1332,6 +1407,38 @@ mod tests {
     fn robot24_audio_loopback_recovers_colorbars() {
         // Like Robot 72 but half-res + row-doubled on display (rows == 2·scan_lines).
         assert_family_loopback(SstvMode::Robot24, 8);
+    }
+
+    #[test]
+    fn mono_audio_loopback_recovers_gray_bars() {
+        // B/W discards colour, so use 8 grey bars (luma 0,32,…,224) and check the decoded
+        // grey tracks the source luminance (through GetRY's luma + the RX contrast stretch).
+        for mode in [SstvMode::Bw8, SstvMode::Bw12] {
+            let mut src = [Rgb { r: 0, g: 0, b: 0 }; 320];
+            for (x, px) in src.iter_mut().enumerate() {
+                let l = ((x * 8 / 320) * 32) as u8;
+                *px = Rgb { r: l, g: l, b: l };
+            }
+            let rows = vec![src; 16]; // 16 source rows → 8 on-air lines (averaged pairs)
+            let syms = line_symbols(mode, &rows).unwrap();
+            let pcm = render(&syms, 16000.0);
+            let (w, out) = super::demod::decode_frame(&pcm, mode).unwrap();
+            assert_eq!(w, 320);
+            for row in 0..8 {
+                for bar in 0..8 {
+                    let x = bar * 40 + 20;
+                    let l = (bar * 32) as i32;
+                    let i = (row * 320 + x) * 3;
+                    assert!(out[i] == out[i + 1] && out[i + 1] == out[i + 2], "mono must be grey");
+                    let g = out[i] as i32;
+                    assert!(
+                        (g - l).abs() <= 14,
+                        "{:?} row {row} bar {bar}: got grey {g} want ~{l}",
+                        mode
+                    );
+                }
+            }
+        }
     }
 
     #[test]
