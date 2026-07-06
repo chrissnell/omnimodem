@@ -44,6 +44,20 @@ pub enum IfkpPicSize {
 }
 
 impl IfkpPicSize {
+    /// The fixed size whose dimensions are `(w, h)`, if any (the daemon maps a
+    /// requested image size onto the mode's size table).
+    pub fn from_dims(w: u32, h: u32) -> Option<Self> {
+        [
+            IfkpPicSize::Thumb,
+            IfkpPicSize::Mini,
+            IfkpPicSize::Portrait,
+            IfkpPicSize::Small,
+            IfkpPicSize::Large,
+            IfkpPicSize::Vga,
+        ]
+        .into_iter()
+        .find(|s| s.dims() == (w, h))
+    }
     pub fn dims(self) -> (u32, u32) {
         match self {
             IfkpPicSize::Thumb => (59, 74),
@@ -182,17 +196,7 @@ mod tests {
     }
 
     fn size_for(w: u32, h: u32) -> IfkpPicSize {
-        [
-            IfkpPicSize::Thumb,
-            IfkpPicSize::Mini,
-            IfkpPicSize::Portrait,
-            IfkpPicSize::Small,
-            IfkpPicSize::Large,
-            IfkpPicSize::Vga,
-        ]
-        .into_iter()
-        .find(|s| s.dims() == (w, h))
-        .unwrap()
+        IfkpPicSize::from_dims(w, h).unwrap()
     }
 
     #[test]

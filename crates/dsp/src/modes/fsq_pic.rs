@@ -47,6 +47,22 @@ pub enum FsqPicMode {
 }
 
 impl FsqPicMode {
+    /// The mode whose dimensions are `(w, h)` at the requested colour, if any
+    /// (the daemon maps a requested image size + colour onto the FSQ mode table).
+    pub fn from_dims(w: u32, h: u32, grey: bool) -> Option<Self> {
+        [
+            FsqPicMode::Small,
+            FsqPicMode::Large,
+            FsqPicMode::VgaGrey,
+            FsqPicMode::VgaColor,
+            FsqPicMode::PortraitColor,
+            FsqPicMode::PortraitGrey,
+            FsqPicMode::MiniColor,
+            FsqPicMode::MiniGrey,
+        ]
+        .into_iter()
+        .find(|m| m.dims() == (w, h) && m.color() != grey)
+    }
     pub fn dims(self) -> (u32, u32) {
         match self {
             FsqPicMode::Small => (160, 120),
@@ -195,19 +211,7 @@ mod tests {
     }
 
     fn mode_for(w: u32, h: u32, grey: bool) -> FsqPicMode {
-        [
-            FsqPicMode::Small,
-            FsqPicMode::Large,
-            FsqPicMode::VgaGrey,
-            FsqPicMode::VgaColor,
-            FsqPicMode::PortraitColor,
-            FsqPicMode::PortraitGrey,
-            FsqPicMode::MiniColor,
-            FsqPicMode::MiniGrey,
-        ]
-        .into_iter()
-        .find(|m| m.dims() == (w, h) && m.color() != grey)
-        .unwrap()
+        FsqPicMode::from_dims(w, h, grey).unwrap()
     }
 
     #[test]

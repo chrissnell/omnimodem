@@ -39,6 +39,20 @@ pub enum ThorPicSize {
 }
 
 impl ThorPicSize {
+    /// The fixed size whose dimensions are `(w, h)`, if any (the daemon maps a
+    /// requested image size onto the mode's size table).
+    pub fn from_dims(w: u32, h: u32) -> Option<Self> {
+        [
+            ThorPicSize::Thumb,
+            ThorPicSize::Mini,
+            ThorPicSize::Portrait,
+            ThorPicSize::Small,
+            ThorPicSize::Large,
+            ThorPicSize::Vga,
+        ]
+        .into_iter()
+        .find(|s| s.dims() == (w, h))
+    }
     pub fn dims(self) -> (u32, u32) {
         match self {
             ThorPicSize::Thumb => (59, 74),
@@ -179,17 +193,7 @@ mod tests {
     }
 
     fn size_for(w: u32, h: u32) -> ThorPicSize {
-        [
-            ThorPicSize::Thumb,
-            ThorPicSize::Mini,
-            ThorPicSize::Portrait,
-            ThorPicSize::Small,
-            ThorPicSize::Large,
-            ThorPicSize::Vga,
-        ]
-        .into_iter()
-        .find(|s| s.dims() == (w, h))
-        .unwrap()
+        ThorPicSize::from_dims(w, h).unwrap()
     }
 
     #[test]
