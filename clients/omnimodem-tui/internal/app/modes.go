@@ -140,6 +140,13 @@ var modes = []modeInfo{
 	{"mt63_1000l", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mt63_2000s", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mt63_2000l", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi Throb family: dual-tone MFSK at 8 kHz (Throb / ThrobX).
+	{"throb1", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throb2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throb4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throbx1", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throbx2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throbx4", "chat", 0, []modeParam{{"center", 1500}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -237,6 +244,11 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 	case "mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l":
 		// The fldigi MT63 family: submode label + audio center (1500 Hz).
 		return &pb.ModeParams{Params: &pb.ModeParams_Mt63{Mt63: &pb.Mt63Params{
+			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4":
+		// The fldigi Throb / ThrobX family: submode label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Throb{Throb: &pb.ThrobParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
 		}}}
 	case "contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",

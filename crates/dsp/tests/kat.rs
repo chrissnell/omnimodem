@@ -1413,3 +1413,65 @@ fn mt63_cross_decode_doc() {
     // The bit-exact encoder/TxVect gate above already pins the on-air integer
     // domain; this live-audio gate additionally exercises the sync tracker.
 }
+
+/// Bit-exact Throb / ThrobX KAT: the tone-pair tables, character sets, and the
+/// `(tone1,tone2)` sequence `tx_process`/`send` emit for a fixed message all match
+/// the golden vector extracted from the unmodified fldigi tables byte-for-byte.
+/// Provenance: `tests/vectors/throb.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_throb.sh`).
+#[test]
+fn throb_tables_and_tones_match_fldigi_vector() {
+    use omnimodem_dsp::modes::throb::{
+        text_tones, ThrobVariant, THROBX_CHARSET, THROBX_TONEPAIRS, THROB_CHARSET, THROB_TONEPAIRS,
+    };
+
+    let raw = include_str!("vectors/throb.json").trim();
+
+    // Flatten every int inside a (possibly nested) `"key":[ ... ]` array, scanning
+    // to the bracket-depth-matched closing `]` (kat_arr stops at the first `]`,
+    // which would truncate a nested pair array).
+    fn nested(s: &str, key: &str) -> Vec<i64> {
+        let k = format!("\"{key}\":[");
+        let start = s.find(&k).unwrap_or_else(|| panic!("key {key}")) + k.len() - 1; // at '['
+        let bytes = s.as_bytes();
+        let (mut depth, mut i) = (0i32, start);
+        loop {
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        kat_ints(&s[start..=i])
+    }
+    let pairs = |s: &str, key: &str| -> Vec<(u8, u8)> {
+        nested(s, key).chunks(2).map(|c| (c[0] as u8, c[1] as u8)).collect()
+    };
+
+    // 1. Tone-pair tables (nested pairs) and char sets (flat).
+    assert_eq!(pairs(raw, "throb_tonepairs"), THROB_TONEPAIRS.to_vec(), "ThrobTonePairs");
+    assert_eq!(pairs(raw, "throbx_tonepairs"), THROBX_TONEPAIRS.to_vec(), "ThrobXTonePairs");
+    let bytes = |key: &str| -> Vec<u8> { kat_arr(raw, key).iter().map(|&v| v as u8).collect() };
+    assert_eq!(bytes("throb_charset"), THROB_CHARSET.to_vec(), "ThrobCharSet");
+    assert_eq!(bytes("throbx_charset"), THROBX_CHARSET.to_vec(), "ThrobXCharSet");
+
+    // 2. Per-message emitted tone-pair sequences (Throb1/ThrobX1 stand in for the
+    //    family — the tone *indices* are identical across symlen submodes).
+    for (mode, text, v) in [
+        ("throb", "CQ DE K1ABC", ThrobVariant::Throb1),
+        ("throb", "R U THERE? 73", ThrobVariant::Throb1),
+        ("throbx", "CQ DE K1ABC", ThrobVariant::ThrobX1),
+        ("throbx", "R U THERE? 73", ThrobVariant::ThrobX1),
+    ] {
+        let needle = format!("\"mode\":\"{mode}\",\"text\":\"{text}\"");
+        let at = raw.find(&needle).expect("message object");
+        let want: Vec<(u8, u8)> = pairs(&raw[at..], "tones");
+        assert_eq!(text_tones(v, text), want, "{mode} {text:?} tone sequence");
+    }
+}
