@@ -236,19 +236,24 @@ fn encode_chars(v: ThorVariant, chars: impl Iterator<Item = u8>, secondary: bool
 }
 
 /// Idle (NUL) characters prepended before / appended after the data to prime and
-/// drain the RX interleaver + Viterbi latency. fldigi frames with a preamble
-/// (`Clearbits` + idle) and a `flushlength` idle tail; here a run of idle chars
-/// through the same encoder does the equivalent priming. Scaled to the Viterbi
-/// traceback + interleaver depth so every submode round-trips.
+/// drain the RX interleaver + Viterbi latency. fldigi frames with a short preamble
+/// (`Clearbits` fills the interleaver *silently* + 16 symbols + idle) and a
+/// `flushlength` idle tail; because our RX has no preamble *detection* yet (see the
+/// module doc), the priming idle here is audible and must be long enough for the
+/// far end's interleaver + Viterbi to fill on their own.
+///
+/// The dominant cost is the diagonal interleaver's fill, which is `~idepth`
+/// symbols; the K=15 Viterbi traceback is a smaller second-order term. This is the
+/// measured minimum that still decodes plus a safety margin — kept as small as
+/// decoding allows so TX airtime stays close to fldigi's rather than the ~2×
+/// over-pad it was. The high-speed modes (idepth=50, a ~2 s interleave) still carry
+/// a real lead-in; eliminating it entirely needs fldigi's preamble detection.
 fn frame_pad(v: ThorVariant) -> usize {
-    // Each idle char is 11 varicode bits → 22 code bits → ~5 symbols; size the
-    // pad in characters to cover the traceback (in data bits) plus the size²·depth
-    // interleaver fill, with margin. The formula is a conservative upper bound, not
-    // an exact latency; validated empirically to prime and drain every submode
-    // (including idepth=50 / K=15) by the loopback grid in `tests/kat.rs`.
+    // Empirically (loopback grid, `tests/kat.rs`) the floor that still decodes is
+    // ≈ `0.9*idepth + 4` idle chars; `idepth + traceback/24 + 6` clears it on every
+    // submode with ~20–50% margin without ballooning the low-idepth modes.
     let p = v.params();
-    let data_bits = v.traceback() + INTERLEAVE_SIZE * INTERLEAVE_SIZE * p.idepth;
-    (data_bits / 11) + 8
+    p.idepth + v.traceback() / 24 + 6
 }
 
 fn caps(v: ThorVariant) -> ModeCaps {
