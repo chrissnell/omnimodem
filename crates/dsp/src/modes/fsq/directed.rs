@@ -311,6 +311,28 @@ mod tests {
     }
 
     #[test]
+    fn international_callsigns_match_fldigi() {
+        // Parity with the compiled reference regex over a broad set of real-world
+        // international callsigns (verified against fldigi's POSIX regex via
+        // regexec): standard letter-prefix, numeric-prefix (2E0/4X1/3DA0/…),
+        // special (1A0/4U1), and portable/prefix slash forms all classify as a
+        // valid *other* call (8); the port must not diverge from fldigi on any of
+        // them, or a directed frame addressed by a foreign station would parse
+        // differently than the sender intended.
+        let calls = [
+            "DL1ABC", "G0XYZ", "M0ABC", "F5ABC", "EA1ABC", "OH2BH", "HB9ABC", "OE1ABC", "SP1ABC",
+            "JA1ABC", "VK2ABC", "ZL1ABC", "PY2ABC", "LU1ABC", "VE3ABC", "VU2ABC", "ZS1ABC",
+            "BV1ABC", "2E0ABC", "4X1ABC", "3DA0RS", "9A1ABC", "5B4ABC", "7Q7ABC", "8P6ABC",
+            "3B8ABC", "9M2ABC", "4U1UN", "1A0KM", "RI1ANF", "KH6ABC", "VP8ABC", "K1ABC/P",
+            "K1ABC/MM", "DL/K1ABC", "K1ABC/QRP", "ZS6/G0ABC", "VP2E/K1ABC", "EA9IB", "3Z0X",
+            "OEM2O", "a1a",
+        ];
+        for s in calls {
+            assert_eq!(valid_callsign(s, ""), 8, "{s:?} is a valid international call in fldigi");
+        }
+    }
+
+    #[test]
     fn heard_list_dedups_and_orders() {
         let mut h = HeardList::new();
         h.add("w1hkj", Some("-5 db".into()));
