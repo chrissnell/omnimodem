@@ -2,6 +2,7 @@
 //! turns a config into a boxed demodulator/modulator. Phase 3 implements only
 //! `NullMode`; Phase-4 variants are present as data so the enum is stable.
 
+pub mod picture_tx;
 pub mod registry;
 
 use omnimodem_dsp::mode::ModeCaps;

@@ -34,11 +34,40 @@ pub const TX_QUEUE_DEPTH: usize = 32;
 /// Drain-loop poll interval for the no-sleep TX cycle in production.
 const TX_POLL: Duration = Duration::from_millis(5);
 
-/// A queued TX job: the frame to send and its transmit id (for events).
+/// Pre-modulated native-rate audio for a [`TxJob`]. Picture sends assemble their
+/// own on-air audio (in-band header + pixel-FSK) ahead of time, so the worker
+/// plays these samples directly instead of running the channel modulator.
+#[derive(Debug)]
+pub struct PrebuiltAudio {
+    pub samples: Vec<f32>,
+    pub native_rate: u32,
+}
+
+/// A queued TX job: either a frame the channel modulator renders, or pre-built
+/// audio to play verbatim. Both serialize onto the channel's on-air timeline.
 #[derive(Debug)]
 pub struct TxJob {
     pub frame: Frame,
     pub transmit_id: TransmitId,
+    /// When set, the worker plays this audio directly and ignores `frame`. Boxed
+    /// so a frame job (the common case) keeps `TxJob` small.
+    pub prebuilt: Option<Box<PrebuiltAudio>>,
+}
+
+impl TxJob {
+    /// A job that renders `frame` through the channel modulator.
+    pub fn frame(frame: Frame, transmit_id: TransmitId) -> Self {
+        TxJob { frame, transmit_id, prebuilt: None }
+    }
+
+    /// A job that plays pre-modulated `samples` (at `native_rate`) verbatim.
+    pub fn prebuilt(samples: Vec<f32>, native_rate: u32, transmit_id: TransmitId) -> Self {
+        TxJob {
+            frame: Frame::text(""),
+            transmit_id,
+            prebuilt: Some(Box::new(PrebuiltAudio { samples, native_rate })),
+        }
+    }
 }
 
 /// Everything the worker thread owns for one channel.
@@ -133,33 +162,38 @@ pub fn spawn(cfg: TxWorkerCfg) -> TxWorker {
 }
 
 fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
-    while let Ok(job) = rx.recv() {
+    while let Ok(mut job) = rx.recv() {
         // Drop pending jobs promptly once cancelled (e.g. the rig departed).
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let samples = match cfg.modulator.modulate(&job.frame) {
-            Ok(s) => s,
-            Err(_) => {
-                // Payload not valid for this mode: surface start+complete so a
-                // client awaiting this transmit id isn't left hanging.
-                let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
-                    channel: cfg.channel,
-                    transmit_id: job.transmit_id,
-                });
-                let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
-                    channel: cfg.channel,
-                    transmit_id: job.transmit_id,
-                });
-                continue;
-            }
+        // Pre-built picture audio plays verbatim at its own native rate; a frame
+        // job renders through the channel modulator at its caps rate. Move the
+        // (potentially large) prebuilt buffer out rather than cloning it.
+        let (samples, native) = match job.prebuilt.take() {
+            Some(pb) => (pb.samples, pb.native_rate),
+            None => match cfg.modulator.modulate(&job.frame) {
+                Ok(s) => (s, cfg.modulator.caps().native_rate),
+                Err(_) => {
+                    // Payload not valid for this mode: surface start+complete so a
+                    // client awaiting this transmit id isn't left hanging.
+                    let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
+                        channel: cfg.channel,
+                        transmit_id: job.transmit_id,
+                    });
+                    let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
+                        channel: cfg.channel,
+                        transmit_id: job.transmit_id,
+                    });
+                    continue;
+                }
+            },
         };
-        // Bridge the modulator's native rate to the playback stream rate. A
-        // modulator emits baseband at caps().native_rate (CW/RTTY/PSK31 at 8 kHz,
-        // FT8 at 12 kHz); feeding those straight to a 48 kHz sink ran the burst
-        // several times too fast and high-pitched. afsk1200 is already 48 kHz, so
-        // its resampler is a passthrough — which is why only it sounded right.
-        let native = cfg.modulator.caps().native_rate;
+        // Bridge the native rate to the playback stream rate. A modulator emits
+        // baseband at caps().native_rate (CW/RTTY/PSK31 at 8 kHz, FT8 at 12 kHz);
+        // feeding those straight to a 48 kHz sink ran the burst several times too
+        // fast and high-pitched. afsk1200 is already 48 kHz, so its resampler is a
+        // passthrough — which is why only it sounded right.
         let samples = if cfg.rate > 0 && native != cfg.rate {
             Resampler::new(native, cfg.rate, 16).process(&samples)
         } else {
@@ -361,7 +395,7 @@ mod tests {
             tx_delay: Duration::ZERO,
             tx_tail: Duration::ZERO,
         });
-        worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
+        worker.enqueue(TxJob::frame(DspFrame::text("CQ"), TransmitId(1))).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         rt.block_on(async {
@@ -419,7 +453,7 @@ mod tests {
             tx_delay: Duration::ZERO,
             tx_tail: Duration::ZERO,
         });
-        worker.enqueue(TxJob { frame: DspFrame::text("E"), transmit_id: TransmitId(1) }).unwrap();
+        worker.enqueue(TxJob::frame(DspFrame::text("E"), TransmitId(1))).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         rt.block_on(async {
@@ -445,6 +479,65 @@ mod tests {
             played >= raw_len * 5,
             "expected ~6x resample of {raw_len} native samples, played {played}",
         );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn prebuilt_audio_plays_verbatim_resampled_to_sink() {
+        // A picture send hands the worker pre-modulated native-rate audio; the
+        // worker plays it directly (ignoring the channel modulator) and resamples
+        // it to the sink rate. 800 samples at 8 kHz through a 48 kHz sink => ~6x.
+        let native = 8_000u32;
+        let n_native = 800usize;
+        let audio: Vec<f32> =
+            (0..n_native).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
+
+        let backend = FileBackend::from_samples(vec![], 48_000);
+        let sink = backend.open_playback(48_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 48_000,
+            // The modulator is irrelevant for a prebuilt job; any mode works.
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Cw {
+                wpm: 20,
+                tone_hz: 700.0,
+            })
+            .unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
+            rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
+        });
+        worker.enqueue(TxJob::prebuilt(audio, native, TransmitId(7))).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            let mut completed = false;
+            for _ in 0..200 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    if let TelemetryEvent::TransmitComplete { transmit_id, .. } = ev {
+                        assert_eq!(transmit_id, TransmitId(7));
+                        completed = true;
+                    }
+                }
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(completed, "no TransmitComplete for prebuilt job");
+        });
+        let played = backend.played.lock().unwrap().len();
+        assert!(played >= n_native * 5, "prebuilt audio resampled 8k->48k should be ~6x, played {played}");
         worker.shutdown();
     }
 
@@ -477,7 +570,7 @@ mod tests {
             tx_delay: Duration::ZERO,
             tx_tail: Duration::ZERO,
         });
-        worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
+        worker.enqueue(TxJob::frame(DspFrame::text("CQ"), TransmitId(1))).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         rt.block_on(async {
@@ -550,7 +643,7 @@ mod tests {
             tx_delay: Duration::ZERO,
             tx_tail: Duration::ZERO,
         });
-        worker.enqueue(TxJob { frame: DspFrame::packet(bytes), transmit_id: TransmitId(1) }).unwrap();
+        worker.enqueue(TxJob::frame(DspFrame::packet(bytes), TransmitId(1))).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         rt.block_on(async {
@@ -613,7 +706,7 @@ mod tests {
             tx_delay: Duration::ZERO,
             tx_tail: Duration::ZERO,
         });
-        worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
+        worker.enqueue(TxJob::frame(DspFrame::text("CQ"), TransmitId(1))).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         rt.block_on(async {
@@ -674,7 +767,7 @@ mod tests {
             tx_tail: Duration::ZERO,
         });
         worker
-            .enqueue(TxJob { frame: DspFrame::text("CQ CQ CQ DE NW5W"), transmit_id: TransmitId(1) })
+            .enqueue(TxJob::frame(DspFrame::text("CQ CQ CQ DE NW5W"), TransmitId(1)))
             .unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
@@ -765,7 +858,7 @@ mod tests {
             tx_delay: Duration::ZERO,
             tx_tail: Duration::ZERO,
         });
-        worker.enqueue(TxJob { frame: DspFrame::text("TEST"), transmit_id: TransmitId(1) }).unwrap();
+        worker.enqueue(TxJob::frame(DspFrame::text("TEST"), TransmitId(1))).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let frames = rt.block_on(async {
@@ -831,7 +924,7 @@ mod tests {
         });
         // A valid FT8 message (standard call/grid exchange).
         worker
-            .enqueue(TxJob { frame: DspFrame::text("CQ NW5W EM10"), transmit_id: TransmitId(1) })
+            .enqueue(TxJob::frame(DspFrame::text("CQ NW5W EM10"), TransmitId(1)))
             .unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();

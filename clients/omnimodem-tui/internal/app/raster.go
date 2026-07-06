@@ -8,11 +8,14 @@ import (
 
 // rasterBuf accumulates the received image column stream for a facsimile mode
 // (Hell, and later WEFAX / the picture sub-protocols). Each proto Image carries
-// `width` pixels per column and a row-major gray buffer; successive `width`-byte
-// runs are on-air columns, so we append them and render a scrolling raster.
+// `width` pixels per column, `channels` samples per pixel (1 = grayscale, 3 =
+// RGB interleaved), and a row-major sample buffer; successive
+// `width*channels`-byte runs are on-air columns, so we append them and render a
+// scrolling raster. Colour frames are reduced to luminance for the monochrome
+// terminal surface (documented fallback; true colour rendering is a follow-up).
 type rasterBuf struct {
 	width int      // pixels per column (image width); 0 until the first frame
-	cols  [][]byte // each entry is one column of `width` gray bytes
+	cols  [][]byte // each entry is one column of `width` luminance bytes
 }
 
 // maxRasterCols bounds retained history so a long receive session can't grow the
@@ -28,11 +31,24 @@ func (r *rasterBuf) push(img *pb.Image) {
 	if w == 0 {
 		return
 	}
+	ch := int(img.GetChannels())
+	if ch == 0 {
+		ch = 1 // older grayscale producers leave channels unset
+	}
 	r.width = w
-	g := img.GetGray()
-	for i := 0; i+w <= len(g); i += w {
+	stride := w * ch
+	p := img.GetPixels()
+	for i := 0; i+stride <= len(p); i += stride {
 		col := make([]byte, w)
-		copy(col, g[i:i+w])
+		if ch == 3 {
+			// Rec.601 luma of each RGB pixel for the monochrome surface.
+			for x := 0; x < w; x++ {
+				o := i + x*3
+				col[x] = byte((299*int(p[o]) + 587*int(p[o+1]) + 114*int(p[o+2])) / 1000)
+			}
+		} else {
+			copy(col, p[i:i+w])
+		}
 		r.cols = append(r.cols, col)
 	}
 	if len(r.cols) > maxRasterCols {

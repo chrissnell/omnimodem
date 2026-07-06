@@ -298,6 +298,17 @@ fn handle_command(
             let _ = reply.send(res);
         }
 
+        Command::TransmitImage { channel, send, reply } => {
+            if !supervisor.has_channel(channel) {
+                let _ = reply.send(Err(CoreError::UnknownChannel(channel)));
+                return;
+            }
+            let tx_id = TransmitId(*next_tx_id);
+            *next_tx_id += 1;
+            let res = transmit_image(supervisor, live, channel, send, tx_id);
+            let _ = reply.send(res);
+        }
+
         Command::ListDevices { reply } => {
             let devices = supervisor.device_cache_mut().refresh(enumerator);
             let _ = reply.send(devices);
@@ -694,7 +705,7 @@ fn transmit(
         let mode = supervisor.channel_mode(channel);
         let frame = tx_worker::payload_to_frame(&mode, payload);
         let worker = live.tx_workers.get(&channel).unwrap();
-        return match worker.enqueue(TxJob { frame, transmit_id: tx_id }) {
+        return match worker.enqueue(TxJob::frame(frame, tx_id)) {
             Ok(()) => Ok(tx_id),
             Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
         };
@@ -747,6 +758,31 @@ fn transmit(
             evict_on_gone(supervisor, live, channel, &e);
             Err(CoreError::Ptt(e))
         }
+    }
+}
+
+/// Transmit an image on a moded channel: build the header + pixel-FSK audio for
+/// the channel's configured picture mode and enqueue it on the channel worker
+/// (accepted onto the queue, not when it leaves the air — the worker emits
+/// TransmitStarted/Complete + keys the rig). Errors if the channel has no live TX
+/// worker or the mode/size can't carry the image.
+fn transmit_image(
+    supervisor: &Supervisor,
+    live: &LiveBindings,
+    channel: ChannelId,
+    send: crate::mode::picture_tx::PictureSend,
+    tx_id: TransmitId,
+) -> Result<TransmitId, CoreError> {
+    let worker = live
+        .tx_workers
+        .get(&channel)
+        .ok_or_else(|| CoreError::Picture("channel has no active transmit worker".into()))?;
+    let mode = supervisor.channel_mode(channel);
+    let (audio, native_rate) =
+        crate::mode::picture_tx::build(&mode, &send).map_err(|e| CoreError::Picture(e.to_string()))?;
+    match worker.enqueue(TxJob::prebuilt(audio, native_rate, tx_id)) {
+        Ok(()) => Ok(tx_id),
+        Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
     }
 }
 
@@ -1058,6 +1094,29 @@ mod tests {
             let (tx, rx) = oneshot::channel();
             core.commands
                 .send(Command::Transmit { channel: ChannelId(9), payload: vec![], reply: tx })
+                .unwrap();
+            let err = rx.await.unwrap().unwrap_err();
+            assert!(matches!(err, CoreError::UnknownChannel(ChannelId(9))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn transmit_image_on_unknown_channel_errors() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (core, join) = fresh_core();
+        rt.block_on(async {
+            let (tx, rx) = oneshot::channel();
+            let send = crate::mode::picture_tx::PictureSend {
+                rgb: vec![0; 12],
+                width: 2,
+                height: 2,
+                color: false,
+                txspp: 8,
+            };
+            core.commands
+                .send(Command::TransmitImage { channel: ChannelId(9), send, reply: tx })
                 .unwrap();
             let err = rx.await.unwrap().unwrap_err();
             assert!(matches!(err, CoreError::UnknownChannel(ChannelId(9))));

@@ -98,6 +98,28 @@ pub fn design_bandpass(num_taps: usize, low_hz: f32, high_hz: f32, rate_hz: f32)
     h
 }
 
+/// Windowed Hilbert-transformer FIR (type-III linear phase): odd `num_taps`,
+/// antisymmetric, integer group delay `(num_taps-1)/2`. Applied to a real signal
+/// it produces its 90°-shifted quadrature; pairing that with the real signal
+/// delayed by the same group delay yields the **analytic** (single-sideband)
+/// signal, whose spectrum has no negative-frequency image. Down-converting an
+/// analytic signal to baseband is therefore image-free at any sample rate — the
+/// rate-robust front-end the picture discriminator needs. `num_taps` must be odd.
+pub fn design_hilbert(num_taps: usize) -> Vec<f32> {
+    debug_assert!(num_taps % 2 == 1, "Hilbert FIR needs an odd tap count");
+    let m = (num_taps - 1) as isize / 2;
+    let mut h = vec![0.0f32; num_taps];
+    for (i, hi) in h.iter_mut().enumerate() {
+        let k = i as isize - m;
+        // Ideal antisymmetric response: 0 on even taps, 2/(πk) on odd taps.
+        let ideal = if k % 2 == 0 { 0.0 } else { 2.0 / (PI * k as f32) };
+        // Hamming window keeps the passband ripple low over the pixel band.
+        let w = 0.54 - 0.46 * (2.0 * PI * i as f32 / (num_taps - 1) as f32).cos();
+        *hi = ideal * w;
+    }
+    h
+}
+
 /// Root-raised-cosine taps (Direwolf AFSK, M17 α=0.5). `sps` samples/symbol.
 pub fn design_rrc(num_taps: usize, alpha: f32, sps: f32) -> Vec<f32> {
     let m = num_taps as isize / 2;
@@ -161,6 +183,7 @@ pub fn design_gaussian(num_taps: usize, bt: f32, sps: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::TAU;
 
     #[test]
     fn fir_impulse_response_equals_taps() {
@@ -220,6 +243,45 @@ mod tests {
         for i in 0..h.len() / 2 {
             assert!((h[i] - h[h.len() - 1 - i]).abs() < 1e-6);
             assert!(h[i] <= h[mid]);
+        }
+    }
+
+    #[test]
+    fn hilbert_is_antisymmetric_with_zero_even_taps() {
+        let h = design_hilbert(31);
+        let m = h.len() / 2;
+        assert_eq!(h[m], 0.0, "centre tap is zero");
+        for i in 0..h.len() {
+            let k = i as isize - m as isize;
+            if k % 2 == 0 {
+                assert_eq!(h[i], 0.0, "even tap {k} must be zero");
+            }
+            // Antisymmetric about the centre.
+            assert!((h[i] + h[h.len() - 1 - i]).abs() < 1e-6, "tap {i} not antisymmetric");
+        }
+    }
+
+    #[test]
+    fn hilbert_shifts_a_tone_by_ninety_degrees() {
+        // Feeding cos through the Hilbert FIR and delaying the input by the group
+        // delay yields sin (the quadrature), so the analytic magnitude is ~constant.
+        let taps = design_hilbert(63);
+        let m = taps.len() / 2;
+        let mut fir = Fir::new(taps);
+        let rate = 16000.0f32;
+        let f0 = 1500.0f32;
+        let n = 4000usize;
+        let mut xs = Vec::with_capacity(n);
+        let mut q = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = (TAU * f0 * i as f32 / rate).cos();
+            xs.push(x);
+            q.push(fir.push(x));
+        }
+        // Well past the group delay + settling, |analytic| = sqrt(i^2 + q^2) ~ 1.
+        for i in (m + 200)..(n - 1) {
+            let mag = (xs[i - m].powi(2) + q[i].powi(2)).sqrt();
+            assert!((mag - 1.0).abs() < 0.05, "analytic magnitude {mag} at {i} not ~1");
         }
     }
 

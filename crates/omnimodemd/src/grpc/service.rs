@@ -88,6 +88,27 @@ impl ModemControl for ControlService {
         Ok(Response::new(proto::TransmitResponse { transmit_id: transmit_id.0 }))
     }
 
+    async fn transmit_image(
+        &self,
+        request: Request<proto::TransmitImageRequest>,
+    ) -> Result<Response<proto::TransmitResponse>, Status> {
+        let req = request.into_inner();
+        let send = crate::mode::picture_tx::PictureSend {
+            rgb: req.rgb,
+            width: req.width,
+            height: req.height,
+            color: req.color,
+            txspp: req.txspp as u8,
+        };
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::TransmitImage { channel: ChannelId(req.channel), send, reply: tx })?;
+        let transmit_id = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::TransmitResponse { transmit_id: transmit_id.0 }))
+    }
+
     async fn list_devices(
         &self,
         _request: Request<proto::ListDevicesRequest>,

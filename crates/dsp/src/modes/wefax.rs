@@ -162,7 +162,10 @@ impl Modulator for WefaxMod {
 
     fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
         let (width, gray) = match &frame.payload {
-            FramePayload::Image { width, gray } => (*width as usize, gray),
+            // WEFAX is a grayscale facsimile; the raster samples are the luma
+            // bytes regardless of the `channels` tag (colour is the Phase-15
+            // picture families, not WEFAX).
+            FramePayload::Image { width, pixels, .. } => (*width as usize, pixels),
             _ => return Err(ModError::UnsupportedPayload("wefax needs an image")),
         };
         if width == 0 || gray.is_empty() {
@@ -352,7 +355,7 @@ impl WefaxDemod {
             return None;
         }
         Some(Frame {
-            payload: FramePayload::Image { width: width as u16, gray },
+            payload: FramePayload::Image { width: width as u16, channels: 1, pixels: gray },
             meta: FrameMeta {
                 crc_ok: true,
                 decoder: Some(self.variant.label().into()),
@@ -473,7 +476,7 @@ mod tests {
                 }
             }
             let img = Frame {
-                payload: FramePayload::Image { width: src_w as u16, gray: gray.clone() },
+                payload: FramePayload::Image { width: src_w as u16, channels: 1, pixels: gray.clone() },
                 meta: FrameMeta::default(),
             };
             let mut tx = WefaxMod::new(v, CARRIER_HZ);
@@ -483,7 +486,7 @@ mod tests {
             let frames = rx.flush();
             let frame = frames.first().expect("a raster");
             let (w, g) = match &frame.payload {
-                FramePayload::Image { width, gray } => (*width as usize, gray),
+                FramePayload::Image { width, pixels, .. } => (*width as usize, pixels),
                 _ => panic!("expected image"),
             };
             assert_eq!(w, width, "{}: recovered width", v.label());
