@@ -149,6 +149,18 @@ Run this sequence **once per family** (A→F). `<FAM>` = the family; the represe
 
 ## Scope / open decisions
 
+- **Colour raster payload (needs an owner call).** `FramePayload::Image { width, gray }` and the
+  proto `Image { width, gray }` are **8-bit grayscale** — designed in Phase 10 for the mono
+  Hell/WEFAX facsimile modes. **SSTV is colour**: the RX recovers RGB per pixel. The DSP is
+  proven (the Scottie loopback reconstructs R/G/B), but emitting it needs a colour raster on
+  the wire. Options: (a) add `FramePayload::ImageRgb { width, rgb }` + a proto `rgb` field
+  (cleanest, additive, keeps mono modes unchanged — reused by Phase 15 colour pictures);
+  (b) widen the existing `Image` with a `channels`/`format` tag; (c) pack RGB into `gray`
+  with a stride convention (worst — implicit). Recommend (a). Blocks the Scottie `Demodulator`
+  trait's `Image` emission (T5-emit), the daemon `frame_bytes` colour arm, and the TUI colour
+  raster view (T8). The line-scan DSP and single-line decode are done and gate-tested regardless.
+
+
 - **Full submode grid is in scope** (43 modes in `SSTVModeList[]`, `smEND`=43). If effort forces a cut, the defensible line is Groups A–D (classic interoperable modes) as the first PR and Groups E–F (MMSSTV-native MR/ML/MP/MN/MC) as a fast-follow — but each is still a complete, KAT-green family, never a stub. **Confirm with the issue owner before cutting.**
 - **Repeater / FSK-ID / CW-ID / auto-slant (`ClockAdj`) features** of MMSSTV are operator conveniences, not part of the on-air picture format — **out of scope** for parity; note in the `sstv.rs` doc comment.
 - **`DrawSSTVDiff` (differential/"Diff" render path)** is an MMSSTV display enhancement, not a distinct on-air mode — port `DrawSSTVNormal` only; note the deviation.
