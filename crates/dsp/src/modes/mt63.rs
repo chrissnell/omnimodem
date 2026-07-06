@@ -263,7 +263,10 @@ mod tests {
         let msg = "CQ";
         for &v in Mt63Variant::all() {
             let modem = Mt63Modem::new(v.bandwidth(), v.interleave(), 1500.0);
-            let n_chars = framed(msg, v.interleave()).len();
+            // fldigi's on-air char count spelled out independently of `flush_tail`
+            // (depth leading + text + depth trailing) so a re-bloated tail trips
+            // this equality instead of growing both sides. ref: mt63.cxx:95-120.
+            let n_chars = v.interleave().depth() + msg.len() + v.interleave().depth();
             let expect = n_chars * modem.sym_len + modem.win_len + modem.sym_len;
             let samples = Mt63Mod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap().len();
             assert_eq!(samples, expect, "{} tail length", v.label());
