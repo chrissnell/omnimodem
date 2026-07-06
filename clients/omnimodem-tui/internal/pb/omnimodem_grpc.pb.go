@@ -28,6 +28,7 @@ const (
 	ModemControl_ConfigureChannel_FullMethodName      = "/omnimodem.v1.ModemControl/ConfigureChannel"
 	ModemControl_GetState_FullMethodName              = "/omnimodem.v1.ModemControl/GetState"
 	ModemControl_Transmit_FullMethodName              = "/omnimodem.v1.ModemControl/Transmit"
+	ModemControl_TransmitImage_FullMethodName         = "/omnimodem.v1.ModemControl/TransmitImage"
 	ModemControl_SubscribeEvents_FullMethodName       = "/omnimodem.v1.ModemControl/SubscribeEvents"
 	ModemControl_ListDevices_FullMethodName           = "/omnimodem.v1.ModemControl/ListDevices"
 	ModemControl_ConfigureAudio_FullMethodName        = "/omnimodem.v1.ModemControl/ConfigureAudio"
@@ -57,6 +58,11 @@ type ModemControlClient interface {
 	// TransmitStarted/TransmitComplete events. Returns once the frame is
 	// accepted onto the channel's TX queue, not when it leaves the air.
 	Transmit(ctx context.Context, in *TransmitRequest, opts ...grpc.CallOption) (*TransmitResponse, error)
+	// Transmit an image on a channel using the channel's configured picture-capable
+	// mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+	// and keys the rig. Returns once accepted onto the TX queue (same contract as
+	// Transmit). The symmetric partner of the typed RxFrame.image on receive.
+	TransmitImage(ctx context.Context, in *TransmitImageRequest, opts ...grpc.CallOption) (*TransmitResponse, error)
 	// Subscribe to the event stream. The first message is always a snapshot
 	// (Event.snapshot) reflecting state at subscription time; live events follow.
 	SubscribeEvents(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
@@ -120,6 +126,16 @@ func (c *modemControlClient) Transmit(ctx context.Context, in *TransmitRequest, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransmitResponse)
 	err := c.cc.Invoke(ctx, ModemControl_Transmit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *modemControlClient) TransmitImage(ctx context.Context, in *TransmitImageRequest, opts ...grpc.CallOption) (*TransmitResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransmitResponse)
+	err := c.cc.Invoke(ctx, ModemControl_TransmitImage_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +286,11 @@ type ModemControlServer interface {
 	// TransmitStarted/TransmitComplete events. Returns once the frame is
 	// accepted onto the channel's TX queue, not when it leaves the air.
 	Transmit(context.Context, *TransmitRequest) (*TransmitResponse, error)
+	// Transmit an image on a channel using the channel's configured picture-capable
+	// mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+	// and keys the rig. Returns once accepted onto the TX queue (same contract as
+	// Transmit). The symmetric partner of the typed RxFrame.image on receive.
+	TransmitImage(context.Context, *TransmitImageRequest) (*TransmitResponse, error)
 	// Subscribe to the event stream. The first message is always a snapshot
 	// (Event.snapshot) reflecting state at subscription time; live events follow.
 	SubscribeEvents(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error
@@ -317,6 +338,9 @@ func (UnimplementedModemControlServer) GetState(context.Context, *GetStateReques
 }
 func (UnimplementedModemControlServer) Transmit(context.Context, *TransmitRequest) (*TransmitResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Transmit not implemented")
+}
+func (UnimplementedModemControlServer) TransmitImage(context.Context, *TransmitImageRequest) (*TransmitResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TransmitImage not implemented")
 }
 func (UnimplementedModemControlServer) SubscribeEvents(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeEvents not implemented")
@@ -425,6 +449,24 @@ func _ModemControl_Transmit_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ModemControlServer).Transmit(ctx, req.(*TransmitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ModemControl_TransmitImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransmitImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModemControlServer).TransmitImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModemControl_TransmitImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModemControlServer).TransmitImage(ctx, req.(*TransmitImageRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -656,6 +698,10 @@ var ModemControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Transmit",
 			Handler:    _ModemControl_Transmit_Handler,
+		},
+		{
+			MethodName: "TransmitImage",
+			Handler:    _ModemControl_TransmitImage_Handler,
 		},
 		{
 			MethodName: "ListDevices",

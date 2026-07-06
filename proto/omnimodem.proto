@@ -22,6 +22,12 @@ service ModemControl {
   // accepted onto the channel's TX queue, not when it leaves the air.
   rpc Transmit(TransmitRequest) returns (TransmitResponse);
 
+  // Transmit an image on a channel using the channel's configured picture-capable
+  // mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+  // and keys the rig. Returns once accepted onto the TX queue (same contract as
+  // Transmit). The symmetric partner of the typed RxFrame.image on receive.
+  rpc TransmitImage(TransmitImageRequest) returns (TransmitResponse);
+
   // Subscribe to the event stream. The first message is always a snapshot
   // (Event.snapshot) reflecting state at subscription time; live events follow.
   rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
@@ -220,6 +226,19 @@ message TransmitRequest {
 
 message TransmitResponse {
   uint64 transmit_id = 1; // monotonically increasing per process
+}
+
+// Transmit a raster image over the channel's configured picture mode. `rgb` is
+// row-major interleaved RGB (`R,G,B,…`, `width*height*3` bytes). MFSK carries an
+// explicit W×H so any size is valid; THOR/IFKP/FSQ select from a fixed size
+// table, so (width,height[,colour for FSQ]) must match one of the mode's sizes.
+message TransmitImageRequest {
+  uint32 channel = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  bytes  rgb = 4;       // row-major interleaved RGB, width*height*3 bytes
+  bool   color = 5;     // send colour (3 planes) vs grayscale (luma)
+  uint32 txspp = 6;     // MFSK samples-per-pixel: 8 (default) / 4 / 2; 0 ⇒ 8
 }
 
 message SubscribeRequest {}

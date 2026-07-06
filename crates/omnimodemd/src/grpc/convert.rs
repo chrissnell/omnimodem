@@ -15,6 +15,7 @@ pub fn core_error_to_status(e: CoreError) -> Status {
     match &e {
         CoreError::UnknownChannel(_) => Status::not_found(e.to_string()),
         CoreError::UnknownMode(_) => Status::invalid_argument(e.to_string()),
+        CoreError::Picture(_) => Status::invalid_argument(e.to_string()),
         CoreError::Persist(_) => Status::internal(e.to_string()),
         CoreError::Audio(_) => Status::failed_precondition(e.to_string()),
         CoreError::Ptt(p) => match p {

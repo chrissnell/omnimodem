@@ -41,9 +41,10 @@ pub enum PictureError {
     BadLength { got: usize, want: usize },
 }
 
-/// Build the complete picture-send audio for `cfg`'s configured mode, or an error
-/// if the mode / submode / size cannot carry this image.
-pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<Vec<f32>, PictureError> {
+/// Build the complete picture-send audio for `cfg`'s configured mode, returning
+/// `(audio, native_rate_hz)` (the worker plays the samples at that rate), or an
+/// error if the mode / submode / size cannot carry this image.
+pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<(Vec<f32>, u32), PictureError> {
     let want = send.width as usize * send.height as usize * 3;
     if send.rgb.len() != want {
         return Err(PictureError::BadLength { got: send.rgb.len(), want });
@@ -63,26 +64,26 @@ pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<Vec<f32>, PictureEr
                 _ => 8,
             };
             let img = RasterRef { rgb: &send.rgb, width: send.width, height: send.height };
-            Ok(mfsk_pic::build_tx(v, *center_hz, img, send.color, spp, false))
+            Ok((mfsk_pic::build_tx(v, *center_hz, img, send.color, spp, false), v.samplerate()))
         }
         ModeConfig::Thor { submode, center_hz } => {
             let v = thor::ThorVariant::from_label(submode)
                 .ok_or_else(|| PictureError::BadSubmode(submode.clone()))?;
             let size = thor_pic::ThorPicSize::from_dims(send.width, send.height).ok_or_else(bad_size)?;
-            Ok(thor_pic::build_tx(v, *center_hz, size, &send.rgb, grey, false))
+            Ok((thor_pic::build_tx(v, *center_hz, size, &send.rgb, grey, false), v.samplerate()))
         }
         ModeConfig::Ifkp { speed, center_hz } => {
             let s = ifkp::IfkpSpeed::from_label(speed)
                 .ok_or_else(|| PictureError::BadSubmode(speed.clone()))?;
             let size = ifkp_pic::IfkpPicSize::from_dims(send.width, send.height).ok_or_else(bad_size)?;
-            Ok(ifkp_pic::build_tx(s, *center_hz, size, &send.rgb, grey, false))
+            Ok((ifkp_pic::build_tx(s, *center_hz, size, &send.rgb, grey, false), ifkp_pic::SAMPLE_RATE as u32))
         }
         ModeConfig::Fsq { speed, center_hz, mycall, .. } => {
             let s = fsq::FsqSpeed::from_label(speed)
                 .ok_or_else(|| PictureError::BadSubmode(speed.clone()))?;
             let mode = fsq_pic::FsqPicMode::from_dims(send.width, send.height, grey)
                 .ok_or_else(bad_size)?;
-            Ok(fsq_pic::build_tx(s, *center_hz, mycall, mode, &send.rgb))
+            Ok((fsq_pic::build_tx(s, *center_hz, mycall, mode, &send.rgb), fsq_pic::SAMPLE_RATE as u32))
         }
         other => Err(PictureError::Unsupported(other.to_mode_string())),
     }
@@ -109,8 +110,9 @@ mod tests {
     #[test]
     fn mfsk_builds_any_size() {
         let cfg = ModeConfig::Mfsk { submode: "mfsk16".into(), center_hz: 1500.0 };
-        let audio = build(&cfg, &send(16, 4, false)).expect("mfsk picture builds");
+        let (audio, rate) = build(&cfg, &send(16, 4, false)).expect("mfsk picture builds");
         assert!(!audio.is_empty());
+        assert_eq!(rate, 8000, "mfsk16 native rate");
     }
 
     #[test]

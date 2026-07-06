@@ -24,6 +24,13 @@ pub enum Command {
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<TransmitId, CoreError>>,
     },
+    /// Transmit an image using the channel's configured picture mode. The core
+    /// builds the header + pixel-FSK audio and enqueues it on the channel worker.
+    TransmitImage {
+        channel: ChannelId,
+        send: crate::mode::picture_tx::PictureSend,
+        reply: oneshot::Sender<Result<TransmitId, CoreError>>,
+    },
     GetState {
         reply: oneshot::Sender<ModemSnapshot>,
     },
