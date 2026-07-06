@@ -30,9 +30,12 @@ pub enum PixelScale {
     /// MFSK / THOR / IFKP: linear over ±bandwidth/2, centred on 128.
     /// ref: mfsk.cxx:1000-1002, thor.cxx:1334, ifkp.cxx:753.
     Deviation256 { bandwidth_hz: f64 },
-    // FSQ's linear scale (`fc − 200 + px·1.5`, fsq.cxx:1432/1206) is added in
-    // Wave B (5D) alongside its golden vector, since its RX reference point
-    // needs pinning against the reference dump — do not guess it here.
+    /// FSQ: `dev = −200 + px·1.5` on TX (fsq.cxx:1432), `byte = dev/1.5 + 128`
+    /// on RX (fsq.cxx:1206). Both affines are transcribed verbatim — they are
+    /// **not** exact inverses (RX down-converts at `frequency`, fsq.cxx:188, so a
+    /// clean round-trip lands ~6 counts low), which is fldigi's actual on-wire
+    /// behaviour. The asymmetry is pinned by the T1 golden vector, not guessed.
+    FsqLinear,
 }
 
 impl PixelScale {
@@ -50,16 +53,16 @@ impl PixelScale {
                     dev
                 }
             }
-        }
-    }
-
-    /// The occupied one-sided pixel band (Hz) — the largest deviation magnitude a
-    /// pixel can produce. Used to size the baseband clean-up low-pass so it passes
-    /// the whole pixel band while rejecting residue. `Deviation256` spans
-    /// ±bandwidth/2 about `fc`.
-    pub fn occupied_bandwidth_hz(self) -> f64 {
-        match self {
-            PixelScale::Deviation256 { bandwidth_hz } => bandwidth_hz / 2.0,
+            // ref: fsq.cxx:1432 `freq = frequency - 200 + tx_pixel * 1.5`.
+            // FSQ pictures never set `reverse`; honour it for symmetry only.
+            PixelScale::FsqLinear => {
+                let dev = -200.0 + pixel as f64 * 1.5;
+                if reverse {
+                    -dev
+                } else {
+                    dev
+                }
+            }
         }
     }
 
@@ -73,6 +76,12 @@ impl PixelScale {
                 let v = dev * 256.0 / bandwidth_hz + 128.0;
                 // `f64 as u8` truncates toward zero and saturates to 0..=255,
                 // matching C's `(int)CLAMP(v, 0.0, 255.0)` for in-range inputs.
+                v.clamp(0.0, 255.0) as u8
+            }
+            // ref: fsq.cxx:1206 `byte = pixel / 1.5 + 128; (int)CLAMP(0,255)`.
+            PixelScale::FsqLinear => {
+                let d = if reverse { -deviation_hz } else { deviation_hz };
+                let v = d / 1.5 + 128.0;
                 v.clamp(0.0, 255.0) as u8
             }
         }

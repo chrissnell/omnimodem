@@ -14,6 +14,7 @@ pub mod hell;
 pub mod ft8;
 pub mod fsk_util;
 pub mod fsq;
+pub mod fsq_pic;
 pub mod ft4;
 pub mod fst4;
 pub mod ifk33;
