@@ -249,10 +249,16 @@ On completion, add a "picture sub-protocols" page pointing future agents at
 extension to `FramePayload::Image` / the `Image` proto message, and how the TUI
 `image` shape renders colour rasters.
 
-## 8. Open decisions (flag to owner, do not assume)
+## 8. Decisions
 
-- **Colour on the `Image` wire:** `channels` field vs sibling `rgb` — §4 proposes
-  `channels`; confirm before touching the proto (it is a published message).
+- **Colour on the `Image` wire — RESOLVED (owner delegated the call, 2026-07-06).**
+  Chose the ubiquitous raster-library model: an explicit `(width, channels,
+  interleaved samples)` triple. `FramePayload::Image { width, channels, pixels }`
+  and proto `Image { width, pixels, channels }` — `channels` 1=grayscale,
+  3=RGB; the sample buffer was renamed `gray`→`pixels` (it now holds colour),
+  wire field number 2 kept so it stays compatible; `channels==0` reads as 1 for
+  older grayscale producers. TUI folds RGB to luma for the mono surface (true
+  colour rendering is a follow-up). **Shipped** on this branch (§4 done).
 - **Avatar ('A') mode:** THOR/IFKP define a fixed 59×74 RGB avatar with a
   distinct RX path — excluded here; fold in later only if wanted.
 - **Wave B trigger:** whether to hard-split into a Phase 15b PR or keep one
