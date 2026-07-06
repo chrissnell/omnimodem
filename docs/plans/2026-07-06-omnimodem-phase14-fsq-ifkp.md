@@ -62,8 +62,10 @@ retargeted to 33 tones with `OFFSET = 1`.
   header (verify CRC over the callsign), register the caller in the heard list,
   then walk addressed callsigns/triggers. `valid_callsign` classifies mycall /
   `allcall` / `cqcqcq` / other. When addressed (directed or allcall), the leading
-  trigger character selects a responder (`' '` plain text, `?` snr, `*` info, `#`
-  send-message, `%` acknowledge, …). Trigger set `fsq.cxx:405`.
+  trigger character selects a responder (`' '` plain text, `?` snr, `*` ack, `$`
+  heard-list, `#` send-message, `%` picture/`parse_pcnt`, …). Only the pure
+  responders (`?`/`*`/`$`) synthesise a reply here; `%` is Phase-15 picture and
+  the async triggers are deferred. Trigger set `fsq.cxx:405`.
 
 ## Method (doctrine)
 

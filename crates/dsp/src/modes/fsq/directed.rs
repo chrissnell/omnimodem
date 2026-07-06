@@ -50,13 +50,55 @@ pub fn valid_callsign(s: &str, mycall: &str) -> u8 {
     }
 }
 
-/// Structural approximation of fldigi's callsign regex
-/// `([[:alnum:]]?[[:alpha:]/]+[[:digit:]]+[[:alnum:]/]+)`: the charset is
-/// alphanumerics plus `/`, and it must contain at least one letter and one digit.
+/// Faithful reimplementation of fldigi's callsign regex (fsq.cxx:409), applied
+/// unanchored like `regexec`: `([[:alnum:]]?[[:alpha:]/]+[[:digit:]]+[[:alnum:]/]+)`
+/// — some substring must be an optional leading alnum, then one-or-more
+/// letters/`/`, then one-or-more digits, then one-or-more alnum/`/`. The three
+/// character classes partition cleanly at each boundary (letters/`/` never
+/// contain a digit; digits never contain a letter/`/`), so a greedy scan needs no
+/// backtracking. This matters for interop: the earlier "any letter + any digit"
+/// approximation accepted digit-leading tokens fldigi rejects (`999z`, `1a1`,
+/// `1234a`), which would classify an addressee word differently and diverge the
+/// directed-message parse.
 fn looks_like_callsign(s: &str) -> bool {
-    s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'/')
-        && s.bytes().any(|c| c.is_ascii_alphabetic())
-        && s.bytes().any(|c| c.is_ascii_digit())
+    let b = s.as_bytes();
+    let alpha_or_slash = |c: u8| c.is_ascii_alphabetic() || c == b'/';
+    let alnum_or_slash = |c: u8| c.is_ascii_alphanumeric() || c == b'/';
+    for start in 0..b.len() {
+        // The leading `[[:alnum:]]?` is optional: try consuming it and not.
+        for lead in [0usize, 1] {
+            let mut i = start;
+            if lead == 1 {
+                if i < b.len() && b[i].is_ascii_alphanumeric() {
+                    i += 1;
+                } else {
+                    continue;
+                }
+            }
+            let mark = i;
+            while i < b.len() && alpha_or_slash(b[i]) {
+                i += 1;
+            }
+            if i == mark {
+                continue; // need ≥1 [alpha/]
+            }
+            let mark = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i == mark {
+                continue; // need ≥1 [digit]
+            }
+            let mark = i;
+            while i < b.len() && alnum_or_slash(b[i]) {
+                i += 1;
+            }
+            if i > mark {
+                return true; // need ≥1 [alnum/]
+            }
+        }
+    }
+    false
 }
 
 /// A station heard on the air, with its most recent SNR estimate.
@@ -203,6 +245,11 @@ pub fn parse_rx_text(
         rx.truncate(rx.len() - 3);
     }
 
+    // fldigi's `if (trigger == NIT) { tr = ' '; insert space }` guard
+    // (fsq.cxx:571-577) forces a non-trigger leading char to a space (text line).
+    // The addressee walk above only exits with `rx[0]` being a trigger char or a
+    // space (it inserts a leading space when a word isn't a callsign), so the
+    // guard is unreachable here and `rx.first()` is already the effective trigger.
     let trigger = rx.first().map(|&c| c as char).unwrap_or(' ');
     let payload = String::from_utf8_lossy(&rx).into_owned();
 
@@ -244,6 +291,23 @@ mod tests {
         assert_eq!(valid_callsign("test", "k1abc"), 0); // no digit
         assert_eq!(valid_callsign("hi", "k1abc"), 0); // too short
         assert_eq!(valid_callsign("ve3xyz/p", "k1abc"), 8);
+        // mycall matches by exact string equality (fsq.cxx:426), so a portable
+        // suffix is a different (other) call, not our own.
+        assert_eq!(valid_callsign("k1abc/7", "k1abc"), 8);
+    }
+
+    #[test]
+    fn callsign_regex_matches_fldigi_posix_regex() {
+        // Pinned against the compiled reference regex
+        // ([[:alnum:]]?[[:alpha:]/]+[[:digit:]]+[[:alnum:]/]+), applied unanchored.
+        // The structural order (letters → digits → alnum) matters: digit-leading
+        // tokens fldigi rejects must NOT classify as a call.
+        for s in ["k1abc", "w1hkj", "ve3xyz/p", "n0call", "3a4b", "ab12cd"] {
+            assert_eq!(valid_callsign(s, ""), 8, "{s:?} should be a callsign");
+        }
+        for s in ["999z", "1a1", "1234a", "test", "hello", "aa", "1234"] {
+            assert_eq!(valid_callsign(s, ""), 0, "{s:?} should NOT be a callsign");
+        }
     }
 
     #[test]
