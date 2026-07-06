@@ -101,6 +101,7 @@ fn payload_kind(p: &FramePayload) -> &'static str {
         FramePayload::Message77(_) => "message77",
         FramePayload::Vocoder(_) => "vocoder",
         FramePayload::Image { .. } => "image",
+        FramePayload::ImageRgb { .. } => "image_rgb",
     }
 }
 

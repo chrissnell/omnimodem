@@ -591,26 +591,160 @@ pub mod demod_scottie {
         let dt = ms_to_samp(tw_ms) / 320.0;
         let mut out = [0u8; 320];
         for (x, px) in out.iter_mut().enumerate() {
-            let c = (base + (x as f64 + 0.5) * dt).round() as usize;
-            let f = freq.get(c).copied().unwrap_or(1500.0);
+            let cf = base + (x as f64 + 0.5) * dt;
+            let f = if cf < 0.0 {
+                1500.0
+            } else {
+                freq.get(cf.round() as usize).copied().unwrap_or(1500.0)
+            };
             *px = freq_to_value(f);
         }
         out
     }
 
-    /// Reconstruct one Scottie image row anchored on a line-sync centre. Channel windows
-    /// (relative to sync end at +4.5 ms): R at +1.5 ms, then next porch+G, then porch+B —
-    /// each `tw` ms wide (the emission order of `LineSCT`).
+    /// Reconstruct one Scottie image row anchored on a line-sync centre. In the `LineSCT`
+    /// emission `[porchG][G][porchB][B][sync][porchR][R]`, G and B precede the sync (same
+    /// line) and R follows it. Offsets are relative to the sync centre (sync spans ±4.5 ms):
+    /// G at −(2·tw+6), B at −(tw+4.5), R at +6, each `tw` ms wide.
     pub fn decode_line(freq: &[f32], sync_center: usize, tw_ms: f64) -> [Rgb; 320] {
-        let sync_half = 4.5; // half the 9 ms sync
-        let r = sample_channel(freq, sync_center, sync_half + 1.5, tw_ms);
-        let g = sample_channel(freq, sync_center, sync_half + 1.5 + tw_ms + 1.5, tw_ms);
-        let b = sample_channel(freq, sync_center, sync_half + 1.5 + 2.0 * tw_ms + 3.0, tw_ms);
+        let g = sample_channel(freq, sync_center, -(2.0 * tw_ms + 6.0), tw_ms);
+        let b = sample_channel(freq, sync_center, -(tw_ms + 4.5), tw_ms);
+        let r = sample_channel(freq, sync_center, 6.0, tw_ms);
         let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
         for (x, px) in row.iter_mut().enumerate() {
             *px = Rgb { r: r[x], g: g[x], b: b[x] };
         }
         row
+    }
+
+    /// Total VIS-header duration (ms) for a mode, from its `vis::header` symbols.
+    fn header_ms(mode: super::SstvMode) -> f64 {
+        super::vis::header(mode).iter().map(|s| s.ms).sum()
+    }
+
+    fn nearest(syncs: &[usize], target: i64, win: i64) -> Option<usize> {
+        syncs
+            .iter()
+            .copied()
+            .filter(|&s| (s as i64 - target).abs() <= win)
+            .min_by_key(|&s| (s as i64 - target).abs())
+    }
+
+    /// Decode a full Scottie frame from PCM to a row-major RGB raster (3 bytes/pixel).
+    /// Predicts each line sync from the header + line period and snaps to the nearest
+    /// detected sync ("predict & refine", the standard robust SSTV alignment). Returns
+    /// `(width, rgb)`; rows beyond the captured audio decode to black.
+    pub fn decode_frame(pcm: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
+        let tw = super::modulator::scottie_tw(mode)?;
+        let geom = mode.geometry();
+        let freq = discriminate(pcm);
+        let all = find_sync_centers(&freq, 6.0);
+        let period = ms_to_samp(3.0 * tw + 13.5);
+        // First line sync ≈ header end (+ Scottie's 9 ms leading sync) + 2·tw porches into
+        // the line (G,B precede the sync), + half the 9 ms sync pulse.
+        let first = ms_to_samp(header_ms(mode) + 9.0) + ms_to_samp(2.0 * tw + 7.5);
+        let win = (period * 0.3) as i64;
+        let mut rgb = Vec::with_capacity(geom.width as usize * geom.scan_lines as usize * 3);
+        for k in 0..geom.scan_lines as usize {
+            let predicted = first as i64 + (k as f64 * period) as i64;
+            let sc = nearest(&all, predicted, win).unwrap_or_else(|| predicted.max(0) as usize);
+            for px in decode_line(&freq, sc, tw) {
+                rgb.push(px.r);
+                rgb.push(px.g);
+                rgb.push(px.b);
+            }
+        }
+        Some((geom.width, rgb))
+    }
+}
+
+/// The Scottie family (`smSCT1/2/DX`) as omnimodem `Modulator` + `Demodulator`. TX takes a
+/// `FramePayload::ImageRgb` picture and renders it; RX buffers the capture and emits the
+/// reconstructed `ImageRgb` raster on flush (facsimile finalises at end-of-transmission,
+/// like Hell). Only Scottie is wired here; the other families reuse this scaffolding.
+pub mod scottie {
+    use super::modulator::{scottie_symbols, Rgb};
+    use super::{audio, demod_scottie, SstvMode, SAMPLE_RATE};
+    use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
+    use crate::types::{Frame, FrameMeta, FramePayload, Sample};
+
+    fn caps() -> ModeCaps {
+        ModeCaps {
+            native_rate: SAMPLE_RATE,
+            bandwidth_hz: 2300.0 - 1200.0,
+            tx: true,
+            duplex: Duplex::Half,
+            shape: DemodShape::Streaming,
+        }
+    }
+
+    /// Scottie transmitter: an RGB picture → SSTV audio.
+    pub struct ScottieMod {
+        mode: SstvMode,
+    }
+    impl ScottieMod {
+        pub fn new(mode: SstvMode) -> Self {
+            ScottieMod { mode }
+        }
+    }
+    impl Modulator for ScottieMod {
+        fn caps(&self) -> ModeCaps {
+            caps()
+        }
+        fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
+            let (width, rgb) = match &frame.payload {
+                FramePayload::ImageRgb { width, rgb } => (*width, rgb),
+                _ => return Err(ModError::UnsupportedPayload("sstv needs an rgb image")),
+            };
+            if width != 320 {
+                return Err(ModError::Encode(format!("scottie needs width 320, got {width}")));
+            }
+            let scan = self.mode.geometry().scan_lines as usize;
+            let n = (rgb.len() / (320 * 3)).min(scan);
+            let mut rows: Vec<[Rgb; 320]> = Vec::with_capacity(n);
+            for r in 0..n {
+                let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+                for (x, px) in row.iter_mut().enumerate() {
+                    let i = (r * 320 + x) * 3;
+                    *px = Rgb { r: rgb[i], g: rgb[i + 1], b: rgb[i + 2] };
+                }
+                rows.push(row);
+            }
+            let syms = scottie_symbols(self.mode, &rows)
+                .ok_or(ModError::Encode("not a scottie submode".into()))?;
+            Ok(audio::render(&syms, 0.5))
+        }
+    }
+
+    /// Scottie receiver: buffers the capture, emits the reconstructed `ImageRgb` on flush.
+    pub struct ScottieDemod {
+        mode: SstvMode,
+        buf: Vec<Sample>,
+    }
+    impl ScottieDemod {
+        pub fn new(mode: SstvMode) -> Self {
+            ScottieDemod { mode, buf: Vec::new() }
+        }
+    }
+    impl Demodulator for ScottieDemod {
+        fn caps(&self) -> ModeCaps {
+            caps()
+        }
+        fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
+            self.buf.extend_from_slice(samples);
+            Vec::new()
+        }
+        fn reset(&mut self) {
+            self.buf.clear();
+        }
+        fn flush(&mut self) -> Vec<Frame> {
+            let out = demod_scottie::decode_frame(&self.buf, self.mode).map(|(width, rgb)| Frame {
+                payload: FramePayload::ImageRgb { width, rgb },
+                meta: FrameMeta { decoder: Some("sstv".into()), crc_ok: true, ..Default::default() },
+            });
+            self.buf.clear();
+            out.into_iter().collect()
+        }
     }
 }
 
@@ -825,6 +959,61 @@ mod tests {
                 ok(gr, er) && ok(gg, eg) && ok(gb, eb),
                 "bar {bar} (x={x}): got ({gr},{gg},{gb}) want ~({er},{eg},{eb})"
             );
+        }
+    }
+
+    /// Full trait round-trip (T5 emission + the new `ImageRgb` payload): build a colour-bar
+    /// `ImageRgb`, run it through the Scottie `Modulator` → `Demodulator`, and confirm the
+    /// recovered raster is the right shape and its bar centres match. Exercises the colour
+    /// payload both ways end-to-end.
+    #[test]
+    fn scottie_modulator_demodulator_imagergb_roundtrip() {
+        use super::scottie::{ScottieDemod, ScottieMod};
+        use crate::mode::{Demodulator, Modulator};
+        use crate::types::{Frame, FrameMeta, FramePayload};
+
+        // 8-row colour-bar picture (each row identical; enough to prove multi-row assembly).
+        let src = colorbar_row();
+        let n_rows = 8usize;
+        let mut rgb = Vec::with_capacity(320 * n_rows * 3);
+        for _ in 0..n_rows {
+            for px in &src {
+                rgb.extend_from_slice(&[px.r, px.g, px.b]);
+            }
+        }
+        let frame = Frame {
+            payload: FramePayload::ImageRgb { width: 320, rgb },
+            meta: FrameMeta::default(),
+        };
+
+        let pcm = ScottieMod::new(SstvMode::Scottie1).modulate(&frame).unwrap();
+
+        let mut demod = ScottieDemod::new(SstvMode::Scottie1);
+        assert!(demod.feed(&pcm).is_empty(), "facsimile emits on flush, not feed");
+        let frames = demod.flush();
+        assert_eq!(frames.len(), 1);
+
+        let (w, out) = match &frames[0].payload {
+            FramePayload::ImageRgb { width, rgb } => (*width, rgb),
+            other => panic!("expected ImageRgb, got {other:?}"),
+        };
+        assert_eq!(w, 320);
+        // Scottie 1 is 320x256; rows past the 8 captured decode to black but the buffer is full-size.
+        assert_eq!(out.len(), 320 * 256 * 3);
+
+        // Verify the 8 real rows: each bar centre matches the transmitted colour.
+        let ok = |g: u8, e: u8| if e >= 128 { g >= 160 } else { g <= 95 };
+        for row in 0..n_rows {
+            for bar in 0..8 {
+                let x = bar * 40 + 20;
+                let i = (row * 320 + x) * 3;
+                let (gr, gg, gb) = (out[i], out[i + 1], out[i + 2]);
+                let (er, eg, eb) = (src[x].r, src[x].g, src[x].b);
+                assert!(
+                    ok(gr, er) && ok(gg, eg) && ok(gb, eb),
+                    "row {row} bar {bar}: got ({gr},{gg},{gb}) want ~({er},{eg},{eb})"
+                );
+            }
         }
     }
 

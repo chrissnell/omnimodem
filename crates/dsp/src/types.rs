@@ -47,6 +47,12 @@ pub enum FramePayload {
     /// luminance, one `u8` per pixel; `gray.len()` is a whole multiple of
     /// `width`, so the row count is `gray.len() / width`.
     Image { width: u16, gray: Vec<u8> },
+    /// Colour raster for the colour facsimile modes (SSTV, and later the colour
+    /// picture sub-protocols). `rgb` is row-major, **3 bytes per pixel** in R,G,B
+    /// order; `rgb.len()` is a whole multiple of `width * 3`, so the row count is
+    /// `rgb.len() / (width * 3)`. Additive sibling of `Image`; the mono facsimile
+    /// modes are unchanged.
+    ImageRgb { width: u16, rgb: Vec<u8> },
 }
 
 impl FramePayload {
@@ -74,6 +80,11 @@ impl FramePayload {
                 4u8.hash(h);
                 width.hash(h);
                 gray.hash(h);
+            }
+            FramePayload::ImageRgb { width, rgb } => {
+                5u8.hash(h);
+                width.hash(h);
+                rgb.hash(h);
             }
         }
     }
