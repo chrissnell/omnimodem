@@ -344,6 +344,46 @@ fn cw_cross_decode_doc() {
     // Cross-check CW (Morse) against fldigi's CW decoder in both directions.
 }
 
+// --- Phase-15 picture sub-protocol interop gates ------------------------------
+//
+// The CI-runnable proofs for the picture modes are the bit-exact golden-vector
+// KATs — header, RX parse table, colour plane order, and the integer quantiser,
+// each transcribed from fldigi 4.1.23 @ 61b97f413 and asserted in
+// modes::{mfsk,thor,ifkp,fsq}_pic — plus the loopback raster tolerance and the
+// raster-fidelity-vs-SNR sweep (ber.rs). The remaining live check needs a built
+// fldigi with its picture RX/TX, so it is `#[ignore]`d and documents the exact
+// bidirectional procedure, mirroring the FT8 / AFSK cross-decode gates above.
+
+#[test]
+#[ignore = "requires fldigi 4.1.23 with picture RX/TX (Phase-15 interop gate)"]
+fn picture_cross_decode_doc() {
+    // Per family (MFSK/THOR/IFKP/FSQ) at a representative size + colour:
+    //
+    // ours → fldigi:
+    //   Assemble the TX audio with the picture-send assembler, e.g.
+    //     mfsk_pic::build_tx(MfskVariant::M16, 1500.0, RasterRef{rgb,width,height},
+    //                        color, /*txspp*/8, /*reverse*/false)
+    //     thor_pic::build_tx(ThorVariant::T16, 1500.0, ThorPicSize::Small, rgb, grey, false)
+    //     ifkp_pic::build_tx(IfkpSpeed::Normal, 1500.0, IfkpPicSize::Small, rgb, grey, false)
+    //     fsq_pic::build_tx(FsqSpeed::S3, 1500.0, "n0call", FsqPicMode::Small, rgb)
+    //   Write the samples to a WAV at the mode's native rate (8000 MFSK/THOR,
+    //   16000 IFKP, 12000 FSQ). Play it into fldigi on the matching modem
+    //   (MFSK-16 / THOR-16 / IFKP / FSQ-3) with the picture RX window open: the
+    //   in-band header (`Pic:WxH` / `pic%X` / `% X`) switches fldigi into picture
+    //   RX and it must render the raster.
+    //
+    // fldigi → ours:
+    //   In fldigi, transmit the same test image on the matching modem+size to a
+    //   WAV. Feed the WAV to our text demod to recover the header (parse_header)
+    //   and to PictureCodec::decode to recover the raster; assert the raster
+    //   matches the reference within the loopback tolerance the ber.rs sweep uses
+    //   (FSQ tracks the pinned FsqLinear quantiser, ~6 counts low by design).
+    //
+    // The header / plane / quantiser bytes are already pinned bit-exact against
+    // fldigi's source in the *_pic golden vectors; this gate closes the last mile
+    // on the analog discriminator across fldigi's real synthesizer.
+}
+
 // --- Phase-4 exit criterion ---------------------------------------------------
 
 /// The CI-runnable definition of "Phase 4 done": every mode self-loopbacks and
