@@ -19,6 +19,7 @@ use omnimodem_dsp::modes::{
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     mfsk::{MfskDemod, MfskMod, MfskVariant},
+    msk144::{Msk144Demod, Msk144Mod},
     mt63::{Mt63Demod, Mt63Mod, Mt63Variant},
     navtex::{NavtexDemod, NavtexMod, NavtexVariant},
     olivia::{OliviaDemod, OliviaMod},
@@ -115,6 +116,9 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
             windowed(Box::new(Jt4Demod::new(v)))
         }
+        ModeConfig::Msk144 { freq_hz } => {
+            DemodKind::Streaming(Box::new(Msk144Demod::with_params(*freq_hz, 100.0)))
+        }
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
@@ -198,6 +202,7 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
             let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(Jt4Mod::new(v)))
         }
+        ModeConfig::Msk144 { freq_hz } => Some(Box::new(Msk144Mod::with_params(*freq_hz, 14))),
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
         }
@@ -280,6 +285,22 @@ mod tests {
         assert_eq!(ModeConfig::parse("fst4"), Some(ModeConfig::Fst4 { tr_s: 15 }));
         assert_eq!(ModeConfig::parse("fst4:tr=120"), Some(ModeConfig::Fst4 { tr_s: 120 }));
         assert_eq!(ModeConfig::Fst4 { tr_s: 60 }.to_mode_string(), "fst4:tr=60");
+    }
+
+    #[test]
+    fn msk144_is_streaming_with_a_modulator() {
+        let cfg = ModeConfig::Msk144 { freq_hz: 1500.0 };
+        assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "msk144 not streaming");
+        assert!(build_modulator(&cfg).is_some(), "no modulator for msk144");
+        assert_eq!(tx_slot_s(&cfg), None, "msk144 transmits without a time slot");
+        assert_eq!(native_rate(&cfg), Some(12_000));
+        // Parses and round-trips through the canonical mode string.
+        assert_eq!(ModeConfig::parse("msk144"), Some(ModeConfig::Msk144 { freq_hz: 1500.0 }));
+        assert_eq!(
+            ModeConfig::parse("msk144:freq=1000"),
+            Some(ModeConfig::Msk144 { freq_hz: 1000.0 })
+        );
+        assert_eq!(ModeConfig::Msk144 { freq_hz: 1500.0 }.to_mode_string(), "msk144:freq=1500");
     }
 
     #[test]
