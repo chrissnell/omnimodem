@@ -11,8 +11,10 @@
 //! sample-exact (Doctrine §3), matching the DominoEX/Olivia/PSK precedent.
 //!
 //! TX frames a message the way fldigi's `mt63::tx_process` does: `DataInterleave`
-//! leading NUL flush characters, the text, then a NUL flush tail so the
-//! interleaver drains. The streaming demod assumes symbol alignment (the
+//! leading NUL flush characters, the text, then a `DataInterleave` NUL flush
+//! tail so the encoder interleaver drains — fldigi's exact on-air length, not
+//! the receiver's extra deinterleaver delay (`flush_tail`). The streaming demod
+//! assumes symbol alignment (the
 //! ±carrier FEC-scan synchroniser/AFC is deferred with the sync tracker); the
 //! fldigi cross-decode is the `#[ignore]` nightly gate. ref: mt63.cxx:60-165.
 //!
@@ -97,11 +99,18 @@ fn caps(v: Mt63Variant) -> ModeCaps {
     }
 }
 
-/// Extra NUL symbols appended after the text so the interleaver fully drains at
-/// RX (the encoder delays a bit by up to `DataInterleave` symbols, the decoder a
-/// bit more). ref: mt63.cxx:95-99 / 109-120 (leading + trailing flush).
+/// Trailing NUL symbols appended after the text, sized to fldigi's on-air flush.
+/// The encoder's block interleaver delays each char by up to `DataInterleave`
+/// symbols, so exactly `DataInterleave` trailing NULs push the last real char
+/// out into the audio — this is fldigi's own tail (`flush = DataInterleave`
+/// NULs + `SendJam`, mt63.cxx:104-120). The *decoder's* deinterleaver adds
+/// another `DataInterleave` of delay, but that is drained by the trailing
+/// channel samples a receiver keeps processing after the carrier drops — not by
+/// keying PTT on `2·depth` of extra tone. The earlier `2·depth + 8` roughly
+/// doubled the tail, so MT63-500L (200-sample symbols, ÷8 decimation ⇒ 0.2 s
+/// each) held TX ~15 s longer than the reference. ref: mt63.cxx:95-120.
 fn flush_tail(intlv: Interleave) -> usize {
-    2 * intlv.depth() + 8
+    intlv.depth()
 }
 
 /// The framed character stream for a message: leading + trailing NUL flush.
@@ -211,7 +220,13 @@ mod tests {
 
     fn loopback(v: Mt63Variant, msg: &str) -> String {
         let mut tx = Mt63Mod::new(v, 1500.0);
-        let samples = tx.modulate(&Frame::text(msg)).unwrap();
+        let mut samples = tx.modulate(&Frame::text(msg)).unwrap();
+        // The TX tail is fldigi's on-air length (drains the *encoder*). A real
+        // receiver drains its *deinterleaver* from the channel samples that keep
+        // arriving after the carrier drops; model that here with trailing silence
+        // rather than keying extra tone. ref: flush_tail / mt63.cxx:95-120.
+        let modem = Mt63Modem::new(v.bandwidth(), v.interleave(), 1500.0);
+        samples.extend(std::iter::repeat_n(0.0f32, v.interleave().depth() * modem.sym_len + modem.win_len));
         let mut rx = Mt63Demod::new(v, 1500.0);
         // feed in irregular chunks to exercise the streaming buffer/drain
         let mut frames = Vec::new();
@@ -235,6 +250,33 @@ mod tests {
             let out = loopback(v, msg);
             assert!(out.contains(msg), "{}: got {out:?}", v.label());
         }
+    }
+
+    /// Regression: the TX flush is bounded to fldigi's on-air length — a
+    /// `DataInterleave` leading + `DataInterleave` trailing NUL frame — not the
+    /// earlier `2·depth + 8` tail, which roughly doubled MT63-500L's keyed time
+    /// (~41 s → ~27 s for two characters). Asserts the modulated length equals
+    /// the payload+flush character chain exactly, so any tail bloat regresses.
+    /// ref: flush_tail / mt63.cxx:95-120.
+    #[test]
+    fn tx_flush_is_bounded_to_fldigi_length() {
+        let msg = "CQ";
+        for &v in Mt63Variant::all() {
+            let modem = Mt63Modem::new(v.bandwidth(), v.interleave(), 1500.0);
+            let n_chars = framed(msg, v.interleave()).len();
+            let expect = n_chars * modem.sym_len + modem.win_len + modem.sym_len;
+            let samples = Mt63Mod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap().len();
+            assert_eq!(samples, expect, "{} tail length", v.label());
+        }
+        // The 500L case the user hit: two chars must stay near fldigi's floor
+        // (leading+trailing flush is intrinsic to the mode), well under the old
+        // ~41 s the `2·depth + 8` tail produced.
+        let s500l = Mt63Mod::new(Mt63Variant::B500Long, 1500.0)
+            .modulate(&Frame::text("CQ"))
+            .unwrap()
+            .len();
+        let secs = s500l as f32 / AUDIO_RATE;
+        assert!(secs < 30.0, "mt63_500l two-char TX {secs:.1}s should be ~fldigi length");
     }
 
     #[test]
