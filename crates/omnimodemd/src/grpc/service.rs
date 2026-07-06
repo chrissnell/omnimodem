@@ -50,6 +50,8 @@ impl ModemControl for ControlService {
             id: ChannelId(req.channel),
             name: req.name,
             mode,
+            rsid_tx: req.rsid_tx,
+            rsid_rx: req.rsid_rx,
             reply: tx,
         })?;
         rx.await
