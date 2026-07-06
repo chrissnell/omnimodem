@@ -316,6 +316,19 @@ fn ft8_wav_interop_doc() {
 }
 
 #[test]
+#[ignore = "requires WSJT-X jt4/jt4sim binaries (live-audio interop, beyond the byte-exact gate)"]
+fn jt4_cross_decode_doc() {
+    // The byte-exact TX gate is a plain lib unit test
+    // (modes::jt4::tests::tx_symbols_match_reference_vector), so it runs on CI
+    // without `testutil`. This remaining live check needs the WSJT-X binaries:
+    //   ours→ref:  render our `Jt4Mod` (submode A) waveform to a .wav; WSJT-X's
+    //              `jt4` decoder must recover the message.
+    //   ref→ours:  `jt4sim "K1ABC W9XYZ EN37" A 1 0 0 1 -5` → our `Jt4Demod`
+    //              (submode A) `decode_window` recovers it (exercises the exact
+    //              packjt 72-bit layout our self-consistent `pack72` does not).
+}
+
+#[test]
 #[ignore = "requires Direwolf gen_packets/atest (Phase-4 interop gate)"]
 fn afsk1200_cross_decode_doc() {
     // ours→ref:  our `Afsk1200Mod` audio (48 kHz) → `atest` must decode the
