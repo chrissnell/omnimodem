@@ -23,6 +23,7 @@ pub mod jt9;
 pub mod mfsk;
 pub mod mt63;
 pub mod olivia;
+pub mod picture;
 pub mod psk;
 pub mod psk31;
 pub mod rtty;
