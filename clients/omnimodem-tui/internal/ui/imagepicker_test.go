@@ -120,6 +120,33 @@ func TestPickerViewHasTitleAndBorder(t *testing.T) {
 	}
 }
 
+func TestPickerSkipsOversizedPreview(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "huge.png")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxPreviewBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	p := NewImagePicker(dir)
+	for p.cur() != nil && p.cur().isDir {
+		p.Update(key("down"))
+	}
+	if !p.prevTooBig {
+		t.Fatal("an oversized file should be flagged too big to preview")
+	}
+	if p.prevImg != nil {
+		t.Fatal("an oversized file must not be decoded")
+	}
+	if out := p.View(80, 16); !strings.Contains(out, "too large to preview") {
+		t.Fatalf("preview should say the file is too large:\n%s", out)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

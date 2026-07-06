@@ -103,6 +103,65 @@ func TestImageStageAndTransmit(t *testing.T) {
 	}
 }
 
+// A picture is a one-shot send: once the transmit completes, the staged slot
+// clears so a stray enter can't silently re-transmit the same file.
+func TestImageStagedClearsAfterTransmit(t *testing.T) {
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "pic.png")
+	writeTestPNG(t, pngPath)
+
+	v := imageOperateView(t, &client.Fake{})
+	v.stageImage(pngPath)
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		cmd()
+	}
+	v.Update(leaseMsg{&pb.TxLeaseResponse{Granted: true}})
+	// Daemon reports the burst finished.
+	v.Update(eventMsg{&pb.Event{Kind: &pb.Event_TransmitComplete{TransmitComplete: &pb.TransmitComplete{}}}})
+	if v.staged != nil {
+		t.Fatal("staged image should clear once its transmit completes")
+	}
+}
+
+// Staging clears any half-typed compose text, and further keystrokes don't
+// silently accumulate behind the preview.
+func TestImageStagedSuppressesComposeInput(t *testing.T) {
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "pic.png")
+	writeTestPNG(t, pngPath)
+
+	v := imageOperateView(t, &client.Fake{})
+	v.compose = "half typed"
+	v.stageImage(pngPath)
+	if v.compose != "" {
+		t.Fatalf("staging should clear compose, got %q", v.compose)
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("xyz")})
+	if v.compose != "" {
+		t.Fatalf("keystrokes while staged must not grow compose, got %q", v.compose)
+	}
+}
+
+// A file larger than the stage cap is refused rather than read/decoded whole.
+func TestImageStageRejectsOversized(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "huge.png")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxStageBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	v := imageOperateView(t, &client.Fake{})
+	v.stageImage(big)
+	if v.staged != nil {
+		t.Fatal("an oversized file must not be staged")
+	}
+}
+
 // ctrl+x clears a staged picture when idle instead of transmitting it.
 func TestImageCancelStaged(t *testing.T) {
 	dir := t.TempDir()

@@ -24,6 +24,11 @@ const (
 // imageExts are the file suffixes the picker lists and can preview.
 var imageExts = map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true}
 
+// maxPreviewBytes caps how large a file the picker will decode for its live
+// preview. Decoding runs synchronously as the cursor moves, so a very large
+// image would freeze the UI; past this we show its name/size but no thumbnail.
+const maxPreviewBytes = 8 << 20 // 8 MiB
+
 // ImagePicker is a self-contained file browser with a live truecolor preview,
 // styled as a DOS dialog. It walks the real filesystem (directories + image
 // files only), previews the highlighted image as half-block art, and reports a
@@ -37,12 +42,13 @@ type ImagePicker struct {
 	loadErr error
 
 	// preview cache for the entry under the cursor
-	prevPath string
-	prevImg  image.Image
-	prevErr  error
-	prevW    int
-	prevH    int
-	prevSize int64
+	prevPath   string
+	prevImg    image.Image
+	prevErr    error
+	prevTooBig bool
+	prevW      int
+	prevH      int
+	prevSize   int64
 
 	selected string // full path once PickerSelected fires
 }
@@ -208,6 +214,13 @@ func (p *ImagePicker) refreshPreview() {
 	}
 	p.prevPath = path
 	p.prevSize = e.size
+	p.prevImg, p.prevErr, p.prevTooBig = nil, nil, false
+	// Decode happens synchronously on the UI thread, so refuse to decode a file
+	// large enough to stall it — the operator still sees the name and size.
+	if e.size > maxPreviewBytes {
+		p.prevTooBig = true
+		return
+	}
 	img, err := DecodeImageFile(path)
 	p.prevImg, p.prevErr = img, err
 	if img != nil {
@@ -302,6 +315,10 @@ func (p *ImagePicker) renderPreview(w, h int) string {
 	if e == nil || e.isDir {
 		return center("choose an image\nto preview it", ColorDim)
 	}
+	if p.prevTooBig {
+		return center(fmt.Sprintf("%s\ntoo large to preview\n(%s)",
+			truncate(e.name, w-2), HumanSize(p.prevSize)), ColorDim)
+	}
 	if p.prevErr != nil {
 		return center("cannot preview\n"+truncate(p.prevErr.Error(), w-2), ColorError)
 	}
@@ -318,7 +335,7 @@ func (p *ImagePicker) renderPreview(w, h int) string {
 		lipgloss.WithWhitespaceBackground(ColorPanel))
 	name := lipgloss.NewStyle().Background(ColorPanel).Foreground(ColorFg).Bold(true).
 		Width(w).Align(lipgloss.Center).Render(truncate(e.name, w))
-	meta := fmt.Sprintf("%d×%d · %s", p.prevW, p.prevH, humanSize(p.prevSize))
+	meta := fmt.Sprintf("%d×%d · %s", p.prevW, p.prevH, HumanSize(p.prevSize))
 	metaLine := lipgloss.NewStyle().Background(ColorPanel).Foreground(ColorAccent).
 		Width(w).Align(lipgloss.Center).Render(meta)
 	return art + "\n" + name + "\n" + metaLine
@@ -368,7 +385,8 @@ func compactPath(path string, w int) string {
 	return "…" + string(r[len(r)-keep:])
 }
 
-func humanSize(n int64) string {
+// HumanSize formats a byte count as B / KB / MB for compact display.
+func HumanSize(n int64) string {
 	switch {
 	case n >= 1<<20:
 		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))

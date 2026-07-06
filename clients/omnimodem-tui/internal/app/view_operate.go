@@ -110,6 +110,9 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
+			// A picture is a one-shot send: once it's on the air, clear the staged
+			// slot so enter doesn't silently re-transmit the same file.
+			v.staged = nil
 			return v, releaseLeaseCmd(v.m.c, v.m.sel)
 		}
 		return v, nil
@@ -200,19 +203,21 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			}
 			return v, v.sendCompose()
 		case "f1", "f2", "f3", "f4", "f5":
-			if v.beacon || v.seq != nil {
-				return v, nil // no free-text macros on the ladder/beacon surfaces
+			if v.beacon || v.seq != nil || v.staged != nil {
+				return v, nil // no free-text macros on the ladder/beacon/staged surfaces
 			}
 			v.compose = expandMacro(macroForKey(msg.String()), macroCtx{
 				myCall: v.myCall, theirCall: v.theirCall, rst: v.rst,
 			})
 			return v, nil
 		case "backspace":
-			if n := len(v.compose); n > 0 {
-				v.compose = v.compose[:n-1]
+			if v.staged == nil && len(v.compose) > 0 {
+				v.compose = v.compose[:len(v.compose)-1]
 			}
 		default:
-			if v.seq == nil && !v.beacon && len(msg.Runes) > 0 {
+			// While a picture is staged the compose line is hidden behind its
+			// preview, so swallow text input rather than growing it invisibly.
+			if v.seq == nil && !v.beacon && v.staged == nil && len(msg.Runes) > 0 {
 				v.compose += string(msg.Runes)
 			}
 		}
@@ -295,10 +300,21 @@ func pickerStartDir() string {
 	return "."
 }
 
+// maxStageBytes caps the file we'll read into memory to stage. Facsimile
+// pictures are tiny (kilobytes), so anything past a few MB is a mistaken pick;
+// refusing it keeps a huge file from being read (and later decoded) whole on the
+// synchronous UI thread.
+const maxStageBytes = 8 << 20 // 8 MiB
+
 // stageImage loads a chosen file into the staging slot: it reads the raw bytes
 // for TX and decodes the image for the on-screen preview. Failures leave any
 // previously staged image untouched and surface a toast.
 func (v *operateView) stageImage(path string) {
+	if fi, err := os.Stat(path); err == nil && fi.Size() > maxStageBytes {
+		v.m.toast = ui.NewToast(fmt.Sprintf("Image too large (%s, max %s)",
+			ui.HumanSize(fi.Size()), ui.HumanSize(maxStageBytes)), ui.SeverityError)
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		v.m.toast = ui.NewToast("Cannot read image: "+err.Error(), ui.SeverityError)
@@ -311,10 +327,18 @@ func (v *operateView) stageImage(path string) {
 	}
 	b := img.Bounds()
 	v.staged = &stagedImage{name: filepath.Base(path), bytes: data, img: img, w: b.Dx(), h: b.Dy()}
+	v.compose = "" // the preview replaces the compose line; drop any half-typed text
 	v.m.toast = ui.NewToast(fmt.Sprintf("Staged %s — enter to transmit", v.staged.name), ui.SeverityInfo)
 }
 
 // sendImage transmits the staged picture over the current picture-capable mode.
+//
+// TODO(GRA-291/GRA-290): this hands the raw on-disk file bytes (PNG/JPEG/GIF
+// container and all) to Transmit. The daemon's picture encoder (GRA-290) is
+// still a text-only stub, so until it lands and defines the on-air payload
+// format, nothing recognisable goes out — the daemon rejects the non-text
+// payload and the operator sees the RPC error. Revisit the payload shape (raw
+// file vs. decoded luminance/RGB raster) when wiring up GRA-290.
 func (v *operateView) sendImage() tea.Cmd {
 	if v.tx.active() || v.staged == nil {
 		return nil
@@ -426,7 +450,7 @@ func (v *operateView) Render(w, h int) string {
 			strings.ToUpper(v.modeLabel), len(v.raster.cols)))
 		b.WriteString(v.raster.render(w) + "\n\n")
 		if v.staged != nil {
-			b.WriteString(v.stagedPreview(w))
+			b.WriteString(v.stagedPreview(w, h))
 			return b.String()
 		}
 		b.WriteString("› " + v.compose)
@@ -449,15 +473,26 @@ func (v *operateView) Render(w, h int) string {
 
 // stagedPreview draws the chosen picture (half-block thumbnail) with its name,
 // dimensions, and the transmit/replace hints — the "preview before TX" surface.
-func (v *operateView) stagedPreview(w int) string {
+// It sizes the thumbnail to the space left below the raster (h) so it can't
+// overrun the frame on a short terminal.
+func (v *operateView) stagedPreview(w, h int) string {
 	s := v.staged
 	previewCols := w
 	if previewCols > 56 {
 		previewCols = 56
 	}
-	art := ui.RenderImageHalfBlock(s.img, previewCols, 10)
+	// Leave room for the header, the blank spacers, and the hint line; clamp to a
+	// sane band so tiny frames still show something and tall ones don't sprawl.
+	previewRows := h - 6
+	if previewRows < 3 {
+		previewRows = 3
+	}
+	if previewRows > 12 {
+		previewRows = 12
+	}
+	art := ui.RenderImageHalfBlock(s.img, previewCols, previewRows)
 	header := ui.Title.Render("Ready to send: ") +
-		ui.Accent.Render(fmt.Sprintf("%s  %d×%d  %s", s.name, s.w, s.h, humanBytes(len(s.bytes))))
+		ui.Accent.Render(fmt.Sprintf("%s  %d×%d  %s", s.name, s.w, s.h, ui.HumanSize(int64(len(s.bytes)))))
 	var b strings.Builder
 	b.WriteString(header + "\n\n")
 	b.WriteString(art + "\n\n")
@@ -467,18 +502,6 @@ func (v *operateView) stagedPreview(w int) string {
 		b.WriteString(ui.Dim.Render("‹enter› transmit   ‹ctrl+o› choose another   ‹ctrl+x› cancel"))
 	}
 	return b.String()
-}
-
-// humanBytes formats a byte count for the staged-picture footer.
-func humanBytes(n int) string {
-	switch {
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", n)
-	}
 }
 
 func (v *operateView) Title() string {
