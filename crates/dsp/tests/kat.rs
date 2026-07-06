@@ -828,6 +828,178 @@ fn dominoex_submode_grid_loopback_and_awgn() {
     }
 }
 
+/// Extract every signed integer from a text fragment, in order. Used to read the
+/// compact JSON-line reference vectors without a serde dependency.
+fn kat_ints(s: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let neg = b[i] == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit();
+        if b[i].is_ascii_digit() || neg {
+            let start = i;
+            if neg {
+                i += 1;
+            }
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            out.push(s[start..i].parse().unwrap());
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The value of a *flat* integer array field `"<key>":[ ... ]` on a JSON line
+/// (stops at the first `]`).
+fn kat_arr(line: &str, key: &str) -> Vec<i64> {
+    let k = format!("\"{key}\":[");
+    let i = line.find(&k).unwrap() + k.len();
+    let j = line[i..].find(']').unwrap() + i;
+    kat_ints(&line[i..j])
+}
+
+/// Every integer in the (possibly nested) `"rows":[ ... ]` field — the outer
+/// array runs to the last `]` on the line, and bracket punctuation is ignored.
+fn kat_rows(line: &str) -> Vec<i64> {
+    let k = "\"rows\":[";
+    let i = line.find(k).unwrap() + k.len();
+    let j = line.rfind(']').unwrap();
+    kat_ints(&line[i..j])
+}
+
+/// Bit-exact: omnimodem's IFKP and FSQ varicode tables, IFK tone streams, and
+/// FSQ CRC8 reproduce fldigi's byte-for-byte. Provenance:
+/// `tests/vectors/{ifkp,fsq}_varicode.json` (drivers
+/// `scratch/refvectors/build_{ifkp,fsq}_varicode.sh`).
+#[test]
+fn ifkp_and_fsq_varicode_match_fldigi_vector() {
+    use omnimodem_dsp::framing::fsq_varicode::{self, FSQ_VARICODE, WSQ_VARIDECODE};
+    use omnimodem_dsp::framing::ifkp_varicode::{IFKP_VARICODE, IFKP_VARIDECODE};
+    use omnimodem_dsp::modes::{fsq, ifkp};
+
+    // --- IFKP ---
+    let raw = include_str!("vectors/ifkp_varicode.json");
+    let line = |name: &str| raw.lines().find(|l| l.contains(name)).expect(name);
+
+    let enc = kat_rows(line("\"ifkp_varicode\""));
+    let flat: Vec<i64> = IFKP_VARICODE.iter().flat_map(|r| [r[0] as i64, r[1] as i64]).collect();
+    assert_eq!(enc, flat, "ifkp_varicode encode table");
+
+    let dec = kat_rows(line("\"ifkp_varidecode\""));
+    let want_dec: Vec<i64> = IFKP_VARIDECODE.iter().map(|&v| v as i64).collect();
+    assert_eq!(dec, want_dec, "ifkp_varidecode table");
+
+    for msg in ["hello world", "CQ CQ CQ de K1ABC", "The quick brown fox 0123456789!"] {
+        let l = line(&format!("\"msg\":\"{msg}\""));
+        let want_syms: Vec<u8> = kat_arr(l, "syms").iter().map(|&v| v as u8).collect();
+        let want_tones: Vec<u32> = kat_arr(l, "tones").iter().map(|&v| v as u32).collect();
+        assert_eq!(ifkp::text_syms(msg), want_syms, "ifkp {msg:?} syms");
+        assert_eq!(ifkp::text_tones(msg), want_tones, "ifkp {msg:?} tones");
+    }
+
+    // --- FSQ ---
+    let raw = include_str!("vectors/fsq_varicode.json");
+    let line = |name: &str| raw.lines().find(|l| l.contains(name)).expect(name);
+
+    let enc = kat_rows(line("\"fsq_varicode\""));
+    let flat: Vec<i64> = FSQ_VARICODE.iter().flat_map(|r| [r[0] as i64, r[1] as i64]).collect();
+    assert_eq!(enc, flat, "fsq_varicode encode table");
+
+    let dec = kat_rows(line("\"wsq_varidecode\""));
+    let want_dec: Vec<i64> = WSQ_VARIDECODE.iter().map(|&v| v as i64).collect();
+    assert_eq!(dec, want_dec, "wsq_varidecode table");
+
+    // CRC8 rows: {"s":"<call>","crc":"<hex>"}.
+    let crc_line = line("\"crc8\"");
+    for pair in crc_line.split("{\"s\":\"").skip(1) {
+        let call = &pair[..pair.find('"').unwrap()];
+        let ci = pair.find("\"crc\":\"").unwrap() + 7;
+        let crc = &pair[ci..ci + 2];
+        assert_eq!(fsq_varicode::crc8_hex(call), crc, "crc8({call})");
+    }
+
+    // Frame tone streams: the plain-text frame and the full directed frame.
+    let l = line("\"frame\":\"text\"");
+    let want_tones: Vec<u32> = kat_arr(l, "tones").iter().map(|&v| v as u32).collect();
+    assert_eq!(fsq::raw_tones("the quick brown fox de w1hkj"), want_tones, "fsq text tones");
+
+    let l = line("\"frame\":\"directed\"");
+    let want_tones: Vec<u32> = kat_arr(l, "tones").iter().map(|&v| v as u32).collect();
+    let onair = fsq::build_tx("w1hkj", "k1abc test", true);
+    assert_eq!(fsq::raw_tones(&onair), want_tones, "fsq directed tones");
+}
+
+/// IFKP and FSQ recover a fixed message across every speed at high SNR and under
+/// mild AWGN. (Loopback is necessary-not-sufficient per Doctrine §5; the
+/// bidirectional cross-decode is the `#[ignore]` gate below.)
+#[test]
+fn ifkp_fsq_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::fsq::{FsqDemod, FsqMod, FsqSpeed};
+    use omnimodem_dsp::modes::ifkp::{IfkpDemod, IfkpMod, IfkpSpeed};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ CQ de K1ABC/7 73";
+    for (i, &sp) in IfkpSpeed::all().iter().enumerate() {
+        let clean = IfkpMod::new(sp, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = IfkpDemod::new(sp, 1500.0);
+        let mut f = rx.feed(&clean);
+        f.extend(rx.flush());
+        assert_eq!(texts(&f), msg, "ifkp {} clean", sp.label());
+
+        let mut noisy = IfkpMod::new(sp, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x1F00 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        let mut rx = IfkpDemod::new(sp, 1500.0);
+        let mut f = rx.feed(&noisy);
+        f.extend(rx.flush());
+        assert_eq!(texts(&f), msg, "ifkp {} AWGN", sp.label());
+    }
+
+    // FSQ raw-keyboard loopback (no directed header); the monitor stream carries
+    // the body verbatim (FSQ prepends its faithful leading-space seed).
+    for (i, &sp) in FsqSpeed::all().iter().enumerate() {
+        let clean = FsqMod::new(sp, 1500.0, "", false).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = FsqDemod::new(sp, 1500.0, "");
+        let mut f = rx.feed(&clean);
+        f.extend(rx.flush());
+        assert!(texts(&f).contains(msg), "fsq {} clean", sp.label());
+
+        let mut noisy = FsqMod::new(sp, 1500.0, "", false).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xF500 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        let mut rx = FsqDemod::new(sp, 1500.0, "");
+        let mut f = rx.feed(&noisy);
+        f.extend(rx.flush());
+        assert!(texts(&f).contains(msg), "fsq {} AWGN", sp.label());
+    }
+}
+
+/// Bidirectional cross-decode against the fldigi `fldigi` CLI — the decisive
+/// interop gate (Doctrine §5). `#[ignore]`d because it needs the reference binary
+/// on `PATH` (env `FLDIGI_BIN`), mirroring the FT8 gate: our IFKP/FSQ TX must
+/// decode in fldigi and fldigi's TX must decode in ours, at the same audio
+/// offset. Enable once a headless fldigi build is wired into CI.
+#[test]
+#[ignore]
+fn ifkp_fsq_cross_decode_fldigi() {
+    // Placeholder for the reference-binary interop gate; see the module header
+    // and Doctrine §5. Left intentionally empty until FLDIGI_BIN is provisioned.
+}
+
 /// Bit-exact: omnimodem's THOR TX chain (THOR varicode → convolutional FEC →
 /// size-4 interleave → IFK+) reproduces fldigi's stage intermediates byte-for-
 /// byte, for both the K=7 (THOR16) and K=15 (THOR100) paths, plus the secondary

@@ -9,7 +9,9 @@ use omnimodem_dsp::mode::{BlockDemodulator, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
     cw::{CwDemod, CwMod},
+    fsq::{FsqDemod, FsqMod, FsqSpeed},
     ft8::{Ft8Demod, Ft8Mod, FT8_RATE, FT8_WINDOW_S},
+    ifkp::{IfkpDemod, IfkpMod, IfkpSpeed},
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
 };
@@ -110,6 +112,49 @@ fn ft8_decode_rate() {
     });
     eprintln!("FT8 decode rate @ sigma=0.30: {rate}");
     assert!(rate >= 0.85, "FT8 decode rate {rate} below floor 0.85");
+}
+
+/// Concatenate the per-character text frames a streaming keyboard demod emits.
+fn joined(frames: &[Frame]) -> String {
+    frames
+        .iter()
+        .filter_map(|f| match &f.payload {
+            FramePayload::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn ifkp_decode_rate() {
+    let msg = "CQ DE K1ABC";
+    let rate = decode_rate(20, |seed| {
+        let mut s = IfkpMod::new(IfkpSpeed::Normal, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x1F00 + seed as u64);
+        add_awgn(&mut s, 0.03, &mut rng);
+        let mut rx = IfkpDemod::new(IfkpSpeed::Normal, 1500.0);
+        let mut f = rx.feed(&s);
+        f.extend(rx.flush());
+        joined(&f).contains(msg)
+    });
+    eprintln!("IFKP decode rate @ sigma=0.03: {rate}");
+    assert!(rate >= 0.85, "IFKP decode rate {rate} below floor 0.85");
+}
+
+#[test]
+fn fsq_decode_rate() {
+    let msg = "CQ DE K1ABC";
+    let rate = decode_rate(20, |seed| {
+        let mut s = FsqMod::new(FsqSpeed::S3, 1500.0, "", false).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xF500 + seed as u64);
+        add_awgn(&mut s, 0.03, &mut rng);
+        let mut rx = FsqDemod::new(FsqSpeed::S3, 1500.0, "");
+        let mut f = rx.feed(&s);
+        f.extend(rx.flush());
+        joined(&f).contains(msg)
+    });
+    eprintln!("FSQ decode rate @ sigma=0.03: {rate}");
+    assert!(rate >= 0.85, "FSQ decode rate {rate} below floor 0.85");
 }
 
 /// Channel simulators, not just AWGN (design §"Channel simulators"): the modes
