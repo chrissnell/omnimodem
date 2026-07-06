@@ -351,10 +351,125 @@ pub mod vis {
     }
 }
 
+/// TX modulator symbol layer (plan T4): builds the exact `(freq_hz, ms)` write sequence a
+/// picture produces — the **bit-exact** symbol domain, before the FP tone renderer. Each
+/// family's line layout is transcribed from the reference `TMmsstv::LineXXX` with `// ref:`
+/// cites; audio rendering (VCO) is a later, FP-tolerance stage.
+pub mod modulator {
+    use super::vis::{header, Symbol};
+    use super::SstvMode;
+
+    /// A source pixel, channels 0–255. Matches the reference `COLD.b` byte order (r low).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Rgb {
+        pub r: u8,
+        pub g: u8,
+        pub b: u8,
+    }
+
+    /// Pixel luminance → scan frequency, integer-exact. ref: ComLib.cpp:3491 `ColorToFreq`:
+    /// `d = d*(2300-1500)/256; return d + 1500;` (black 1500 Hz → white 2300 Hz).
+    pub fn color_to_freq(v: u8) -> u16 {
+        ((v as i32) * (2300 - 1500) / 256 + 1500) as u16
+    }
+
+    /// Per-line total scan window `tw` (ms) for the Scottie submodes. ref: Main.cpp:6620-6626
+    /// (`LineSCT(mp, 138.24 / 88.064 / 345.6)`).
+    pub fn scottie_tw(mode: SstvMode) -> Option<f64> {
+        use SstvMode::*;
+        match mode {
+            Scottie1 => Some(138.24),
+            Scottie2 => Some(88.064),
+            ScottieDx => Some(345.6),
+            _ => None,
+        }
+    }
+
+    // The channel-tag flag bits the reference ORs into the porch/pixel frequency to select
+    // per-channel TX gain in CSSTVMOD::Do. ref: Main.cpp:6173 LineSCT.
+    const TAG_R: u16 = 0x1000;
+    const TAG_G: u16 = 0x2000;
+    const TAG_B: u16 = 0x3000;
+
+    /// One Scottie scan line for a 320-pixel row. ref: Main.cpp:6173 `TMmsstv::LineSCT`:
+    /// porch(G) · G · sep(B) · B · sync · sep(R) · R, channels tagged, pixels at `tw/320`.
+    pub fn scottie_line(out: &mut Vec<Symbol>, row: &[Rgb; 320], tw: f64) {
+        let dt = tw / 320.0;
+        out.push(Symbol { freq_hz: 1500 + TAG_G, ms: 1.5 });
+        for p in row.iter() {
+            out.push(Symbol { freq_hz: color_to_freq(p.g) + TAG_G, ms: dt });
+        }
+        out.push(Symbol { freq_hz: 1500 + TAG_B, ms: 1.5 });
+        for p in row.iter() {
+            out.push(Symbol { freq_hz: color_to_freq(p.b) + TAG_B, ms: dt });
+        }
+        out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        out.push(Symbol { freq_hz: 1500 + TAG_R, ms: 1.5 });
+        for p in row.iter() {
+            out.push(Symbol { freq_hz: color_to_freq(p.r) + TAG_R, ms: dt });
+        }
+    }
+
+    /// Full Scottie transmission: VIS header, then one `scottie_line` per image row, then the
+    /// Scottie leading 1200 Hz/9 ms sync (ref: Main.cpp:7124). `rows` supplies each scan
+    /// line's 320 pixels. Bit-exact against the golden harness symbol digest.
+    pub fn scottie_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
+        let tw = scottie_tw(mode)?;
+        let mut out = header(mode);
+        for row in rows {
+            scottie_line(&mut out, row, tw);
+        }
+        out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        Some(out)
+    }
+
+    /// FNV-1a over a symbol stream, each symbol serialized as `freq(i32 LE) ++ ms(f64 LE
+    /// bits)`. Byte-identical to the harness `symbol_digest` (sstv_tx_dump.cxx) for a
+    /// bit-exact TX gate.
+    pub fn symbol_digest(syms: &[Symbol]) -> u64 {
+        let mut h: u64 = 1469598103934665603;
+        let byte = |b: u8, h: &mut u64| {
+            *h ^= b as u64;
+            *h = h.wrapping_mul(1099511628211);
+        };
+        for s in syms {
+            for b in (s.freq_hz as i32).to_le_bytes() {
+                byte(b, &mut h);
+            }
+            for b in s.ms.to_le_bytes() {
+                byte(b, &mut h);
+            }
+        }
+        h
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::modulator::{color_to_freq, scottie_symbols, symbol_digest, Rgb};
     use super::vis::{header, Symbol};
     use super::*;
+
+    // The harness test image: 8 vertical colour bars across 320 px (ref: sstv_tx_dump.cxx
+    // kBars, packed 0x00BBGGRR). Reproduced here so the Rust modulator hashes the same input.
+    fn colorbar_row() -> [Rgb; 320] {
+        // kBars as (r,g,b): black,red,green,yellow,blue,magenta,cyan,white.
+        const BARS: [Rgb; 8] = [
+            Rgb { r: 0x00, g: 0x00, b: 0x00 },
+            Rgb { r: 0xFF, g: 0x00, b: 0x00 },
+            Rgb { r: 0x00, g: 0xFF, b: 0x00 },
+            Rgb { r: 0xFF, g: 0xFF, b: 0x00 },
+            Rgb { r: 0x00, g: 0x00, b: 0xFF },
+            Rgb { r: 0xFF, g: 0x00, b: 0xFF },
+            Rgb { r: 0x00, g: 0xFF, b: 0xFF },
+            Rgb { r: 0xFF, g: 0xFF, b: 0xFF },
+        ];
+        let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+        for (x, px) in row.iter_mut().enumerate() {
+            *px = BARS[(x * 8) / 320];
+        }
+        row
+    }
 
     #[test]
     fn all_modes_have_unique_labels_and_roundtrip() {
@@ -438,6 +553,43 @@ mod tests {
         let d2 = &h[3 + 12..3 + 18];
         let d2_tones: Vec<u16> = d2.iter().map(|s| s.freq_hz).collect();
         assert_eq!(d2_tones, vec![2100, 2100, 2100, 2100, 1900, 2100]);
+    }
+
+    #[test]
+    fn color_to_freq_matches_reference() {
+        // ref: ComLib.cpp:3491. Black→1500, white→2296 (255*800/256+1500), mid→1898.
+        assert_eq!(color_to_freq(0), 1500);
+        assert_eq!(color_to_freq(255), 2296);
+        assert_eq!(color_to_freq(128), 1900);
+    }
+
+    /// The decisive bit-exact TX gate: the Scottie 1 modulator's FULL symbol stream (VIS +
+    /// 4 colour-bar lines + trailing sync) must hash identically to the golden vector
+    /// produced by the isolated MMSSTV harness (`sstv_scottie1_tx.json`, `symbol_fnv1a`).
+    #[test]
+    fn scottie1_full_symbol_stream_matches_golden_digest() {
+        let row = colorbar_row();
+        let rows = [row; 4]; // harness nlines = 4
+        let syms = scottie_symbols(SstvMode::Scottie1, &rows).unwrap();
+
+        // Structure: VIS(13) + 4*(964) + trailing sync(1) = 3870 (harness symbol_count).
+        assert_eq!(syms.len(), 3870);
+
+        // Bit-exact digest, matching the harness value in sstv_scottie1_tx.json.
+        const GOLDEN_SYMBOL_FNV1A: u64 = 0x2f8bedaff9db0041;
+        assert_eq!(symbol_digest(&syms), GOLDEN_SYMBOL_FNV1A);
+    }
+
+    #[test]
+    fn scottie_line_channel_order_and_tags() {
+        // Sanity on the transcribed layout: first line symbol is the green porch (1500+0x2000),
+        // and the sync pulse (1200/9) precedes the red channel.
+        let rows = [colorbar_row(); 1];
+        let syms = scottie_symbols(SstvMode::Scottie1, &rows).unwrap();
+        let line0 = &syms[13..]; // after the 13-symbol VIS header
+        assert_eq!(line0[0], Symbol { freq_hz: 1500 + 0x2000, ms: 1.5 });
+        // porch + 320 G + sepB + 320 B = index 642 is the 1200/9 sync.
+        assert_eq!(line0[1 + 320 + 1 + 320], Symbol { freq_hz: 1200, ms: 9.0 });
     }
 
     #[test]

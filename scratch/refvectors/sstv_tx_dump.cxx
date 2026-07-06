@@ -94,6 +94,20 @@ static uint64_t fnv1a(const std::vector<short>& v) {
     return h;
 }
 
+// FNV-1a over the FULL symbol sequence: each Sym as freq(int32 LE) ++ ms(f64 LE bits).
+// The Rust modulator hashes its symbol stream identically for a bit-exact TX gate.
+static void fnv_byte(uint64_t& h, uint8_t b) { h ^= b; h *= 1099511628211ULL; }
+static uint64_t symbol_digest(const std::vector<Sym>& s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (const Sym& x : s) {
+        int32_t f = x.fq; uint8_t fb[4]; std::memcpy(fb, &f, 4);
+        for (int i = 0; i < 4; i++) fnv_byte(h, fb[i]);
+        double m = x.ms; uint8_t mb[8]; std::memcpy(mb, &m, 8);
+        for (int i = 0; i < 8; i++) fnv_byte(h, mb[i]);
+    }
+    return h;
+}
+
 int main() {
     const int mode = smSCT1;      // Scottie 1
     const int visCode = 0x3c;     // ref: Main.cpp:6997
@@ -136,7 +150,8 @@ int main() {
     printf("  },\n");
     printf("  \"timing_samples\": { \"m_KS\": %.4f, \"m_OF\": %.4f, \"m_OFP\": %.4f, \"m_SG\": %.4f, \"m_CG\": %.4f, \"m_SB\": %.4f, \"m_CB\": %.4f, \"m_L\": %d, \"m_TxSampFreq\": %.4f },\n",
            SSTVSET.m_KS, SSTVSET.m_OF, SSTVSET.m_OFP, SSTVSET.m_SG, SSTVSET.m_CG, SSTVSET.m_SB, SSTVSET.m_CB, SSTVSET.m_L, SSTVSET.m_TxSampFreq);
-    printf("  \"symbol_count\": %zu,\n", g_syms.size());
+    printf("  \"symbol_count\": %zu, \"nlines\": %d, \"symbol_fnv1a\": \"0x%016llx\",\n",
+           g_syms.size(), nLines, (unsigned long long)symbol_digest(g_syms));
     printf("  \"vis_symbols\": [");
     for (size_t i = 0; i < 22 && i < g_syms.size(); i++) printf("%s[%d,%.4f]", i?",":"", g_syms[i].fq, g_syms[i].ms);
     printf("],\n");
