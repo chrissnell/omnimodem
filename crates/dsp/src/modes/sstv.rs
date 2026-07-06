@@ -474,6 +474,69 @@ pub mod modulator {
         Some(out)
     }
 
+    /// RGB → (Y, R-Y, B-Y), each 0–255, verbatim from `GetRY` (ref: ComLib.cpp:3650,
+    /// active `#else` branch). Y ≈ 16..235, R-Y/B-Y centred at 128, then clamped 0–255.
+    pub fn get_ry(px: Rgb) -> (u8, u8, u8) {
+        let (r, g, b) = (px.r as f64, px.g as f64, px.b as f64);
+        let y = 16.0 + (0.256773 * r + 0.504097 * g + 0.097900 * b);
+        let ry = 128.0 + (0.439187 * r - 0.367766 * g - 0.071421 * b);
+        let by = 128.0 + (-0.148213 * r - 0.290974 * g + 0.439187 * b);
+        let c = |v: f64| v.clamp(0.0, 255.0) as u8;
+        (c(y), c(ry), c(by))
+    }
+
+    /// One Robot 72 scan line. ref: Main.cpp:6134 `LineR72`:
+    /// sync·porch·Y(138 ms)·sep·mark·R-Y(69 ms)·sep·mark·B-Y(69 ms). No channel tags; the
+    /// colour channels are half the Y time. R-Y separator is 1500 Hz, B-Y separator 2300 Hz.
+    pub fn robot72_line(out: &mut Vec<Symbol>, row: &[Rgb; 320]) {
+        let mut y = [0u8; 320];
+        let mut ry = [0u8; 320];
+        let mut by = [0u8; 320];
+        for (x, p) in row.iter().enumerate() {
+            let (yy, r, b) = get_ry(*p);
+            y[x] = yy;
+            ry[x] = r;
+            by[x] = b;
+        }
+        out.push(Symbol { freq_hz: 1200, ms: 9.0 });
+        out.push(Symbol { freq_hz: 1500, ms: 3.0 });
+        pixels(out, y.iter().copied(), 0, 138.0 / 320.0);
+        out.push(Symbol { freq_hz: 1500, ms: 4.5 });
+        out.push(Symbol { freq_hz: 1900, ms: 1.5 });
+        pixels(out, ry.iter().copied(), 0, 69.0 / 320.0);
+        out.push(Symbol { freq_hz: 2300, ms: 4.5 });
+        out.push(Symbol { freq_hz: 1900, ms: 1.5 });
+        pixels(out, by.iter().copied(), 0, 69.0 / 320.0);
+    }
+
+    /// Whether the colour-difference (Y/R-Y/B-Y) modes wired here support `mode`. Currently
+    /// Robot 72 only; the rest of the Robot/PD/MP/MR families follow.
+    pub fn robot_supported(mode: SstvMode) -> bool {
+        mode == SstvMode::Robot72
+    }
+
+    /// Full colour-difference transmission (Robot family). VIS header, then one line per row.
+    pub fn robot_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
+        if !robot_supported(mode) {
+            return None;
+        }
+        let mut out = header(mode);
+        for row in rows {
+            robot72_line(&mut out, row);
+        }
+        Some(out)
+    }
+
+    /// Any wired analog line-scan mode → its symbol stream (RGB-sequential or Robot).
+    pub fn line_symbols(mode: SstvMode, rows: &[[Rgb; 320]]) -> Option<Vec<Symbol>> {
+        rgb_symbols(mode, rows).or_else(|| robot_symbols(mode, rows))
+    }
+
+    /// Whether this mode is wired end-to-end here (for the daemon/TUI to expose).
+    pub fn wired(mode: SstvMode) -> bool {
+        rgb_params(mode).is_some() || robot_supported(mode)
+    }
+
     /// FNV-1a over a symbol stream, each symbol serialized as `freq(i32 LE) ++ ms(f64 LE
     /// bits)`. Byte-identical to the harness `symbol_digest` (sstv_tx_dump.cxx) for a
     /// bit-exact TX gate.
@@ -733,35 +796,109 @@ pub mod demod {
     // than their audio-timeline predictions; add it to the prediction fallback.
     const DISC_GROUP_DELAY: i64 = 15;
 
-    /// Decode a full RGB-sequential frame from PCM to a row-major RGB raster (3 bytes/pixel).
-    /// Predicts each line sync from the header + line period and snaps to the nearest
-    /// detected sync ("predict & refine", the standard robust SSTV alignment). Returns
-    /// `(width, rgb)`; rows beyond the captured audio decode to black.
-    pub fn decode_frame(pcm: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
-        let lay = layout(mode)?;
+    /// Y/R-Y/B-Y → RGB, verbatim from `YCtoRGB` (ref: ComLib.cpp:3475). `ry`/`by` are the
+    /// colour-difference values **centred at 0** (the RX subtracts the 128 offset before this).
+    pub fn yc_to_rgb(y: i32, ry: i32, by: i32) -> Rgb {
+        let yy = (y - 16) as f64;
+        let (ry, by) = (ry as f64, by as f64);
+        let c = |v: f64| v.clamp(0.0, 255.0) as u8;
+        Rgb {
+            r: c(1.164457 * yy + 1.596128 * ry),
+            g: c(1.164457 * yy - 0.813022 * ry - 0.391786 * by),
+            b: c(1.164457 * yy + 2.017364 * by),
+        }
+    }
+
+    /// Colour-difference (Robot) RX geometry: Y and the two half-width colour channels, each
+    /// `(start ms, width ms)` relative to a line-sync centre.
+    struct YcLayout {
+        min_sync_ms: f64,
+        period_ms: f64,
+        first_sync_ms: f64,
+        y: (f64, f64),
+        ry: (f64, f64),
+        by: (f64, f64),
+    }
+
+    fn robot_layout(mode: super::SstvMode) -> Option<YcLayout> {
+        let header = header_ms(mode);
+        match mode {
+            // ref: LineR72 Main.cpp:6134. sync(9)·porch(3)·Y(138)·sep(4.5)·mark(1.5)·
+            // R-Y(69)·sep(4.5)·mark(1.5)·B-Y(69). Offsets from the sync centre (+4.5).
+            super::SstvMode::Robot72 => Some(YcLayout {
+                min_sync_ms: 6.0,
+                period_ms: 300.0,
+                first_sync_ms: header + 4.5,
+                y: (7.5, 138.0),
+                ry: (151.5, 69.0),
+                by: (226.5, 69.0),
+            }),
+            _ => None,
+        }
+    }
+
+    fn decode_line_yc(freq: &[f32], sync_center: usize, lay: &YcLayout) -> [Rgb; 320] {
+        let y = sample_channel(freq, sync_center, lay.y.0, lay.y.1);
+        let ry = sample_channel(freq, sync_center, lay.ry.0, lay.ry.1);
+        let by = sample_channel(freq, sync_center, lay.by.0, lay.by.1);
+        let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+        for (x, px) in row.iter_mut().enumerate() {
+            *px = yc_to_rgb(y[x] as i32, ry[x] as i32 - 128, by[x] as i32 - 128);
+        }
+        row
+    }
+
+    /// Shared "predict & refine" frame loop: for each scan line, predict its sync from the
+    /// header + line period, snap to the nearest detected sync (rejecting the VIS region so
+    /// the merged VIS-stop/first-sync pulse doesn't mislead line 0), and call `decode`.
+    fn run_frame(
+        freq: &[f32],
+        mode: super::SstvMode,
+        min_sync_ms: f64,
+        period_ms: f64,
+        first_ms: f64,
+        mut decode: impl FnMut(&[f32], usize) -> [Rgb; 320],
+    ) -> (u16, Vec<u8>) {
         let geom = mode.geometry();
-        let freq = discriminate(pcm);
-        // Only consider line syncs in the image region: the VIS stop pulse (1200/30 ms) abuts
-        // the first line sync for Martin/SC2, merging into one run whose centre is off — so
-        // reject any detected sync before the header ends and let line 0 fall back to
-        // prediction. ref: the VIS→image transition, Main.cpp:6975-7124.
         let header_end = ms_to_samp(header_ms(mode)) as i64;
         let all: Vec<usize> =
-            find_sync_centers(&freq, lay.min_sync_ms).into_iter().filter(|&s| s as i64 >= header_end).collect();
-        let period = ms_to_samp(lay.period_ms);
-        let first = ms_to_samp(lay.first_sync_ms) as i64 + DISC_GROUP_DELAY;
+            find_sync_centers(freq, min_sync_ms).into_iter().filter(|&s| s as i64 >= header_end).collect();
+        let period = ms_to_samp(period_ms);
+        let first = ms_to_samp(first_ms) as i64 + DISC_GROUP_DELAY;
         let win = (period * 0.3) as i64;
         let mut rgb = Vec::with_capacity(geom.width as usize * geom.scan_lines as usize * 3);
         for k in 0..geom.scan_lines as usize {
             let predicted = first + (k as f64 * period) as i64;
             let sc = nearest(&all, predicted, win).unwrap_or_else(|| predicted.max(0) as usize);
-            for px in decode_line(&freq, sc, &lay) {
+            for px in decode(freq, sc) {
                 rgb.push(px.r);
                 rgb.push(px.g);
                 rgb.push(px.b);
             }
         }
-        Some((geom.width, rgb))
+        (geom.width, rgb)
+    }
+
+    /// Decode a full analog line-scan frame from PCM to a row-major RGB raster (3 bytes/pixel),
+    /// dispatching on the mode's colour model. Returns `(width, rgb)`; rows beyond the captured
+    /// audio decode to black.
+    pub fn decode_frame(pcm: &[f32], mode: super::SstvMode) -> Option<(u16, Vec<u8>)> {
+        let freq = discriminate(pcm);
+        match mode.color_model() {
+            super::ColorModel::Rgb => {
+                let lay = layout(mode)?;
+                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc| {
+                    decode_line(f, sc, &lay)
+                }))
+            }
+            super::ColorModel::RobotColor => {
+                let lay = robot_layout(mode)?;
+                Some(run_frame(&freq, mode, lay.min_sync_ms, lay.period_ms, lay.first_sync_ms, |f, sc| {
+                    decode_line_yc(f, sc, &lay)
+                }))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -771,7 +908,7 @@ pub mod demod {
 /// reconstructed `ImageRgb` raster on flush (facsimile finalises at end-of-transmission,
 /// like Hell). The colour-difference families (Robot/PD/MP/MR) get their own decode later.
 pub mod rgb {
-    use super::modulator::{rgb_params, rgb_symbols, Rgb};
+    use super::modulator::{line_symbols, wired, Rgb};
     use super::{audio, demod, SstvMode, SAMPLE_RATE};
     use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
     use crate::types::{Frame, FrameMeta, FramePayload, Sample};
@@ -791,7 +928,7 @@ pub mod rgb {
     /// exposes an unimplemented SSTV mode.
     pub fn from_label(s: &str) -> Option<SstvMode> {
         let m = SstvMode::from_label(s)?;
-        rgb_params(m).map(|_| m)
+        if wired(m) { Some(m) } else { None }
     }
 
     /// Transmitter: an RGB picture → SSTV audio.
@@ -826,8 +963,8 @@ pub mod rgb {
                 }
                 rows.push(row);
             }
-            let syms = rgb_symbols(self.mode, &rows)
-                .ok_or(ModError::Encode("not an RGB-sequential submode".into()))?;
+            let syms = line_symbols(self.mode, &rows)
+                .ok_or(ModError::Encode("unsupported SSTV submode".into()))?;
             Ok(audio::render(&syms, 0.5))
         }
     }
@@ -867,7 +1004,7 @@ pub mod rgb {
 #[cfg(test)]
 mod tests {
     use super::audio::{render, Discriminator};
-    use super::modulator::{color_to_freq, rgb_symbols, symbol_digest, Rgb};
+    use super::modulator::{color_to_freq, line_symbols, rgb_symbols, symbol_digest, Rgb};
     use super::vis::{header, Symbol};
     use super::*;
 
@@ -1051,7 +1188,7 @@ mod tests {
     fn assert_family_loopback(mode: SstvMode, n_rows: usize) {
         let src = colorbar_row();
         let rows = vec![src; n_rows];
-        let syms = rgb_symbols(mode, &rows).unwrap();
+        let syms = line_symbols(mode, &rows).unwrap();
         let pcm = render(&syms, 16000.0);
 
         let (w, out) = super::demod::decode_frame(&pcm, mode).unwrap();
@@ -1088,6 +1225,35 @@ mod tests {
     fn sc2_audio_loopback_recovers_colorbars() {
         assert_family_loopback(SstvMode::Sc2_180, 8);
         assert_family_loopback(SstvMode::Sc2_60, 8);
+    }
+
+    #[test]
+    fn robot72_audio_loopback_recovers_colorbars() {
+        // Colour-difference family: RGB → GetRY → Y/R-Y/B-Y → freq → RX → YCtoRGB → RGB.
+        assert_family_loopback(SstvMode::Robot72, 8);
+    }
+
+    #[test]
+    fn getry_yctorgb_roundtrips_primaries() {
+        // The colour-difference transforms are near-inverse for in-gamut colours (ref:
+        // GetRY ComLib.cpp:3650 / YCtoRGB ComLib.cpp:3475). Check the RGB primaries survive.
+        use super::demod::yc_to_rgb;
+        use super::modulator::get_ry;
+        for c in [
+            Rgb { r: 255, g: 0, b: 0 },
+            Rgb { r: 0, g: 255, b: 0 },
+            Rgb { r: 0, g: 0, b: 255 },
+            Rgb { r: 255, g: 255, b: 255 },
+            Rgb { r: 0, g: 0, b: 0 },
+        ] {
+            let (y, ry, by) = get_ry(c);
+            let got = yc_to_rgb(y as i32, ry as i32 - 128, by as i32 - 128);
+            let close = |a: u8, b: u8| (a as i32 - b as i32).abs() <= 4;
+            assert!(
+                close(got.r, c.r) && close(got.g, c.g) && close(got.b, c.b),
+                "round-trip {c:?} -> ({y},{ry},{by}) -> {got:?}"
+            );
+        }
     }
 
     /// Full trait round-trip (T5 emission + the new `ImageRgb` payload): build a colour-bar
