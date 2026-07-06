@@ -539,6 +539,81 @@ pub mod audio {
     }
 }
 
+/// Scottie RX line reconstruction (plan T5, RGB-sequential family). Runs the FM
+/// discriminator, locates the 1200 Hz line-sync pulses, and samples the R/G/B channels at
+/// their emission offsets from the sync (ref: RX geometry Main.cpp:3800-3855; TX layout
+/// Main.cpp:6173). Scottie has no colour-difference math — each channel maps directly via
+/// the inverse of `ColorToFreq`. Sync-anchored so the discriminator group delay cancels.
+pub mod demod_scottie {
+    use super::audio::Discriminator;
+    use super::modulator::Rgb;
+    use super::SAMPLE_RATE;
+
+    /// Inverse of `ColorToFreq` (ref: ComLib.cpp:3491): scan frequency → 0–255 luminance.
+    pub fn freq_to_value(freq_hz: f32) -> u8 {
+        let v = ((freq_hz - 1500.0) * 256.0 / 800.0).round();
+        v.clamp(0.0, 255.0) as u8
+    }
+
+    /// Run the discriminator over the whole PCM buffer.
+    pub fn discriminate(pcm: &[f32]) -> Vec<f32> {
+        let mut d = Discriminator::new();
+        pcm.iter().map(|&x| d.push(x)).collect()
+    }
+
+    /// Centre-sample indices of sustained 1200 Hz sync pulses (freq well below the 1500 Hz
+    /// black floor for at least `min_ms`). Picks up both VIS and per-line syncs; callers
+    /// select the line syncs by position.
+    pub fn find_sync_centers(freq: &[f32], min_ms: f64) -> Vec<usize> {
+        let min_len = (SAMPLE_RATE as f64 * min_ms / 1000.0) as usize;
+        let mut out = Vec::new();
+        let mut run_start: Option<usize> = None;
+        for (i, &f) in freq.iter().enumerate() {
+            if f < 1350.0 {
+                run_start.get_or_insert(i);
+            } else if let Some(s) = run_start.take() {
+                if i - s >= min_len {
+                    out.push((s + i) / 2);
+                }
+            }
+        }
+        out
+    }
+
+    fn ms_to_samp(ms: f64) -> f64 {
+        SAMPLE_RATE as f64 * ms / 1000.0
+    }
+
+    /// Sample one channel: 320 pixels across `[start_ms, start_ms+tw]` relative to the sync
+    /// centre, reading the discriminator at each pixel's centre and mapping to luminance.
+    fn sample_channel(freq: &[f32], sync_center: usize, start_ms: f64, tw_ms: f64) -> [u8; 320] {
+        let base = sync_center as f64 + ms_to_samp(start_ms);
+        let dt = ms_to_samp(tw_ms) / 320.0;
+        let mut out = [0u8; 320];
+        for (x, px) in out.iter_mut().enumerate() {
+            let c = (base + (x as f64 + 0.5) * dt).round() as usize;
+            let f = freq.get(c).copied().unwrap_or(1500.0);
+            *px = freq_to_value(f);
+        }
+        out
+    }
+
+    /// Reconstruct one Scottie image row anchored on a line-sync centre. Channel windows
+    /// (relative to sync end at +4.5 ms): R at +1.5 ms, then next porch+G, then porch+B —
+    /// each `tw` ms wide (the emission order of `LineSCT`).
+    pub fn decode_line(freq: &[f32], sync_center: usize, tw_ms: f64) -> [Rgb; 320] {
+        let sync_half = 4.5; // half the 9 ms sync
+        let r = sample_channel(freq, sync_center, sync_half + 1.5, tw_ms);
+        let g = sample_channel(freq, sync_center, sync_half + 1.5 + tw_ms + 1.5, tw_ms);
+        let b = sample_channel(freq, sync_center, sync_half + 1.5 + 2.0 * tw_ms + 3.0, tw_ms);
+        let mut row = [Rgb { r: 0, g: 0, b: 0 }; 320];
+        for (x, px) in row.iter_mut().enumerate() {
+            *px = Rgb { r: r[x], g: g[x], b: b[x] };
+        }
+        row
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::audio::{render, Discriminator};
@@ -714,6 +789,41 @@ mod tests {
                 (got - want).abs() < 25.0,
                 "tone {}: wanted {want} Hz, discriminator gave {got} Hz",
                 i
+            );
+        }
+    }
+
+    /// End-to-end loopback (plan T5): render a Scottie 1 colour-bar image to audio, then
+    /// recover it through the real RX chain (discriminate → find sync → sample R/G/B). The
+    /// reconstructed bar centres must match the transmitted colours. This exercises the
+    /// audio + sync + pixel-mapping path with no TX timing shared into the decoder.
+    #[test]
+    fn scottie1_audio_loopback_recovers_colorbars() {
+        use super::demod_scottie::{decode_line, discriminate, find_sync_centers};
+        let src = colorbar_row();
+        let rows = [src; 6];
+        let syms = scottie_symbols(SstvMode::Scottie1, &rows).unwrap();
+        let pcm = render(&syms, 16000.0);
+
+        let freq = discriminate(&pcm);
+        // Per-line 1200 Hz sync is 9 ms; require ≥6 ms to reject VIS's short breaks.
+        let syncs = find_sync_centers(&freq, 6.0);
+        assert!(syncs.len() >= 5, "expected per-line syncs, got {}", syncs.len());
+
+        // Decode a line from a mid-stream sync (well past the VIS header).
+        let sc = syncs[syncs.len() / 2];
+        let got = decode_line(&freq, sc, 138.24);
+
+        // Check the 8 bar centres (avoid edge smear from the discriminator's group delay).
+        // Colour bars are identical on every line, so any line reconstructs the same row.
+        for bar in 0..8 {
+            let x = bar * 40 + 20;
+            let (gr, gg, gb) = (got[x].r, got[x].g, got[x].b);
+            let (er, eg, eb) = (src[x].r, src[x].g, src[x].b);
+            let ok = |g: u8, e: u8| if e >= 128 { g >= 160 } else { g <= 95 };
+            assert!(
+                ok(gr, er) && ok(gg, eg) && ok(gb, eb),
+                "bar {bar} (x={x}): got ({gr},{gg},{gb}) want ~({er},{eg},{eb})"
             );
         }
     }
