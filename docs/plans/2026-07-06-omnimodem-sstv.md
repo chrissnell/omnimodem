@@ -149,16 +149,14 @@ Run this sequence **once per family** (A→F). `<FAM>` = the family; the represe
 
 ## Scope / open decisions
 
-- **Colour raster payload (needs an owner call).** `FramePayload::Image { width, gray }` and the
-  proto `Image { width, gray }` are **8-bit grayscale** — designed in Phase 10 for the mono
-  Hell/WEFAX facsimile modes. **SSTV is colour**: the RX recovers RGB per pixel. The DSP is
-  proven (the Scottie loopback reconstructs R/G/B), but emitting it needs a colour raster on
-  the wire. Options: (a) add `FramePayload::ImageRgb { width, rgb }` + a proto `rgb` field
-  (cleanest, additive, keeps mono modes unchanged — reused by Phase 15 colour pictures);
-  (b) widen the existing `Image` with a `channels`/`format` tag; (c) pack RGB into `gray`
-  with a stride convention (worst — implicit). Recommend (a). Blocks the Scottie `Demodulator`
-  trait's `Image` emission (T5-emit), the daemon `frame_bytes` colour arm, and the TUI colour
-  raster view (T8). The line-scan DSP and single-line decode are done and gate-tested regardless.
+- **Colour raster payload — RESOLVED (owner picked option a, 2026-07-06), implemented.** Added
+  `FramePayload::ImageRgb { width, rgb }` + proto `Image.rgb` (additive; mono `Image`/`gray`
+  unchanged, exactly one set). Threaded end-to-end: `RxImage.rgb` → `rx_worker` → `convert.rs`
+  → proto → TUI. **Scottie family is now wired end-to-end** (T4/T5/T6/T8): `ScottieMod`/
+  `ScottieDemod` traits, `ModeConfig::Sstv { submode }` (exposes only wired `scottie1/2/dx`),
+  and the TUI `image` shape rendering the colour frame as truecolor half-blocks. Full
+  Modulator→Demodulator `ImageRgb` round-trip is gate-tested; rust `--workspace` + clippy
+  `-D warnings` + TUI `go test` all green.
 
 
 - **Full submode grid is in scope** (43 modes in `SSTVModeList[]`, `smEND`=43). If effort forces a cut, the defensible line is Groups A–D (classic interoperable modes) as the first PR and Groups E–F (MMSSTV-native MR/ML/MP/MN/MC) as a fast-follow — but each is still a complete, KAT-green family, never a stub. **Confirm with the issue owner before cutting.**
