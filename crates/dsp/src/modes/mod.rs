@@ -21,6 +21,7 @@ pub mod ifkp;
 pub mod jt65;
 pub mod jt9;
 pub mod mfsk;
+pub mod mfsk_pic;
 pub mod mt63;
 pub mod olivia;
 pub mod picture;
