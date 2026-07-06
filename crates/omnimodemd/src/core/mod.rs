@@ -597,6 +597,7 @@ fn try_spawn_workers(
             let rsid = (rsid_tx)
                 .then(|| mode.rsid_key().map(|k| (k, mode.rsid_center_hz())))
                 .flatten();
+            let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
             let w = tx_worker::spawn(TxWorkerCfg {
                 channel,
                 rig,
@@ -611,6 +612,8 @@ fn try_spawn_workers(
                 gain: gain.clone(),
                 spectrum: spectrum.clone(),
                 rsid,
+                tx_delay: Duration::from_millis(tx_delay_ms as u64),
+                tx_tail: Duration::from_millis(tx_tail_ms as u64),
             });
             live.tx_workers.insert(channel, w);
         }
@@ -716,12 +719,14 @@ fn transmit(
         let sink = live.sinks.get(&channel).unwrap();
         let driver = live.drivers.get_mut(&channel).unwrap();
 
+        let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
         interlock.begin_tx(&rig);
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: true });
         // The legacy raw-PCM cycle runs inline on the core thread (no worker),
         // so there is no async cancel to honor — pass a never-set flag.
         let outcome = drive_tx_cycle(
             driver.as_mut(), sink, samples, rate, TX_POLL, &AtomicBool::new(false),
+            Duration::from_millis(tx_delay_ms as u64), Duration::from_millis(tx_tail_ms as u64),
         );
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: false });
         interlock.end_tx(&rig);
@@ -937,7 +942,7 @@ mod tests {
             core.commands
                 .send(Command::ConfigurePtt {
                     id: ChannelId(0),
-                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false },
+                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                     reply: t,
                 })
                 .unwrap();
@@ -986,7 +991,7 @@ mod tests {
             core.commands
                 .send(Command::ConfigurePtt {
                     id: ChannelId(0),
-                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false },
+                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                     reply: t,
                 })
                 .unwrap();
@@ -1030,7 +1035,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: bh_id.clone(),
                         method: PttMethod::SerialRts { node: String::new() },
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: t,
                 })
@@ -1112,7 +1117,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: dev_id.clone(),
                         method: PttMethod::None,
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: tx,
                 })
@@ -1394,7 +1399,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: dev_id.clone(),
                         method: PttMethod::None,
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: tx,
                 })
@@ -1438,7 +1443,7 @@ mod tests {
         core.commands
             .send(Command::ConfigurePtt {
                 id,
-                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false },
+                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                 reply: tx,
             })
             .unwrap();
@@ -1598,7 +1603,7 @@ mod tests {
                 ptt: Some(PttConfig {
                     device_id: dev_id.clone(),
                     method: PttMethod::None,
-                    invert: false,
+                    invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                 }),
                 rsid_tx: false,
                 rsid_rx: false,

@@ -162,6 +162,17 @@ impl Supervisor {
             .unwrap_or((false, false))
     }
 
+    /// Per-channel PTT keying timing `(tx_delay_ms, tx_tail_ms)`. Channels with
+    /// no PTT binding report `(0, 0)` — they never key a hardware line, so the
+    /// values are inert.
+    pub fn channel_ptt_timing(&self, id: ChannelId) -> (u32, u32) {
+        self.channels
+            .get(&id)
+            .and_then(|s| s.config.ptt.as_ref())
+            .map(|p| (p.tx_delay_ms, p.tx_tail_ms))
+            .unwrap_or((0, 0))
+    }
+
     /// A cloneable handle to the per-rig RX/TX interlock.
     pub fn interlock(&self) -> RxTxInterlock {
         self.interlock.clone()
@@ -244,7 +255,7 @@ mod tests {
             PttConfig {
                 device_id: DeviceId::AlsaCard { card_name: "Rig".into() },
                 method: crate::ptt::registry::PttMethod::None,
-                invert: false,
+                invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
             },
         )
         .unwrap();
@@ -281,7 +292,7 @@ mod tests {
             PttConfig {
                 device_id: DeviceId::AlsaCard { card_name: "Device".into() },
                 method: crate::ptt::registry::PttMethod::None,
-                invert: false,
+                invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
             },
         )
         .unwrap();

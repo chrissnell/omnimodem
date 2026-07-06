@@ -1338,6 +1338,8 @@ type ChannelInfo struct {
 	PttMethod     PttMethod              `protobuf:"varint,8,opt,name=ptt_method,json=pttMethod,proto3,enum=omnimodem.v1.PttMethod" json:"ptt_method,omitempty"` // configured PTT method (UNSPECIFIED if unset)
 	RsidTx        bool                   `protobuf:"varint,9,opt,name=rsid_tx,json=rsidTx,proto3" json:"rsid_tx,omitempty"`                                      // prepend the mode's RSID burst before each TX
 	RsidRx        bool                   `protobuf:"varint,10,opt,name=rsid_rx,json=rsidRx,proto3" json:"rsid_rx,omitempty"`                                     // run the RSID detector over received audio
+	PttTxDelayMs  uint32                 `protobuf:"varint,11,opt,name=ptt_tx_delay_ms,json=pttTxDelayMs,proto3" json:"ptt_tx_delay_ms,omitempty"`               // per-channel PTT keying lead-in (ms)
+	PttTxTailMs   uint32                 `protobuf:"varint,12,opt,name=ptt_tx_tail_ms,json=pttTxTailMs,proto3" json:"ptt_tx_tail_ms,omitempty"`                  // per-channel PTT keying tail/hold (ms)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1440,6 +1442,20 @@ func (x *ChannelInfo) GetRsidRx() bool {
 		return x.RsidRx
 	}
 	return false
+}
+
+func (x *ChannelInfo) GetPttTxDelayMs() uint32 {
+	if x != nil {
+		return x.PttTxDelayMs
+	}
+	return 0
+}
+
+func (x *ChannelInfo) GetPttTxTailMs() uint32 {
+	if x != nil {
+		return x.PttTxTailMs
+	}
+	return 0
 }
 
 type Event struct {
@@ -2627,13 +2643,20 @@ func (x *ConfigureAudioResponse) GetActualTxSampleRate() uint32 {
 }
 
 type ConfigurePttRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Channel       uint32                 `protobuf:"varint,1,opt,name=channel,proto3" json:"channel,omitempty"`
-	DeviceId      string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // stable DeviceId for the PTT device
-	Method        PttMethod              `protobuf:"varint,3,opt,name=method,proto3,enum=omnimodem.v1.PttMethod" json:"method,omitempty"`
-	Node          string                 `protobuf:"bytes,4,opt,name=node,proto3" json:"node,omitempty"`                               // resolved node / chip path (serial/cm108/gpio)
-	PinOrLine     uint32                 `protobuf:"varint,5,opt,name=pin_or_line,json=pinOrLine,proto3" json:"pin_or_line,omitempty"` // cm108 GPIO pin (1-8) or gpiochip line offset
-	Invert        bool                   `protobuf:"varint,6,opt,name=invert,proto3" json:"invert,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Channel   uint32                 `protobuf:"varint,1,opt,name=channel,proto3" json:"channel,omitempty"`
+	DeviceId  string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // stable DeviceId for the PTT device
+	Method    PttMethod              `protobuf:"varint,3,opt,name=method,proto3,enum=omnimodem.v1.PttMethod" json:"method,omitempty"`
+	Node      string                 `protobuf:"bytes,4,opt,name=node,proto3" json:"node,omitempty"`                               // resolved node / chip path (serial/cm108/gpio)
+	PinOrLine uint32                 `protobuf:"varint,5,opt,name=pin_or_line,json=pinOrLine,proto3" json:"pin_or_line,omitempty"` // cm108 GPIO pin (1-8) or gpiochip line offset
+	Invert    bool                   `protobuf:"varint,6,opt,name=invert,proto3" json:"invert,omitempty"`
+	// Per-channel PTT keying timing. TX delay is a keyed-but-silent lead-in
+	// before audio starts (lets the rig's PTT close); TX tail holds the key
+	// asserted after audio drains before releasing. Both apply to every mode
+	// on this channel. A full ConfigurePtt replaces the binding, so clients
+	// should always send the current values (0 is a valid explicit setting).
+	TxDelayMs     uint32 `protobuf:"varint,7,opt,name=tx_delay_ms,json=txDelayMs,proto3" json:"tx_delay_ms,omitempty"`
+	TxTailMs      uint32 `protobuf:"varint,8,opt,name=tx_tail_ms,json=txTailMs,proto3" json:"tx_tail_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2708,6 +2731,20 @@ func (x *ConfigurePttRequest) GetInvert() bool {
 		return x.Invert
 	}
 	return false
+}
+
+func (x *ConfigurePttRequest) GetTxDelayMs() uint32 {
+	if x != nil {
+		return x.TxDelayMs
+	}
+	return 0
+}
+
+func (x *ConfigurePttRequest) GetTxTailMs() uint32 {
+	if x != nil {
+		return x.TxTailMs
+	}
+	return 0
 }
 
 type ConfigurePttResponse struct {
@@ -3820,7 +3857,7 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\x10SubscribeRequest\"C\n" +
 	"\n" +
 	"ModemState\x125\n" +
-	"\bchannels\x18\x01 \x03(\v2\x19.omnimodem.v1.ChannelInfoR\bchannels\"\xb6\x02\n" +
+	"\bchannels\x18\x01 \x03(\v2\x19.omnimodem.v1.ChannelInfoR\bchannels\"\x82\x03\n" +
 	"\vChannelInfo\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -3834,7 +3871,9 @@ const file_omnimodem_proto_rawDesc = "" +
 	"ptt_method\x18\b \x01(\x0e2\x17.omnimodem.v1.PttMethodR\tpttMethod\x12\x17\n" +
 	"\arsid_tx\x18\t \x01(\bR\x06rsidTx\x12\x17\n" +
 	"\arsid_rx\x18\n" +
-	" \x01(\bR\x06rsidRx\"\xad\a\n" +
+	" \x01(\bR\x06rsidRx\x12%\n" +
+	"\x0fptt_tx_delay_ms\x18\v \x01(\rR\fpttTxDelayMs\x12#\n" +
+	"\x0eptt_tx_tail_ms\x18\f \x01(\rR\vpttTxTailMs\"\xad\a\n" +
 	"\x05Event\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.omnimodem.v1.ModemStateH\x00R\bsnapshot\x12P\n" +
 	"\x12channel_configured\x18\x02 \x01(\v2\x1f.omnimodem.v1.ChannelConfiguredH\x00R\x11channelConfigured\x12J\n" +
@@ -3920,14 +3959,17 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\x0etx_sample_rate\x18\x06 \x01(\rR\ftxSampleRate\"y\n" +
 	"\x16ConfigureAudioResponse\x12,\n" +
 	"\x12actual_sample_rate\x18\x01 \x01(\rR\x10actualSampleRate\x121\n" +
-	"\x15actual_tx_sample_rate\x18\x02 \x01(\rR\x12actualTxSampleRate\"\xc9\x01\n" +
+	"\x15actual_tx_sample_rate\x18\x02 \x01(\rR\x12actualTxSampleRate\"\x87\x02\n" +
 	"\x13ConfigurePttRequest\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x1b\n" +
 	"\tdevice_id\x18\x02 \x01(\tR\bdeviceId\x12/\n" +
 	"\x06method\x18\x03 \x01(\x0e2\x17.omnimodem.v1.PttMethodR\x06method\x12\x12\n" +
 	"\x04node\x18\x04 \x01(\tR\x04node\x12\x1e\n" +
 	"\vpin_or_line\x18\x05 \x01(\rR\tpinOrLine\x12\x16\n" +
-	"\x06invert\x18\x06 \x01(\bR\x06invert\"\x16\n" +
+	"\x06invert\x18\x06 \x01(\bR\x06invert\x12\x1e\n" +
+	"\vtx_delay_ms\x18\a \x01(\rR\ttxDelayMs\x12\x1c\n" +
+	"\n" +
+	"tx_tail_ms\x18\b \x01(\rR\btxTailMs\"\x16\n" +
 	"\x14ConfigurePttResponse\"?\n" +
 	"\rKeyPttRequest\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x14\n" +

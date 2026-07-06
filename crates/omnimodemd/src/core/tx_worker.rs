@@ -64,6 +64,11 @@ pub struct TxWorkerCfg {
     /// When set, prepend the active mode's RSID burst ahead of each transmission:
     /// `(rsid_table_key, audio_offset_hz)`. `None` disables the RSID preamble.
     pub rsid: Option<(String, f32)>,
+    /// Per-channel PTT keying lead-in before audio (from the channel's PTT
+    /// config; 0 when no binding or explicitly disabled).
+    pub tx_delay: Duration,
+    /// Per-channel PTT keying tail/hold after audio drains before release.
+    pub tx_tail: Duration,
 }
 
 /// Handle to a running TX worker.
@@ -236,7 +241,9 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             cfg.telemetry.clone(),
             cancel.clone(),
         );
-        let outcome = drive_tx_cycle(cfg.driver.as_mut(), &cfg.sink, pcm, cfg.rate, TX_POLL, &cancel);
+        let outcome = drive_tx_cycle(
+            cfg.driver.as_mut(), &cfg.sink, pcm, cfg.rate, TX_POLL, &cancel, cfg.tx_delay, cfg.tx_tail,
+        );
         if let Some(h) = tx_spectrum {
             let _ = h.join();
         }
@@ -351,6 +358,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -407,6 +416,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("E"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -463,6 +474,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
             rsid: Some(("psk31".to_string(), 1000.0)),
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -534,6 +547,8 @@ mod tests {
             gain: gain.clone(),
             spectrum: SpectrumControl::default(),
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker.enqueue(TxJob { frame: DspFrame::packet(bytes), transmit_id: TransmitId(1) }).unwrap();
 
@@ -595,6 +610,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("CQ"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -653,6 +670,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum: SpectrumControl::default(),
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker
             .enqueue(TxJob { frame: DspFrame::text("CQ CQ CQ DE NW5W"), transmit_id: TransmitId(1) })
@@ -743,6 +762,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum,
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         worker.enqueue(TxJob { frame: DspFrame::text("TEST"), transmit_id: TransmitId(1) }).unwrap();
 
@@ -805,6 +826,8 @@ mod tests {
             gain: crate::core::AudioGain::default(),
             spectrum,
             rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
         });
         // A valid FT8 message (standard call/grid exchange).
         worker
