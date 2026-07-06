@@ -162,15 +162,16 @@ pub fn spawn(cfg: TxWorkerCfg) -> TxWorker {
 }
 
 fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
-    while let Ok(job) = rx.recv() {
+    while let Ok(mut job) = rx.recv() {
         // Drop pending jobs promptly once cancelled (e.g. the rig departed).
         if cancel.load(Ordering::Relaxed) {
             break;
         }
         // Pre-built picture audio plays verbatim at its own native rate; a frame
-        // job renders through the channel modulator at its caps rate.
-        let (samples, native) = match &job.prebuilt {
-            Some(pb) => (pb.samples.clone(), pb.native_rate),
+        // job renders through the channel modulator at its caps rate. Move the
+        // (potentially large) prebuilt buffer out rather than cloning it.
+        let (samples, native) = match job.prebuilt.take() {
+            Some(pb) => (pb.samples, pb.native_rate),
             None => match cfg.modulator.modulate(&job.frame) {
                 Ok(s) => (s, cfg.modulator.caps().native_rate),
                 Err(_) => {

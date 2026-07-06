@@ -24,7 +24,8 @@ number of samples, no varicode, no FEC. Reference: fldigi 4.1.23 @ `61b97f413`
 | Colour raster payload | `FramePayload::Image { width, channels, pixels }` in `crates/dsp/src/types.rs`; proto `Image` in `proto/omnimodem.proto` |
 | Daemon picture-send dispatch | `crates/omnimodemd/src/mode/picture_tx.rs` |
 | gRPC transport (`TransmitImage`) | `proto/omnimodem.proto`; `crates/omnimodemd/src/grpc/service.rs`; `Command::TransmitImage` + `transmit_image()` in `crates/omnimodemd/src/core/{command,mod}.rs`; prebuilt-audio job in `crates/omnimodemd/src/core/tx_worker.rs` |
-| TUI colour raster render (`▀` half-block) | `clients/omnimodem-tui/internal/app/imgrender.go` (`renderImageHalfBlock`) |
+| TUI raster display (live path folds RGB→luma into the mono scroll surface) | `clients/omnimodem-tui/internal/app/{view_operate.go,raster.go}` |
+| TUI truecolor `▀` half-block renderer (staged for the colour/SSTV follow-up — not yet wired into a view) | `clients/omnimodem-tui/internal/app/imgrender.go` (`renderImageHalfBlock`) |
 | Golden vectors | `crates/dsp/tests/vectors/{mfsk,thor,ifkp,fsq}pic.json` (drivers `scratch/refvectors/build_*pic.sh`) |
 | Conformance | `crates/dsp/tests/ber.rs` (SNR sweep), `crates/dsp/tests/kat.rs` (`picture_cross_decode_doc`) |
 
@@ -63,17 +64,27 @@ A short per-pixel settling guard skips the FM phase-step transient at pixel edge
 Avatar ('A', 59×74 RGB) is recognised but out of scope; the header char is
 reserved, not claimed.
 
-## Transmit and receive, headless
+## Transmit and receive status
 
-- **RX**: the picture RX state decodes the raster and emits a typed
-  `FramePayload::Image` → `RxFrame.image` on the event stream.
-- **TX**: each family has a `build_tx` assembler that renders the in-band header
-  through the mode's live text modulator, then appends the pixel-FSK. The daemon
-  path: `TransmitImage` gRPC → `mode::picture_tx::build` (maps the channel's
-  configured `ModeConfig` onto the right assembler; MFSK takes any W×H, the
-  others validate against the fixed size table) → `Command::TransmitImage` →
-  `transmit_image()` enqueues the pre-built audio on the channel's TX worker,
-  which plays it verbatim (resampled to the sink) and keys the rig.
+- **TX — wired end-to-end.** Each family has a `build_tx` assembler that renders
+  the in-band header through the mode's live text modulator, then appends the
+  pixel-FSK. The daemon path: `TransmitImage` gRPC → `mode::picture_tx::build`
+  (maps the channel's configured `ModeConfig` onto the right assembler; MFSK
+  takes any W×H, the others validate against the fixed size table) →
+  `Command::TransmitImage` → `transmit_image()` enqueues the pre-built audio on
+  the channel's TX worker, which plays it verbatim (resampled to the sink) and
+  keys the rig.
+- **RX — decode engine + header codecs done; live receive FSM is the remaining
+  piece.** `PictureCodec::decode` (the phase-difference discriminator over the
+  analytic front-end) is proven by the loopback tests, and each family's
+  `parse_header` recognises the in-band header. **Not yet wired:** the live RX
+  state machine inside each text demodulator that detects the header in the
+  decoded character stream, switches the running demod into picture-receive,
+  feeds the following audio into `PictureCodec::decode`, and emits the typed
+  `FramePayload::Image`. Until that lands, only Hell/WEFAX produce `Image` frames
+  on receive; the four picture modes surface the header as text and do not decode
+  the raster off-air. Wiring that FSM per mode (the remainder of plan §5 "T5")
+  is the next step to close picture RX receive.
 
 ## Colour on the `Image` wire
 
