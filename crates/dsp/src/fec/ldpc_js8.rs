@@ -246,7 +246,7 @@ mod tests {
             llrs[p] = -llrs[p];
         }
         let (dec, perr) = code.decode_minsum(&llrs, 30);
-        let dec = if perr == 0 { dec } else { osd_decode(&code, &llrs, 2).expect("osd basis") };
+        let dec = if perr == 0 { dec } else { osd_decode(code, &llrs, 2).expect("osd basis") };
         assert_eq!(code.parity_errors(&dec), 0, "decoded codeword must satisfy parity");
         assert_eq!(extract_message(&dec).to_vec(), msgbits, "recovered message mismatch");
     }
