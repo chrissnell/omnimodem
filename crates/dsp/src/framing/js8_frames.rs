@@ -251,7 +251,7 @@ fn commands_by_len() -> Vec<(&'static str, u8)> {
         .map(|(n, c)| (n.trim(), *c as u8))
         .filter(|(n, _)| !n.is_empty())
         .collect();
-    v.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    v.sort_by_key(|x| std::cmp::Reverse(x.0.len()));
     v
 }
 
@@ -367,9 +367,9 @@ mod tests {
     /// The 16-bit `num` splits into 11 high + 5 low bits and recombines exactly.
     #[test]
     fn num_split_recombine() {
-        let payload = pack_compound_frame("K1ABC", FRAME_COMPOUND, 0b1010_1010_101_10011, 0).unwrap();
+        let payload = pack_compound_frame("K1ABC", FRAME_COMPOUND, 0b1010_1010_1011_0011, 0).unwrap();
         let got = unpack_compound_frame(&payload).unwrap();
-        assert_eq!(got.num, 0b1010_1010_101_10011);
+        assert_eq!(got.num, 0b1010_1010_1011_0011);
     }
 
     /// Directed frames round-trip: from/to callsigns, command, and inum survive.
