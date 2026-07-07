@@ -39,6 +39,8 @@ pub enum PictureError {
     BadSize { w: u32, h: u32, color: bool },
     #[error("image byte length {got} != width*height*3 ({want})")]
     BadLength { got: usize, want: usize },
+    #[error("picture modulation failed: {0}")]
+    Modulate(String),
 }
 
 /// Build the complete picture-send audio for `cfg`'s configured mode, returning
@@ -85,8 +87,82 @@ pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<(Vec<f32>, u32), Pi
                 .ok_or_else(bad_size)?;
             Ok((fsq_pic::build_tx(s, *center_hz, mycall, mode, &send.rgb), fsq_pic::SAMPLE_RATE as u32))
         }
+        ModeConfig::Wefax { submode, center_hz } => {
+            use omnimodem_dsp::mode::Modulator;
+            use omnimodem_dsp::modes::wefax;
+            use omnimodem_dsp::types::{Frame, FramePayload};
+            let v = wefax::WefaxVariant::from_label(submode)
+                .ok_or_else(|| PictureError::BadSubmode(submode.clone()))?;
+            // WEFAX is a grayscale facsimile: collapse RGB to BT.601 luma. The
+            // modulator stretches each source row to the mode's fixed line width,
+            // so any source width is fine; the row count sets the on-air duration.
+            let luma: Vec<u8> = send
+                .rgb
+                .chunks_exact(3)
+                .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+                .collect();
+            let frame = Frame {
+                payload: FramePayload::Image {
+                    width: send.width as u16,
+                    channels: 1,
+                    pixels: luma,
+                },
+                meta: Default::default(),
+            };
+            let audio = wefax::WefaxMod::new(v, *center_hz)
+                .modulate(&frame)
+                .map_err(|e| PictureError::Modulate(e.to_string()))?;
+            Ok((audio, wefax::WEFAX_RATE))
+        }
+        ModeConfig::Sstv { submode } => {
+            use omnimodem_dsp::mode::Modulator;
+            use omnimodem_dsp::modes::sstv::{self, rgb};
+            use omnimodem_dsp::types::{Frame, FramePayload};
+            let mode =
+                rgb::from_label(submode).ok_or_else(|| PictureError::BadSubmode(submode.clone()))?;
+            // SSTV submodes are fixed-size colour rasters: resample the request to
+            // the mode's native width and scan-line count, then modulate as RGB.
+            // (2-scan-per-line families — PD/MP/MN — are limited to their scan-line
+            // count by the modulator, so they transmit at reduced height for now.)
+            let geom = mode.geometry();
+            let pixels = resample_rgb(
+                &send.rgb,
+                send.width,
+                send.height,
+                geom.width as u32,
+                geom.scan_lines as u32,
+            );
+            let frame = Frame {
+                payload: FramePayload::Image { width: geom.width, channels: 3, pixels },
+                meta: Default::default(),
+            };
+            let audio = rgb::RgbMod::new(mode)
+                .modulate(&frame)
+                .map_err(|e| PictureError::Modulate(e.to_string()))?;
+            Ok((audio, sstv::SAMPLE_RATE))
+        }
         other => Err(PictureError::Unsupported(other.to_mode_string())),
     }
+}
+
+/// Nearest-neighbour resample a row-major interleaved RGB buffer from `sw`×`sh`
+/// to `dw`×`dh`. Used to fit an arbitrary photo onto a mode's fixed raster.
+fn resample_rgb(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    let mut out = vec![0u8; dw * dh * 3];
+    if sw == 0 || sh == 0 {
+        return out;
+    }
+    for y in 0..dh {
+        let sy = y * sh / dh;
+        for x in 0..dw {
+            let sx = x * sw / dw;
+            let si = (sy * sw + sx) * 3;
+            let di = (y * dw + x) * 3;
+            out[di..di + 3].copy_from_slice(&src[si..si + 3]);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -157,6 +233,59 @@ mod tests {
         assert_eq!(
             build(&cfg, &send(59, 74, false)),
             Err(PictureError::BadSize { w: 59, h: 74, color: false })
+        );
+    }
+
+    #[test]
+    fn wefax_builds_any_size_as_grayscale_facsimile() {
+        let cfg = ModeConfig::Wefax { submode: "wefax576".into(), center_hz: 1900.0 };
+        // WEFAX carries any raster (rows set the on-air length); colour is folded
+        // to luma, so a colour request builds the same as grey.
+        let (audio, rate) = build(&cfg, &send(64, 32, true)).expect("wefax picture builds");
+        assert!(!audio.is_empty());
+        assert_eq!(rate, 11_025, "wefax native rate");
+        assert_eq!(
+            build(&cfg, &send(200, 8, false)),
+            build(&cfg, &send(200, 8, true)),
+            "wefax ignores the colour flag"
+        );
+        // The configured carrier must reach the modulator (not a hardcoded
+        // default), matching the streaming TX/RX path; a retuned centre shifts
+        // the whole facsimile, so the audio must differ.
+        let retuned = ModeConfig::Wefax { submode: "wefax576".into(), center_hz: 1500.0 };
+        assert_ne!(
+            build(&cfg, &send(64, 32, false)).unwrap().0,
+            build(&retuned, &send(64, 32, false)).unwrap().0,
+            "wefax picture must honour the channel's center_hz"
+        );
+    }
+
+    #[test]
+    fn sstv_resamples_any_size_to_native_geometry() {
+        // MC180-N is a 320x256 RGB SSTV mode; an arbitrary photo size must build.
+        let cfg = ModeConfig::Sstv { submode: "mc180-n".into() };
+        let (audio, rate) = build(&cfg, &send(200, 120, true)).expect("sstv picture builds");
+        assert!(!audio.is_empty());
+        assert_eq!(rate, 11_025, "sstv native rate");
+        // A wildly different source size resamples onto the same fixed raster.
+        assert!(build(&cfg, &send(1024, 768, true)).is_ok());
+    }
+
+    #[test]
+    fn sstv_rejects_unknown_submode() {
+        let cfg = ModeConfig::Sstv { submode: "notamode".into() };
+        assert_eq!(
+            build(&cfg, &send(64, 32, true)),
+            Err(PictureError::BadSubmode("notamode".into()))
+        );
+    }
+
+    #[test]
+    fn wefax_rejects_bad_submode() {
+        let cfg = ModeConfig::Wefax { submode: "wefax999".into(), center_hz: 1900.0 };
+        assert_eq!(
+            build(&cfg, &send(64, 32, false)),
+            Err(PictureError::BadSubmode("wefax999".into()))
         );
     }
 

@@ -14,6 +14,7 @@ pub mod llr;
 pub mod ldpc;
 pub mod ldpc_fst4;
 pub mod ldpc_js8;
+pub mod ldpc_msk144;
 pub mod osd;
 pub mod slicer;
 

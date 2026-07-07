@@ -371,6 +371,19 @@ fn ft8_wav_interop_doc() {
 }
 
 #[test]
+#[ignore = "requires WSJT-X jt4/jt4sim binaries (live-audio interop, beyond the byte-exact gate)"]
+fn jt4_cross_decode_doc() {
+    // The byte-exact TX gate is a plain lib unit test
+    // (modes::jt4::tests::tx_symbols_match_reference_vector), so it runs on CI
+    // without `testutil`. This remaining live check needs the WSJT-X binaries:
+    //   ours→ref:  render our `Jt4Mod` (submode A) waveform to a .wav; WSJT-X's
+    //              `jt4` decoder must recover the message.
+    //   ref→ours:  `jt4sim "K1ABC W9XYZ EN37" A 1 0 0 1 -5` → our `Jt4Demod`
+    //              (submode A) `decode_window` recovers it (exercises the exact
+    //              packjt 72-bit layout our self-consistent `pack72` does not).
+}
+
+#[test]
 #[ignore = "requires Direwolf gen_packets/atest (Phase-4 interop gate)"]
 fn afsk1200_cross_decode_doc() {
     // ours→ref:  our `Afsk1200Mod` audio (48 kHz) → `atest` must decode the
@@ -1646,4 +1659,88 @@ fn navtex_cross_decode_doc() {
     // directions (our TX decodes in fldigi and fldigi's TX decodes in ours).
     // The bit-exact CCIR-476 + FEC-B gate above pins the on-air integer domain;
     // this live-audio gate additionally exercises the 100-baud FSK sync.
+}
+
+// --- W2: MSK144 (WSJT-X meteor scatter) ----------------------------------
+
+/// MSK144 CRC-13 + LDPC(128,90) codeword + 144 MSK channel tones are bit-exact
+/// against the unmodified WSJT-X encoder. Provenance:
+/// `tests/vectors/msk144_reference.json` (WSJTX/wsjtx @ ccdfaf3, driver
+/// `scratch/refvectors/msk144/build_msk144.sh`, which links the real
+/// genmsk_128_90/encode_128_90 + boost crc13).
+#[test]
+fn msk144_encode_and_tones_match_wsjtx_reference() {
+    use omnimodem_dsp::fec::ldpc_msk144::{encode_msk144, get_crc13};
+    use omnimodem_dsp::modes::msk144::tones_from_codeword;
+
+    let raw = include_str!("vectors/msk144_reference.json");
+    // Extract every string value for a given key, in file order.
+    let values = |key: &str| -> Vec<String> {
+        let pat = format!("\"{key}\":");
+        raw.match_indices(&pat)
+            .map(|(i, _)| {
+                let after = &raw[i + pat.len()..];
+                let q1 = after.find('"').unwrap();
+                let q2 = after[q1 + 1..].find('"').unwrap();
+                after[q1 + 1..q1 + 1 + q2].to_string()
+            })
+            .collect()
+    };
+    let bits = |s: &str| -> Vec<u8> { s.bytes().map(|b| b - b'0').collect() };
+
+    let msgs = values("msg77");
+    let crcs = values("crc13");
+    let cws = values("codeword128");
+    let tones = values("tones144");
+    assert_eq!(msgs.len(), 2, "expected two golden vectors");
+
+    for i in 0..msgs.len() {
+        let msg77: [u8; 77] = bits(&msgs[i]).try_into().unwrap();
+        // CRC-13 bit-exact.
+        let want_crc = u16::from_str_radix(&crcs[i], 2).unwrap();
+        assert_eq!(get_crc13(&msg77), want_crc, "vector {i}: CRC-13");
+        // Codeword bit-exact.
+        let cw = encode_msk144(&msg77);
+        assert_eq!(cw.to_vec(), bits(&cws[i]), "vector {i}: codeword");
+        // Channel tones bit-exact.
+        let got = tones_from_codeword(&cw);
+        assert_eq!(got.to_vec(), bits(&tones[i]), "vector {i}: MSK tones");
+    }
+}
+
+/// MSK144 transmit → streaming decode round-trips a standard message under AWGN.
+/// The matched filter + BP decode recover the exact text; the audio itself is
+/// FP (never asserted bit-exact — porting doctrine §3).
+#[test]
+fn msk144_loopback_decodes_under_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::msk144::{Msk144Demod, Msk144Mod};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    let msg = "K1ABC W9XYZ EN37";
+    let mut m = Msk144Mod::new();
+    let wave = m.modulate(&Frame::text(msg)).expect("modulate");
+    let trials = 12;
+    let mut ok = 0;
+    for t in 0..trials as u64 {
+        let mut w = wave.clone();
+        let mut rng = Rng::new(0x4D53_4B10 + t);
+        add_awgn(&mut w, 0.6, &mut rng);
+        let mut d = Msk144Demod::new();
+        if d.feed(&w).iter().any(|f| matches!(&f.payload, FramePayload::Text(x) if x == msg)) {
+            ok += 1;
+        }
+    }
+    let rate = ok as f32 / trials as f32;
+    assert!(rate >= 0.9, "MSK144 AWGN loopback decode rate {rate} below 0.9");
+}
+
+#[test]
+#[ignore = "requires WSJT-X msk144 decoder (W2 interop gate)"]
+fn msk144_cross_decode_doc() {
+    // The decisive interop proof (porting doctrine §5): our TX .wav decodes in
+    // the reference WSJT-X MSK144 decoder AND an msk144sim-generated ping decodes
+    // in Msk144Demod. The bit-exact CRC-13 + LDPC(128,90) + tone-map gate above
+    // pins the integer domain; this live-audio gate exercises the analytic-signal
+    // sync + matched filter against the reference binary.
 }

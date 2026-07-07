@@ -16,14 +16,17 @@ use omnimodem_dsp::modes::{
     hell::{HellDemod, HellMod, HellVariant},
     ifkp::{IfkpDemod, IfkpMod, IfkpSpeed},
     js8::{Js8Demod, Js8Mod, Js8Submode},
+    jt4::{Jt4Demod, Jt4Mod, Jt4Submode},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     mfsk::{MfskDemod, MfskMod, MfskVariant},
+    msk144::{Msk144Demod, Msk144Mod},
     mt63::{Mt63Demod, Mt63Mod, Mt63Variant},
     navtex::{NavtexDemod, NavtexMod, NavtexVariant},
     olivia::{OliviaDemod, OliviaMod},
     psk::{PskDemod, PskMod, PskVariant},
     rtty::{RttyDemod, RttyMod},
+    sstv::rgb::{RgbDemod, RgbMod},
     thor::{ThorDemod, ThorMod, ThorVariant},
     throb::{ThrobDemod, ThrobMod, ThrobVariant},
     wefax::{WefaxDemod, WefaxMod, WefaxVariant},
@@ -92,6 +95,11 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(HellDemod::new(v, *center_hz)))
         }
+        ModeConfig::Sstv { submode } => {
+            let m = omnimodem_dsp::modes::sstv::rgb::from_label(submode)
+                .expect("validated by ModeConfig::parse");
+            DemodKind::Streaming(Box::new(RgbDemod::new(m)))
+        }
         ModeConfig::Throb { submode, center_hz } => {
             let v = ThrobVariant::from_label(submode).expect("validated by ModeConfig::parse");
             DemodKind::Streaming(Box::new(ThrobDemod::new(v, *center_hz)))
@@ -122,6 +130,13 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Wspr => windowed(Box::new(WsprDemod::new())),
         ModeConfig::Fst4 { tr_s } => windowed(Box::new(Fst4Demod::new(*tr_s as u32))),
         ModeConfig::Js8 { submode } => windowed(Box::new(Js8Demod::new(js8_submode(submode)))),
+        ModeConfig::Jt4 { submode } => {
+            let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
+            windowed(Box::new(Jt4Demod::new(v)))
+        }
+        ModeConfig::Msk144 { freq_hz } => {
+            DemodKind::Streaming(Box::new(Msk144Demod::with_params(*freq_hz, 100.0)))
+        }
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
@@ -172,6 +187,11 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
             let v = HellVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(HellMod::new(v, *center_hz)))
         }
+        ModeConfig::Sstv { submode } => {
+            let m = omnimodem_dsp::modes::sstv::rgb::from_label(submode)
+                .expect("validated by ModeConfig::parse");
+            Some(Box::new(RgbMod::new(m)))
+        }
         ModeConfig::Throb { submode, center_hz } => {
             let v = ThrobVariant::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(ThrobMod::new(v, *center_hz)))
@@ -202,6 +222,11 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Wspr => Some(Box::new(WsprMod::new())),
         ModeConfig::Fst4 { tr_s } => Some(Box::new(Fst4Mod::new(*tr_s as u32))),
         ModeConfig::Js8 { submode } => Some(Box::new(Js8Mod::new(js8_submode(submode)))),
+        ModeConfig::Jt4 { submode } => {
+            let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(Jt4Mod::new(v)))
+        }
+        ModeConfig::Msk144 { freq_hz } => Some(Box::new(Msk144Mod::with_params(*freq_hz, 14))),
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
         }
@@ -257,6 +282,19 @@ mod tests {
     }
 
     #[test]
+    fn jt4_submodes_are_windowed_60s_with_modulators() {
+        for label in ["jt4a", "jt4b", "jt4c", "jt4d", "jt4e", "jt4f", "jt4g"] {
+            let cfg = ModeConfig::Jt4 { submode: label.into() };
+            assert!(
+                matches!(demod_kind(&cfg), DemodKind::Windowed(_, w) if (w - 60.0).abs() < 0.5),
+                "{label} not windowed @ 60 s"
+            );
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), Some(60.0));
+        }
+    }
+
+    #[test]
     fn fst4_is_windowed_with_a_modulator_per_tr_period() {
         for (tr, win) in [(15u16, 15.0f32), (60, 60.0), (120, 120.0)] {
             let cfg = ModeConfig::Fst4 { tr_s: tr };
@@ -290,6 +328,22 @@ mod tests {
         assert_eq!(ModeConfig::parse("js8:sub=turbo"), Some(ModeConfig::Js8 { submode: "turbo".into() }));
         assert_eq!(ModeConfig::parse("js8:sub=bogus"), Some(ModeConfig::Js8 { submode: "normal".into() }));
         assert_eq!(ModeConfig::Js8 { submode: "fast".into() }.to_mode_string(), "js8:sub=fast");
+    }
+
+    #[test]
+    fn msk144_is_streaming_with_a_modulator() {
+        let cfg = ModeConfig::Msk144 { freq_hz: 1500.0 };
+        assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "msk144 not streaming");
+        assert!(build_modulator(&cfg).is_some(), "no modulator for msk144");
+        assert_eq!(tx_slot_s(&cfg), None, "msk144 transmits without a time slot");
+        assert_eq!(native_rate(&cfg), Some(12_000));
+        // Parses and round-trips through the canonical mode string.
+        assert_eq!(ModeConfig::parse("msk144"), Some(ModeConfig::Msk144 { freq_hz: 1500.0 }));
+        assert_eq!(
+            ModeConfig::parse("msk144:freq=1000"),
+            Some(ModeConfig::Msk144 { freq_hz: 1000.0 })
+        );
+        assert_eq!(ModeConfig::Msk144 { freq_hz: 1500.0 }.to_mode_string(), "msk144:freq=1500");
     }
 
     #[test]

@@ -53,10 +53,10 @@ type operateView struct {
 // stagedImage is a picture chosen from the picker, held ready to transmit with a
 // live preview shown on the operate surface.
 type stagedImage struct {
-	name  string
-	bytes []byte
-	img   image.Image
-	w, h  int
+	name string
+	img  image.Image
+	w, h int
+	size int64 // source file size, for the preview header
 }
 
 func newOperateView(m *Model) *operateView {
@@ -85,7 +85,8 @@ func newOperateView(m *Model) *operateView {
 	// Size the TX watchdog to the mode's slot length now that it's known: windowed
 	// modes wait for the daemon's slot-align count-off before keying, so a fixed
 	// timeout would abort long-slot modes before they ever transmit.
-	v.tx = txState{watchdog: txWatchdog(v.slotSecs)}
+	dog := txWatchdog(v.slotSecs)
+	v.tx = txState{watchdog: dog, baseDog: dog}
 	return v
 }
 
@@ -122,6 +123,9 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 	case leaseMsg:
 		if msg.resp.GetGranted() {
 			v.tx.onLeaseGranted()
+			if v.tx.image != nil {
+				return v, transmitImageCmd(v.m.c, v.m.sel, v.tx.image)
+			}
 			return v, transmitCmd(v.m.c, v.m.sel, v.tx.payload)
 		}
 		v.tx.halt()
@@ -306,19 +310,18 @@ func pickerStartDir() string {
 // synchronous UI thread.
 const maxStageBytes = 8 << 20 // 8 MiB
 
-// stageImage loads a chosen file into the staging slot: it reads the raw bytes
-// for TX and decodes the image for the on-screen preview. Failures leave any
-// previously staged image untouched and surface a toast.
+// stageImage decodes a chosen file into the staging slot for preview and TX. The
+// image is downsampled to a mode-appropriate raster only at send time. Failures
+// leave any previously staged image untouched and surface a toast.
 func (v *operateView) stageImage(path string) {
-	if fi, err := os.Stat(path); err == nil && fi.Size() > maxStageBytes {
-		v.m.toast = ui.NewToast(fmt.Sprintf("Image too large (%s, max %s)",
-			ui.HumanSize(fi.Size()), ui.HumanSize(maxStageBytes)), ui.SeverityError)
-		return
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		v.m.toast = ui.NewToast("Cannot read image: "+err.Error(), ui.SeverityError)
-		return
+	var size int64
+	if fi, err := os.Stat(path); err == nil {
+		if fi.Size() > maxStageBytes {
+			v.m.toast = ui.NewToast(fmt.Sprintf("Image too large (%s, max %s)",
+				ui.HumanSize(fi.Size()), ui.HumanSize(maxStageBytes)), ui.SeverityError)
+			return
+		}
+		size = fi.Size()
 	}
 	img, err := ui.DecodeImageFile(path)
 	if err != nil {
@@ -326,24 +329,27 @@ func (v *operateView) stageImage(path string) {
 		return
 	}
 	b := img.Bounds()
-	v.staged = &stagedImage{name: filepath.Base(path), bytes: data, img: img, w: b.Dx(), h: b.Dy()}
+	v.staged = &stagedImage{name: filepath.Base(path), img: img, w: b.Dx(), h: b.Dy(), size: size}
 	v.compose = "" // the preview replaces the compose line; drop any half-typed text
 	v.m.toast = ui.NewToast(fmt.Sprintf("Staged %s — enter to transmit", v.staged.name), ui.SeverityInfo)
 }
 
 // sendImage transmits the staged picture over the current picture-capable mode.
-//
-// TODO(GRA-291/GRA-290): this hands the raw on-disk file bytes (PNG/JPEG/GIF
-// container and all) to Transmit. The daemon's picture encoder (GRA-290) is
-// still a text-only stub, so until it lands and defines the on-air payload
-// format, nothing recognisable goes out — the daemon rejects the non-text
-// payload and the operator sees the RPC error. Revisit the payload shape (raw
-// file vs. decoded luminance/RGB raster) when wiring up GRA-290.
+// The decoded image is downsampled to a mode-appropriate raster and handed to the
+// daemon's TransmitImage encoder — not the text Transmit RPC — so the picture is
+// modulated as pixels rather than dumped as garbage "text" the modulator rejects.
 func (v *operateView) sendImage() tea.Cmd {
 	if v.tx.active() || v.staged == nil {
 		return nil
 	}
-	v.tx.begin(v.staged.bytes)
+	ps, ok := buildPictureSend(v.modeLabel, v.staged.img)
+	if !ok {
+		v.m.toast = ui.NewToast(
+			fmt.Sprintf("%s can't transmit a picture — use an SSTV or WEFAX mode", v.modeLabel),
+			ui.SeverityError)
+		return nil
+	}
+	v.tx.beginImage(ps)
 	return acquireLeaseCmd(v.m.c, v.m.sel)
 }
 
@@ -499,7 +505,7 @@ func (v *operateView) stagedPreview(w, h int) string {
 	}
 	art := ui.RenderImageHalfBlock(s.img, previewCols, previewRows)
 	header := ui.Title.Render("Ready to send: ") +
-		ui.Accent.Render(fmt.Sprintf("%s  %d×%d  %s", s.name, s.w, s.h, ui.HumanSize(int64(len(s.bytes)))))
+		ui.Accent.Render(fmt.Sprintf("%s  %d×%d  %s", s.name, s.w, s.h, ui.HumanSize(s.size)))
 	var b strings.Builder
 	b.WriteString(header + "\n\n")
 	b.WriteString(art + "\n\n")

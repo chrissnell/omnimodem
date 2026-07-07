@@ -26,6 +26,7 @@ type ModemClient interface {
 	AcquireTxLease(context.Context, uint32) (*pb.TxLeaseResponse, error)
 	ReleaseTxLease(context.Context, uint32) error
 	Transmit(context.Context, uint32, []byte) (uint64, error)
+	TransmitImage(ctx context.Context, ch, width, height uint32, rgb []byte, color bool, txspp uint32) (uint64, error)
 	Subscribe(context.Context) (pb.ModemControl_SubscribeEventsClient, error)
 	Close() error
 }
@@ -109,6 +110,16 @@ func (g *grpcClient) ReleaseTxLease(ctx context.Context, ch uint32) error {
 
 func (g *grpcClient) Transmit(ctx context.Context, ch uint32, payload []byte) (uint64, error) {
 	r, err := g.c.Transmit(ctx, &pb.TransmitRequest{Channel: ch, Payload: payload})
+	if err != nil {
+		return 0, err
+	}
+	return r.GetTransmitId(), nil
+}
+
+func (g *grpcClient) TransmitImage(ctx context.Context, ch, width, height uint32, rgb []byte, color bool, txspp uint32) (uint64, error) {
+	r, err := g.c.TransmitImage(ctx, &pb.TransmitImageRequest{
+		Channel: ch, Width: width, Height: height, Rgb: rgb, Color: color, Txspp: txspp,
+	})
 	if err != nil {
 		return 0, err
 	}

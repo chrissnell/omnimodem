@@ -26,6 +26,12 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"thormicro", "thor4", "thor5", "thor8", "thor11", "thor16", "thor22",
 		"thor25x4", "thor50x1", "thor50x2", "thor100",
 		"feldhell", "slowhell", "hellx5", "hellx9", "hell80",
+		"scottie1", "scottie2", "scottiedx", "martin1", "martin2", "sc2-180", "sc2-120", "sc2-60",
+		"robot72", "robot36", "robot24", "bw8", "bw12", "p3", "p5", "p7",
+		"pd50", "pd90", "pd120", "pd160", "pd180", "pd240", "pd290",
+		"mp73", "mp115", "mp140", "mp175",
+		"mr73", "mr90", "mr115", "mr140", "mr175", "ml180", "ml240", "ml280", "ml320",
+		"mp73-n", "mp110-n", "mp140-n", "mc110-n", "mc140-n", "mc180-n", "avt90",
 		"mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
 		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l",
 		"contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
@@ -35,7 +41,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"contestia64_500", "contestia64_1000", "contestia64_2000",
 		"mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l",
 		"navtex", "sitorb", "wefax576", "wefax288",
-		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "wspr", "js8",
+		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "msk144", "wspr", "js8",
 	}
 	for _, label := range want {
 		if modeByLabel(label) == nil {
@@ -408,6 +414,32 @@ func TestSequencerModesAttachLadderWithOwnSlot(t *testing.T) {
 		if got := v.Render(80, 20); !strings.Contains(got, strings.ToUpper(tc.mode)+" · slot") {
 			t.Errorf("%s header should name the mode, got %q", tc.mode, firstLine(got))
 		}
+	}
+}
+
+// MSK144 is a streaming meteor-scatter QSO mode: it attaches the sequencer
+// ladder (like FT8) but has no fixed T/R slot (slotSecs 0), since the demod runs
+// continuously on short bursts rather than a windowed grid.
+func TestMSK144IsStreamingSequencer(t *testing.T) {
+	mi := modeByLabel("msk144")
+	if mi == nil {
+		t.Fatal("msk144 not offered in the modes list")
+	}
+	if mi.shape != "sequencer" {
+		t.Fatalf("msk144 shape = %q, want sequencer", mi.shape)
+	}
+	if mi.slotSecs != 0 {
+		t.Fatalf("msk144 slotSecs = %v, want 0 (streaming)", mi.slotSecs)
+	}
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "msk144"}
+	m.sel = 0
+	v := newOperateView(m)
+	if v.seq == nil {
+		t.Fatal("msk144 should attach a sequencer ladder")
+	}
+	if v.beacon {
+		t.Fatal("msk144 must not be a beacon")
 	}
 }
 

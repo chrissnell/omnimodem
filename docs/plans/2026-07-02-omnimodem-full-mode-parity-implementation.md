@@ -230,10 +230,13 @@ Independent of the fldigi track (reuses the FT8 windowed path — STFT → Costa
 - **New block:** `fec/qra65.rs` — the QRA65 (Q-ary Repeat-Accumulate) soft decoder; the one genuinely new FEC family. KAT against `qratest` output first.
 - **Modes:** Q65 submodes A–E × T/R periods (parametric).
 
-### Phase W4 — JT4
+### Phase W4 — JT4 — ✅ landed
 - **Reference:** `wsjtx/lib/{jt4.f90,jt4_decode.f90,jt4code.f90}`.
 - **New block:** none — reuses `fec::fano` (K=32) + 4-FSK front end already present for JT9.
 - **Modes:** JT4 submodes A–G (tone-spacing parametric). Lowest WSJT-X priority (legacy EME).
+- **Executable plan:** `docs/plans/2026-07-06-omnimodem-w4-jt4.md`. TX bit-domain path
+  (Fano-encode → JT4 interleave → `npr` sync into 4-FSK) is bit-exact to `gen4`
+  (`vectors/jt4_tones.json`); all seven submodes selectable in the TUI + daemon.
 
 ### Phase W5 — JS8
 - **Reference:** `js8call/{JS8Submode.*,jsc.cpp,jsc_list.cpp,jsc_map.cpp,varicode.cpp}`, `js8call/lib/js8/`, `js8call/lib/js8{a,b,c,e}_decode.f90`.

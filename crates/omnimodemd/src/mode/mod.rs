@@ -40,6 +40,12 @@ pub enum ModeConfig {
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
     Hell { submode: String, center_hz: f32 },
+    /// SSTV (MMSSTV parity): analog line-scan picture modes. `submode` is an
+    /// `sstv::SstvMode` label (all 43 SSTVModeList submodes: Scottie/Martin/SC2/
+    /// Robot/BW/Pasokon/PD/MP/MR/ML/narrow MN/MC/AVT). A colour facsimile mode — RX
+    /// emits an RGB `Image` (channels=3); the on-air frequencies are fixed by the
+    /// SSTV standard, so it carries no tunable params.
+    Sstv { submode: String },
     /// Throb family (fldigi parity): `submode` is a `throb::ThrobVariant` label
     /// (`throb1`/`throb2`/`throb4`/`throbx1`/`throbx2`/`throbx4`), `center_hz` the
     /// audio carrier. Dual-tone MFSK at 8 kHz.
@@ -74,6 +80,12 @@ pub enum ModeConfig {
     Fst4 { tr_s: u16 },
     // W5 JS8: parametric over the submode (normal/fast/turbo/slow).
     Js8 { submode: String },
+    /// JT4 (WSJT-X legacy EME): `submode` is a `jt4::Jt4Submode` label
+    /// (`jt4a`…`jt4g`), differing only in 4-FSK tone spacing. 60 s on the minute.
+    Jt4 { submode: String },
+    /// W2 WSJT-X: MSK144 meteor scatter. `freq_hz` is the audio centre frequency
+    /// (default 1500). A streaming, ping-buffered short-burst offset-MSK mode.
+    Msk144 { freq_hz: f32 },
 }
 
 impl ModeConfig {
@@ -138,6 +150,9 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::sstv::rgb::from_label(m).is_some() => {
+                Some(ModeConfig::Sstv { submode: m.to_string() })
+            }
             m if omnimodem_dsp::modes::throb::ThrobVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Throb {
                     submode: m.to_string(),
@@ -193,6 +208,10 @@ impl ModeConfig {
                 }
                 .to_string(),
             }),
+            "msk144" => Some(ModeConfig::Msk144 { freq_hz: f("freq", 1500.0) }),
+            m if omnimodem_dsp::modes::jt4::Jt4Submode::from_label(m).is_some() => {
+                Some(ModeConfig::Jt4 { submode: m.to_string() })
+            }
             "olivia" => {
                 Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
             }
@@ -217,6 +236,7 @@ impl ModeConfig {
                 format!("{speed}:center={center_hz},mycall={mycall},directed={directed}")
             }
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Sstv { submode } => submode.clone(),
             ModeConfig::Throb { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
@@ -226,6 +246,9 @@ impl ModeConfig {
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
             ModeConfig::Js8 { submode } => format!("js8:sub={submode}"),
+            // The submode lives in the JT4 label itself (jt4a…jt4g).
+            ModeConfig::Jt4 { submode } => submode.clone(),
+            ModeConfig::Msk144 { freq_hz } => format!("msk144:freq={freq_hz}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
             }
@@ -318,6 +341,9 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("hell")
             }
+            ModeConfig::Sstv { submode } => omnimodem_dsp::modes::sstv::rgb::from_label(submode)
+                .map(|v| v.label())
+                .unwrap_or("sstv"),
             ModeConfig::Throb { submode, .. } => {
                 omnimodem_dsp::modes::throb::ThrobVariant::from_label(submode)
                     .map(|v| v.label())
@@ -350,6 +376,10 @@ impl ModeConfig {
             ModeConfig::Wspr => "wspr",
             ModeConfig::Fst4 { .. } => "fst4",
             ModeConfig::Js8 { .. } => "js8",
+            ModeConfig::Jt4 { submode } => omnimodem_dsp::modes::jt4::Jt4Submode::from_label(submode)
+                .map(|v| v.label())
+                .unwrap_or("jt4a"),
+            ModeConfig::Msk144 { .. } => "msk144",
             ModeConfig::Olivia { .. } => "olivia",
         }
     }
@@ -581,6 +611,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolves_wired_sstv_family() {
+        // The wired SSTV submodes (RGB-sequential + Robot colour + B/W + Pasokon) resolve to a facsimile mode.
+        for label in [
+            "scottie1", "scottie2", "scottiedx", "martin1", "martin2",
+            "sc2-180", "sc2-120", "sc2-60", "robot72", "robot36", "robot24",
+            "bw8", "bw12", "p3", "p5", "p7",
+            "pd50", "pd90", "pd120", "pd160", "pd180", "pd240", "pd290",
+            "mp73", "mp115", "mp140", "mp175",
+            "mr73", "mr90", "mr115", "mr140", "mr175", "ml180", "ml240", "ml280", "ml320",
+            "mp73-n", "mp110-n", "mp140-n", "mc110-n", "mc140-n", "mc180-n", "avt90",
+        ] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Sstv { submode: label.into() })
+            );
+        }
+        // Canonical mode string round-trips.
+        let c = ModeConfig::Sstv { submode: "avt90".into() };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        // A non-SSTV label still doesn't resolve to SSTV.
+        assert!(!matches!(ModeConfig::parse("nonesuch"), Some(ModeConfig::Sstv { .. })));
+    }
+
+    #[test]
     fn parse_resolves_throb_family() {
         // Every fldigi Throb / ThrobX submode resolves, defaulting to 1500 Hz.
         for label in ["throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4"] {
@@ -702,6 +756,26 @@ mod tests {
         assert_eq!(ModeConfig::parse("jt65"), Some(ModeConfig::Jt65));
         assert_eq!(ModeConfig::parse("jt9"), Some(ModeConfig::Jt9));
         assert_eq!(ModeConfig::parse("wspr"), Some(ModeConfig::Wspr));
+        assert_eq!(ModeConfig::parse("fst4"), Some(ModeConfig::Fst4 { tr_s: 15 }));
+        assert_eq!(ModeConfig::parse("msk144"), Some(ModeConfig::Msk144 { freq_hz: 1500.0 }));
+        assert_eq!(
+            ModeConfig::parse("msk144:freq=1200"),
+            Some(ModeConfig::Msk144 { freq_hz: 1200.0 })
+        );
+    }
+
+    #[test]
+    fn parse_resolves_jt4_submodes() {
+        for label in ["jt4a", "jt4b", "jt4c", "jt4d", "jt4e", "jt4f", "jt4g"] {
+            let cfg = ModeConfig::parse(label);
+            assert_eq!(cfg, Some(ModeConfig::Jt4 { submode: label.into() }));
+            // Round-trips through the canonical string and reports its own label.
+            let cfg = cfg.unwrap();
+            assert_eq!(cfg.to_mode_string(), label);
+            assert_eq!(cfg.label(), label);
+        }
+        assert_eq!(ModeConfig::parse("jt4"), None);
+        assert_eq!(ModeConfig::parse("jt4h"), None);
     }
 
     #[test]
@@ -771,6 +845,8 @@ mod tests {
                 mycall: "k1abc".into(),
                 directed: true,
             },
+            ModeConfig::Fst4 { tr_s: 60 },
+            ModeConfig::Msk144 { freq_hz: 1500.0 },
         ];
         for c in cases {
             assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c.clone()), "round-trip {c:?}");

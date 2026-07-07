@@ -19,15 +19,16 @@ type Fake struct {
 	NextTransmitID uint64
 	Err            error // if set, every RPC returns it
 
-	StateCalls    int // GetState invocations (asserts a live-state refresh happened)
-	ChannelCalls  []*pb.ConfigureChannelRequest
-	AudioCalls    []*pb.ConfigureAudioRequest
-	PttCalls      []*pb.ConfigurePttRequest
-	GainCalls     []*pb.SetAudioGainRequest
-	SpectrumCalls []*pb.ConfigureSpectrumRequest
-	TransmitCalls []*pb.TransmitRequest
-	LeaseAcquired []uint32
-	LeaseReleased []uint32
+	StateCalls         int // GetState invocations (asserts a live-state refresh happened)
+	ChannelCalls       []*pb.ConfigureChannelRequest
+	AudioCalls         []*pb.ConfigureAudioRequest
+	PttCalls           []*pb.ConfigurePttRequest
+	GainCalls          []*pb.SetAudioGainRequest
+	SpectrumCalls      []*pb.ConfigureSpectrumRequest
+	TransmitCalls      []*pb.TransmitRequest
+	TransmitImageCalls []*pb.TransmitImageRequest
+	LeaseAcquired      []uint32
+	LeaseReleased      []uint32
 }
 
 func (f *Fake) GetState(context.Context) (*pb.ModemState, error) {
@@ -99,6 +100,13 @@ func (f *Fake) ReleaseTxLease(_ context.Context, ch uint32) error {
 
 func (f *Fake) Transmit(_ context.Context, ch uint32, payload []byte) (uint64, error) {
 	f.TransmitCalls = append(f.TransmitCalls, &pb.TransmitRequest{Channel: ch, Payload: payload})
+	return f.NextTransmitID, f.Err
+}
+
+func (f *Fake) TransmitImage(_ context.Context, ch, width, height uint32, rgb []byte, color bool, txspp uint32) (uint64, error) {
+	f.TransmitImageCalls = append(f.TransmitImageCalls, &pb.TransmitImageRequest{
+		Channel: ch, Width: width, Height: height, Rgb: rgb, Color: color, Txspp: txspp,
+	})
 	return f.NextTransmitID, f.Err
 }
 

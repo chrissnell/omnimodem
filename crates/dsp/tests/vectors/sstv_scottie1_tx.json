@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "upstream": "n5ac/mmsstv @ 8060b5f",
+    "mode": "Scottie 1 (smSCT1)", "vis": "0x3c", "samp_freq": 11025,
+    "linked_unmodified": ["sstv.cpp (CSSTVSET,CSSTVMOD)", "fir.cpp"],
+    "transcribed": ["Main.cpp:6940-7107 VIS", "Main.cpp:6173 LineSCT", "ComLib.cpp:3491 ColorToFreq"],
+    "driver": "scratch/refvectors/sstv_tx_dump.cxx via build_sstv_tx.sh",
+    "note": "symbols (freq,ms) are bit-exact; pcm is FP-tolerance (VCO+BPF)"
+  },
+  "timing_samples": { "m_KS": 1524.0960, "m_OF": 115.7625, "m_OFP": 117.9675, "m_SG": 1540.6335, "m_CG": 3064.7295, "m_SB": 3081.2670, "m_CB": 4605.3630, "m_L": 256, "m_TxSampFreq": 11025.0000 },
+  "symbol_count": 3870, "nlines": 4, "symbol_fnv1a": "0x812e72b7fb4fbac1",
+  "vis_symbols": [[1900,300.0000],[1200,10.0000],[1900,300.0000],[1200,30.0000],[1300,30.0000],[1300,30.0000],[1100,30.0000],[1100,30.0000],[1100,30.0000],[1100,30.0000],[1300,30.0000],[1300,30.0000],[1200,30.0000],[1200,9.0000],[9692,1.5000],[9692,0.4320],[9692,0.4320],[9692,0.4320],[9692,0.4320],[9692,0.4320],[9692,0.4320],[9692,0.4320]],
+  "pcm": { "count": 29016, "min": -27110, "max": 26706, "fnv1a": "0x6885f3404a2afe0f",
+    "first16": [111,102,93,425,413,-825,-1850,-823,-258,-3520,-5610,2483,16291,17017,-2903,-23839] }
+}
