@@ -124,6 +124,155 @@ pub fn unpack_msgbits(bits: &[u8; KK]) -> Option<(String, u8)> {
     Some((msg, i3bit))
 }
 
+// ---------------------------------------------------------------------------
+// JSC data-frame transport (FrameData / fast-data)
+// ---------------------------------------------------------------------------
+//
+// JS8 sends arbitrary-length text as a sequence of 72-bit frames whose payload
+// is JSC-compressed (`framing::jsc`). In the "fast-data" design the `i3bit`
+// header carries the flags and the whole 72-bit payload is compressed data +
+// pad — there is no in-payload header. ref: varicode.cpp `packCompressedMessage`
+// (prefix `{}`), `unpackFastDataMessage`, `buildMessageFrames`.
+
+/// `i3bit` transmission-type flags (a 3-bit field). ref: varicode.h:36-39.
+pub const JS8_FIRST: u8 = 1; // first frame of a message
+pub const JS8_LAST: u8 = 2; // last frame of a message
+pub const JS8_DATA: u8 = 4; // JS8CallData: flagged (no in-payload frame-type header)
+
+/// Frame payload width in bits (`= 12 chars × 6 = 64-bit value + 8-bit rem`).
+pub const FRAME_BITS: usize = 72;
+
+/// Pack a raw 72-bit frame payload + `i3bit` into the 87 LDPC message bits
+/// (`[72 payload | 3 i3bit | 12 CRC]`). This is the general form of
+/// [`pack_msgbits`]; directed / data frames supply their own 72 payload bits.
+pub fn pack_frame(payload: &[bool; FRAME_BITS], i3bit: u8) -> [u8; KK] {
+    let mut bits = [0u8; KK];
+    for (i, &b) in payload.iter().enumerate() {
+        bits[i] = b as u8;
+    }
+    for b in 0..3 {
+        bits[72 + b] = (i3bit >> (2 - b)) & 1;
+    }
+    // CRC-12 over the same 11-byte buffer form as pack_msgbits (byte9 = i3bit<<5).
+    let mut buf = [0u8; 11];
+    for (i, byte) in buf.iter_mut().take(9).enumerate() {
+        let mut v = 0u8;
+        for b in 0..8 {
+            v = (v << 1) | bits[i * 8 + b];
+        }
+        *byte = v;
+    }
+    buf[9] = (i3bit & 0x07) << 5;
+    let crc = js8_crc12(&buf);
+    for b in 0..12 {
+        bits[75 + b] = ((crc >> (11 - b)) & 1) as u8;
+    }
+    bits
+}
+
+/// Pack the front of `text` into one fast-data frame: JSC-compress, append as
+/// many whole codewords as fit under 72 bits, then pad (`0` then all `1`).
+/// Returns `(72 payload bits, chars_consumed)`. ref: packCompressedMessage.
+pub fn pack_fast_data(text: &str) -> ([bool; FRAME_BITS], usize) {
+    use crate::framing::jsc;
+    let mut frame: Vec<bool> = Vec::with_capacity(FRAME_BITS);
+    let mut chars = 0usize;
+    for (bits, n) in jsc::compress(text) {
+        if frame.len() + bits.len() < FRAME_BITS {
+            frame.extend(bits);
+            chars += n as usize;
+        } else {
+            break;
+        }
+    }
+    // Pad: first pad bit 0, the rest 1 (unpad seeks the last 0 from the end).
+    let pad = FRAME_BITS - frame.len();
+    for i in 0..pad {
+        frame.push(i != 0);
+    }
+    let mut out = [false; FRAME_BITS];
+    out.copy_from_slice(&frame);
+    (out, chars)
+}
+
+/// Unpack a fast-data frame payload: strip the pad (everything after the last
+/// `0`) and JSC-decompress. ref: unpackFastDataMessage (`JS8_FAST_DATA_CAN_USE_HUFF=0`).
+pub fn unpack_fast_data(payload: &[bool; FRAME_BITS]) -> String {
+    use crate::framing::jsc;
+    // n = lastIndexOf(0); bits = payload[0..n].
+    let n = payload.iter().rposition(|&b| !b).unwrap_or(0);
+    jsc::decompress(&payload[0..n])
+}
+
+/// Split `text` into successive fast-data frame payloads (each 72 bits). The
+/// number of frames depends on how densely JSC packs the text.
+pub fn pack_data_frames(text: &str) -> Vec<[bool; FRAME_BITS]> {
+    let bytes = text.as_bytes();
+    let mut frames = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let rest = std::str::from_utf8(&bytes[pos..]).unwrap_or("");
+        let (frame, chars) = pack_fast_data(rest);
+        // Guard against a stall (a codeword that can't fit shouldn't happen for
+        // in-dictionary text, but never loop forever).
+        let advance = chars.max(1);
+        frames.push(frame);
+        pos += advance;
+        if chars == 0 {
+            break;
+        }
+    }
+    frames
+}
+
+/// Reassemble the text carried by an ordered list of fast-data frame payloads.
+pub fn unpack_data_frames(frames: &[[bool; FRAME_BITS]]) -> String {
+    frames.iter().map(unpack_fast_data).collect()
+}
+
+/// Verify the CRC of an 87-bit frame and decode it, routing by frame type:
+/// a `JS8_DATA`-flagged frame is JSC-decompressed; otherwise it is the base
+/// 12-char text frame. Returns `(text, i3bit)`, or `None` if the CRC fails.
+pub fn unpack_frame(bits: &[u8; KK]) -> Option<(String, u8)> {
+    let i3bit = frame_type(bits);
+    // CRC check (same buffer form as pack).
+    let mut buf = [0u8; 11];
+    for (i, byte) in buf.iter_mut().take(9).enumerate() {
+        let mut v = 0u8;
+        for b in 0..8 {
+            v = (v << 1) | bits[i * 8 + b];
+        }
+        *byte = v;
+    }
+    buf[9] = (i3bit & 0x07) << 5;
+    let want = js8_crc12(&buf);
+    let mut got = 0u16;
+    for b in 0..12 {
+        got = (got << 1) | bits[75 + b] as u16;
+    }
+    if got != want {
+        return None;
+    }
+    if i3bit & JS8_DATA != 0 {
+        let mut payload = [false; FRAME_BITS];
+        for (i, p) in payload.iter_mut().enumerate() {
+            *p = bits[i] != 0;
+        }
+        Some((unpack_fast_data(&payload), i3bit))
+    } else {
+        // Base 12-char text field.
+        let mut msg = String::with_capacity(MSG_CHARS);
+        for i in 0..MSG_CHARS {
+            let mut w = 0u32;
+            for b in 0..6 {
+                w = (w << 1) | bits[i * 6 + b] as u32;
+            }
+            msg.push(JS8_ALPHABET[w as usize] as char);
+        }
+        Some((msg, i3bit))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +290,42 @@ mod tests {
             assert_eq!(got, padded);
             assert_eq!(gi3, i3);
         }
+    }
+
+    /// A short text fits in one fast-data frame and round-trips through the
+    /// JSC transport (compress → pad → unpad → decompress).
+    #[test]
+    fn fast_data_single_frame_roundtrip() {
+        let text = "HELLO WORLD";
+        let (payload, chars) = pack_fast_data(text);
+        assert_eq!(chars, text.len(), "one frame should consume the whole short message");
+        assert_eq!(unpack_fast_data(&payload), text);
+    }
+
+    /// A long text spans multiple fast-data frames and reassembles exactly
+    /// (JSC is lossless for in-dictionary uppercase text).
+    #[test]
+    fn multi_frame_data_roundtrip() {
+        let text = "CQ CQ CQ DE K1ABC K1ABC THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 73";
+        let frames = pack_data_frames(text);
+        assert!(frames.len() > 1, "expected multiple frames, got {}", frames.len());
+        assert_eq!(unpack_data_frames(&frames), text);
+    }
+
+    /// A raw 72-bit data payload packs into 87 msgbits with the data flag and a
+    /// valid CRC, and the frame type reads back.
+    #[test]
+    fn data_frame_msgbits_roundtrip() {
+        let (payload, _n) = pack_fast_data("TEST 123");
+        let bits = pack_frame(&payload, JS8_DATA | JS8_FIRST | JS8_LAST);
+        assert_eq!(frame_type(&bits), JS8_DATA | JS8_FIRST | JS8_LAST);
+        // The 72 payload bits survive into msgbits[0..72].
+        for (i, &b) in payload.iter().enumerate() {
+            assert_eq!(bits[i], b as u8);
+        }
+        // CRC is self-consistent: unpack_msgbits verifies it (payload isn't a
+        // valid 12-char field, but the CRC must still check).
+        assert!(unpack_msgbits(&bits).is_some(), "data-frame CRC must verify");
     }
 
     /// A single flipped message bit fails the CRC check.

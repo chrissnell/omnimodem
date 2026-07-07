@@ -18,7 +18,9 @@
 use crate::fec::ldpc_js8::{encode174, extract_message, js8_174_87_code};
 use crate::fec::llr::demap_fsk_identity;
 use crate::fec::osd::osd_decode;
-use crate::framing::js8_message::{pack_msgbits, unpack_msgbits};
+use crate::framing::js8_message::{
+    pack_fast_data, pack_frame, unpack_frame, JS8_DATA, JS8_FIRST, JS8_LAST,
+};
 use crate::frontend::modulate::Gfsk;
 use crate::mode::{BlockDemodulator, DemodShape, Duplex, ModError, ModeCaps, Modulator};
 use crate::types::{Frame, FrameMeta, FramePayload, Sample};
@@ -120,22 +122,22 @@ pub fn js8_symbols(msgbits: &[u8; 87], submode: Js8Submode) -> [u8; JS8_NSYM] {
 // Transmit
 // ---------------------------------------------------------------------------
 
-/// JS8 modulator for one submode. Accepts a `Text` payload (a ≤12-char message
-/// over the JS8 alphabet), packs it (base 87-bit frame), builds the 79 tones,
-/// and shapes them with GFSK at the submode's rate.
+/// JS8 modulator for one submode. Accepts a `Text` payload, JSC-compresses it
+/// into a fast-data frame (`JS8_DATA`), builds the 79 tones, and shapes them
+/// with GFSK at the submode's rate. Text longer than one frame is truncated to
+/// what fits; multi-frame transmissions are the daemon's job (this is one
+/// window). ref: varicode.cpp `packFastDataMessage`.
 pub struct Js8Mod {
     submode: Js8Submode,
     base_hz: f32,
-    /// Frame type carried in the message (`i3bit`). Defaults to `FrameData`.
-    i3bit: u8,
 }
 
 impl Js8Mod {
     pub fn new(submode: Js8Submode) -> Self {
-        Js8Mod { submode, base_hz: JS8_BASE_HZ, i3bit: 4 }
+        Js8Mod { submode, base_hz: JS8_BASE_HZ }
     }
     pub fn with_base(submode: Js8Submode, base_hz: f32) -> Self {
-        Js8Mod { submode, base_hz, i3bit: 4 }
+        Js8Mod { submode, base_hz }
     }
 }
 
@@ -160,7 +162,9 @@ impl Modulator for Js8Mod {
             FramePayload::Text(t) => t.clone(),
             _ => return Err(ModError::UnsupportedPayload("js8 needs text")),
         };
-        let msgbits = pack_msgbits(&text, self.i3bit);
+        // One JSC fast-data frame (first = last for a single window).
+        let (payload, _chars) = pack_fast_data(&text);
+        let msgbits = pack_frame(&payload, JS8_DATA | JS8_FIRST | JS8_LAST);
         let syms = js8_symbols(&msgbits, self.submode);
         let sym_u32: Vec<u32> = syms.iter().map(|&s| s as u32).collect();
         let p = self.submode.params();
@@ -333,7 +337,7 @@ impl BlockDemodulator for Js8Demod {
                 }
             }
             let msgbits = extract_message(&cw);
-            let (text, _i3) = match unpack_msgbits(&msgbits) {
+            let (text, _i3) = match unpack_frame(&msgbits) {
                 Some(v) => v,
                 None => continue,
             };
@@ -418,7 +422,7 @@ mod tests {
     #[test]
     fn loopback_normal() {
         // 12-char message over the JS8 alphabet (no padding ambiguity).
-        let msg = "K1ABCFN42000";
+        let msg = "CQ K1ABC";
         let wave = Js8Mod::new(Js8Submode::Normal).modulate(&Frame::text(msg)).unwrap();
         assert_eq!(wave.len(), JS8_NSYM * Js8Submode::Normal.params().nsps);
         // Pad to a full window as the daemon would present it.
@@ -456,31 +460,67 @@ mod tests {
     /// arrays and the parametric spectrogram (nsps=1200, spacing=10 Hz).
     #[test]
     fn loopback_fast() {
-        assert!(loopback_ok(Js8Submode::Fast, "TESTFAST0000", None), "Fast loopback failed");
+        assert!(loopback_ok(Js8Submode::Fast, "FAST QSO", None), "Fast loopback failed");
     }
 
     /// Turbo (nsps=600, 20-baud, symmetrical Costas) round-trips end to end.
     #[test]
     fn loopback_turbo() {
-        assert!(loopback_ok(Js8Submode::Turbo, "TURBO0000000", None), "Turbo loopback failed");
+        assert!(loopback_ok(Js8Submode::Turbo, "TURBO", None), "Turbo loopback failed");
     }
 
     /// Slow (nsps=3840, 3.125-baud, symmetrical Costas) round-trips end to end.
     #[test]
     fn loopback_slow() {
-        assert!(loopback_ok(Js8Submode::Slow, "SLOW00000000", None), "Slow loopback failed");
+        assert!(loopback_ok(Js8Submode::Slow, "SLOW", None), "Slow loopback failed");
+    }
+
+    /// Full multi-frame data transport through audio: a message longer than one
+    /// frame is JSC-split, each frame modulated and decoded through Turbo audio,
+    /// then reassembled to the original. Exercises the FrameData path end to end.
+    #[test]
+    fn multi_frame_audio_roundtrip() {
+        use crate::framing::js8_message::pack_data_frames;
+        let message = "CQ CQ DE K1ABC PSE QSL 73 GL";
+        let frames = pack_data_frames(message);
+        assert!(frames.len() > 1, "expected a multi-frame message, got {}", frames.len());
+        let sm = Js8Submode::Turbo;
+        let p = sm.params();
+        let mut got = String::new();
+        for (i, payload) in frames.iter().enumerate() {
+            let i3 = JS8_DATA
+                | if i == 0 { JS8_FIRST } else { 0 }
+                | if i + 1 == frames.len() { JS8_LAST } else { 0 };
+            let msgbits = pack_frame(payload, i3);
+            let syms = js8_symbols(&msgbits, sm);
+            let gfsk = Gfsk::new(JS8_RATE as f32, p.nsps, JS8_BASE_HZ, p.tone_spacing as f32, 2.0);
+            let wave = gfsk.modulate(&syms.iter().map(|&s| s as u32).collect::<Vec<_>>());
+            let win_len = (JS8_RATE as f32 * p.tx_seconds as f32) as usize;
+            let mut win = vec![0.0f32; win_len.max(wave.len())];
+            win[..wave.len()].copy_from_slice(&wave);
+            let decodes = Js8Demod::new(sm).decode_window(&win, 0);
+            let frame_text = decodes
+                .iter()
+                .find_map(|f| match &f.payload {
+                    FramePayload::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .expect("frame did not decode");
+            got.push_str(&frame_text);
+        }
+        assert_eq!(got, message, "reassembled multi-frame message mismatch");
     }
 
     /// Loopback survives AWGN.
     #[test]
     fn loopback_under_awgn() {
-        assert!(loopback_ok(Js8Submode::Normal, "K1ABCFN42000", Some(0.1)), "AWGN loopback failed");
+        assert!(loopback_ok(Js8Submode::Normal, "CQ K1ABC", Some(0.1)), "AWGN loopback failed");
     }
 
     /// Loopback survives an audio subcarrier offset.
     #[test]
     fn loopback_offset_subcarrier() {
-        let msg = "CQCQCQ000000";
+        let msg = "TEST 73";
         let wave = Js8Mod::with_base(Js8Submode::Normal, 1200.0)
             .modulate(&Frame::text(msg))
             .unwrap();
