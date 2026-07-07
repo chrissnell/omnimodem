@@ -267,8 +267,7 @@ mod tests {
         assert!(JS8_174_87_MN.iter().all(|c| c.len() == 3));
     }
 
-    /// CRC-12 is 12 bits, deterministic, and the `xor 42` is applied. (On-air
-    /// authority is the cross-decode gate; boost is unavailable here.)
+    /// CRC-12 is 12 bits, deterministic, and the `xor 42` is applied.
     #[test]
     fn crc12_is_12_bits_and_xored() {
         let a = augmented_crc12(b"\x01\x02\x03\x00\x00");
@@ -276,5 +275,22 @@ mod tests {
         assert_eq!(js8_crc12(b"\x01\x02\x03\x00\x00"), a ^ 42);
         // All-zero augmented message → zero remainder.
         assert_eq!(augmented_crc12(&[0u8; 11]), 0);
+    }
+
+    /// Bit-exact vs the reference `crc12.cpp` (boost `augmented_crc<12,0xc06>`).
+    /// Golden values from `scratch/refvectors/js8/crc/crc_dump.cpp` (js8call @
+    /// a7ff1be). Confirms both the augmented-CRC transcription and the `xor 42`.
+    #[test]
+    fn crc12_matches_boost_reference() {
+        let cases: &[([u8; 11], u16, u16)] = &[
+            ([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0, 42),
+            ([1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0], 280, 306),
+            ([0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0, 0], 412, 438),
+            ([0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x11, 0x80, 0], 2636, 2662),
+        ];
+        for (buf, raw, xor42) in cases {
+            assert_eq!(augmented_crc12(buf), *raw, "augmented_crc12 mismatch for {buf:02x?}");
+            assert_eq!(js8_crc12(buf), *xor42, "js8_crc12 mismatch for {buf:02x?}");
+        }
     }
 }
