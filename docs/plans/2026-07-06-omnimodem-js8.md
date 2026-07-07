@@ -95,7 +95,9 @@ Pinned from `js8call/` at the workspace commit (record the exact hash — `a7ff1
 - ✅ **Task 2.1 — base 87-bit message pack** landed & gated (`framing/js8_message.rs`): `genjs8`'s 12-char/6-bit alphabet + i3bit + CRC-12, self-consistent round-trip.
 - ✅ **Task 3 — modem** landed & gated (`modes/js8.rs`): `js8_symbols` bit-exact vs `genjs8` (both Costas variants); `Js8Mod` (GFSK) + `Js8Demod` (Goertzel spectrogram → JS8 Costas sync → plain-binary soft demap `fec::llr::demap_fsk_identity` → LDPC BP+OSD → CRC-12 → unpack), parametric over the submode grid. **End-to-end loopback** gated: Normal + Fast, AWGN, offset subcarrier.
 - ✅ **Task 4 — daemon registry** landed & gated (`omnimodemd/src/mode/{mod,registry}.rs`): `ModeConfig::Js8 { submode }`, parse/round-trip, windowed demod + modulator per submode. JS8 is a selectable daemon mode.
-- ⬜ Remaining: **Task 2.2** (directed-protocol frame types — `varicode.cpp` heartbeat/compound/directed + JSC `FrameData` routing), **Task 5** (bidirectional cross-decode vs JS8Call + BER sweep), **Task 6** (TUI `directed` shape), **Task 7** (PR).
+- ✅ **Task 6 (initial) — TUI** landed & gated (`clients/omnimodem-tui`): `js8` selectable in the operate screen as a free-text/chat surface (Normal submode), daemon-parity guard test updated. The submode selector + full `directed` view are follow-on (mirrors how FST4 shipped its default T/R period first).
+- ✅ **Task 5 (partial) — conformance sweep** (`ber.rs`): full-grid loopback (Normal/Fast/Turbo/Slow) + AWGN decode-rate floors (Normal ≥0.85 @σ=0.3, Fast ≥0.80 @σ=0.2; both observed 100%).
+- ⬜ Remaining: **Task 2.2** (directed-protocol frame types — `varicode.cpp` heartbeat/compound/directed + JSC `FrameData` multi-frame text routing; unlocks real JS8 QSO traffic + the richer TUI directed view + per-submode selector), **Task 5 (oracle)** (bidirectional cross-decode vs the JS8Call binary — needs a Qt build of the reference; also confirms the CRC-12 transcription on-air), **Task 7** (PR).
 
 ---
 
