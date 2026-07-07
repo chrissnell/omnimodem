@@ -306,20 +306,22 @@ pub mod vis {
         }
     }
 
-    // 24-bit N-VIS FSK: preamble 1900/300, 2100/100, start 1900/22, then four 6-bit
-    // symbols D0=101101, D1=010101, D2=mode, D3=010101^mode — each bit 22 ms,
-    // MSB(D05..D00) first, 1=1900 Hz/0=2100 Hz. ref: mode.txt §7.
+    // 24-bit N-VIS FSK: preamble 1900/300, 2100/100, start 1900/22, then four 6-bit symbols
+    // D0=0x2d, D1=0x15, D2=mode, D3=0x15^mode — each bit 22 ms, **LSB first** (1=1900 Hz,
+    // 0=2100 Hz). The mode.txt tables write the bit values MSB-first, but the reference
+    // `CSSTVMOD::WriteFSK` (sstv.cpp:2942-2949) transmits bit 0 first, so we do too.
     fn push_nvis(out: &mut Vec<Symbol>, d2: u8) {
         out.push(sym(1900, 300.0));
         out.push(sym(2100, 100.0));
         out.push(sym(1900, 22.0)); // start bit
-        let d0 = 0b101101u8;
-        let d1 = 0b010101u8;
+        let d0 = 0b101101u8; // 0x2d
+        let d1 = 0b010101u8; // 0x15
         let d3 = d1 ^ d2;
-        for sym6 in [d0, d1, d2, d3] {
-            for bit in (0..6).rev() {
-                let hi = (sym6 >> bit) & 1 != 0;
+        for mut sym6 in [d0, d1, d2, d3] {
+            for _ in 0..6 {
+                let hi = sym6 & 1 != 0;
                 out.push(sym(if hi { NVIS1_HZ } else { NVIS0_HZ }, 22.0));
+                sym6 >>= 1;
             }
         }
     }
@@ -456,7 +458,7 @@ pub mod modulator {
     }
 
     /// Full RGB-sequential transmission: VIS header, the Scottie leading 1200/9 sync (ref:
-    /// Main.cpp:7124; Scottie only), then one scan line per image row. Bit-exact against the
+    /// Main.cpp:7121; Scottie only), then one scan line per image row. Bit-exact against the
     /// golden harness symbol digest.
     pub fn rgb_symbols(mode: SstvMode, rows: &[Vec<Rgb>]) -> Option<Vec<Symbol>> {
         // Pasokon P is RGB-sequential but 640-wide with its own sync/porch/channel timing.
@@ -1659,10 +1661,11 @@ mod tests {
         assert_eq!(h.len(), 3 + 24);
         assert_eq!(h[0].freq_hz, 1900);
         assert_eq!(h[1].freq_hz, 2100);
-        // D2 = 000010 (MSB first): 0,0,0,0,1,0 → tones 2100,2100,2100,2100,1900,2100
+        // D2 = 0x02, transmitted LSB first (as CSSTVMOD::WriteFSK does): bits 0,1,0,0,0,0
+        // → tones 2100,1900,2100,2100,2100,2100.
         let d2 = &h[3 + 12..3 + 18];
         let d2_tones: Vec<u16> = d2.iter().map(|s| s.freq_hz).collect();
-        assert_eq!(d2_tones, vec![2100, 2100, 2100, 2100, 1900, 2100]);
+        assert_eq!(d2_tones, vec![2100, 1900, 2100, 2100, 2100, 2100]);
     }
 
     #[test]
