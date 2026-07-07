@@ -7,3 +7,5 @@ cd "$(dirname "$0")/ldpc"
 cp "$JS/lib/ft8/encode174.f90" "$JS/lib/ft8/ldpc_174_87_params.f90" .
 gfortran -O2 -o dump_encode174 dump_encode174.f90 encode174.f90
 ./dump_encode174
+# also dump the channel-symbol (itone) vector:
+gfortran -O2 -o dump_itone dump_itone.f90 encode174.f90 && ./dump_itone
