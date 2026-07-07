@@ -72,6 +72,8 @@ pub enum ModeConfig {
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
     Fst4 { tr_s: u16 },
+    // W5 JS8: parametric over the submode (normal/fast/turbo/slow).
+    Js8 { submode: String },
 }
 
 impl ModeConfig {
@@ -184,6 +186,13 @@ impl ModeConfig {
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
             "fst4" => Some(ModeConfig::Fst4 { tr_s: u("tr", 15) }),
+            "js8" => Some(ModeConfig::Js8 {
+                submode: match kv.get("sub").copied().unwrap_or("normal") {
+                    s @ ("normal" | "fast" | "turbo" | "slow") => s,
+                    _ => "normal",
+                }
+                .to_string(),
+            }),
             "olivia" => {
                 Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
             }
@@ -216,6 +225,7 @@ impl ModeConfig {
             // The tones/bw live in the Contestia label itself (contestia8_500).
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
+            ModeConfig::Js8 { submode } => format!("js8:sub={submode}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
             }
@@ -339,6 +349,7 @@ impl ModeConfig {
             ModeConfig::Jt9 => "jt9",
             ModeConfig::Wspr => "wspr",
             ModeConfig::Fst4 { .. } => "fst4",
+            ModeConfig::Js8 { .. } => "js8",
             ModeConfig::Olivia { .. } => "olivia",
         }
     }
