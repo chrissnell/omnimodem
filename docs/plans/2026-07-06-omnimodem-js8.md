@@ -92,8 +92,10 @@ Pinned from `js8call/` at the workspace commit (record the exact hash — `a7ff1
 
 - ✅ **Task 1 — JSC codec** landed & gated bit-exact (`framing/jsc.rs`, 262 k-word dictionary blob, `tests/vectors/js8_jsc.json`).
 - ✅ **Task 0 — LDPC(174,87) + CRC-12** landed & gated (`fec/{js8_tables,ldpc_js8}.rs`): `encode174` bit-exact vs the authoritative Fortran encoder, generator/`Nm` agreement, `Mn`/`Nm` consistency, BP+OSD message recovery. CRC-12 transcribed (on-air authority deferred to the Task-5 cross-decode gate — boost unavailable to capture a native golden CRC).
-- ✅ **Task 3 (TX core) — modem symbol assembly** landed & gated (`modes/js8.rs`): submode grid + Costas variants + `js8_symbols` bit-exact vs `genjs8` for both Costas variants (`tests/vectors/js8_symbols.json`).
-- ⬜ Remaining: Task 2 (75-bit message + directed frames), Task 3 (GFSK waveform `Modulator` + `BlockDemodulator` decode), Task 4 (registry), Task 5 (cross-decode + BER), Task 6 (TUI `directed` shape), Task 7 (PR).
+- ✅ **Task 2.1 — base 87-bit message pack** landed & gated (`framing/js8_message.rs`): `genjs8`'s 12-char/6-bit alphabet + i3bit + CRC-12, self-consistent round-trip.
+- ✅ **Task 3 — modem** landed & gated (`modes/js8.rs`): `js8_symbols` bit-exact vs `genjs8` (both Costas variants); `Js8Mod` (GFSK) + `Js8Demod` (Goertzel spectrogram → JS8 Costas sync → plain-binary soft demap `fec::llr::demap_fsk_identity` → LDPC BP+OSD → CRC-12 → unpack), parametric over the submode grid. **End-to-end loopback** gated: Normal + Fast, AWGN, offset subcarrier.
+- ✅ **Task 4 — daemon registry** landed & gated (`omnimodemd/src/mode/{mod,registry}.rs`): `ModeConfig::Js8 { submode }`, parse/round-trip, windowed demod + modulator per submode. JS8 is a selectable daemon mode.
+- ⬜ Remaining: **Task 2.2** (directed-protocol frame types — `varicode.cpp` heartbeat/compound/directed + JSC `FrameData` routing), **Task 5** (bidirectional cross-decode vs JS8Call + BER sweep), **Task 6** (TUI `directed` shape), **Task 7** (PR).
 
 ---
 
