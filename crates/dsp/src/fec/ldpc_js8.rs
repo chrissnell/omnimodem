@@ -15,6 +15,7 @@
 
 use super::js8_tables::{JS8_174_87_COLORDER, JS8_174_87_GEN, JS8_174_87_MN, JS8_174_87_NM, JS8_174_87_NRW};
 use super::ldpc::Ldpc;
+use std::sync::OnceLock;
 
 // The bits→checks table `MN` is reference data our BP path does not consume
 // directly (it works from `NM`/`check_vars`); it is retained verbatim for the
@@ -29,27 +30,30 @@ pub const K: usize = 87;
 /// Parity checks (`M = N - K`).
 pub const M: usize = 87;
 
-/// Unpack the generator hex table into the dense `M×K` parity matrix
-/// `gen_matrix[i][j]` (parity bit `i` ← message bit `j`), exactly as
-/// `encode174.f90` fills `gen(M,K)`: 11 bytes per row, 8 bits per byte
-/// MSB-first, keeping the first 87 columns. ref: encode174.f90:22-33.
-fn gen_matrix() -> [[u8; K]; M] {
-    let mut g = [[0u8; K]; M];
-    for (i, row) in JS8_174_87_GEN.iter().enumerate() {
-        let bytes = row.as_bytes();
-        for j in 0..11 {
-            let hi = hex_val(bytes[j * 2]);
-            let lo = hex_val(bytes[j * 2 + 1]);
-            let istr = (hi << 4) | lo; // one byte, MSB-first
-            for jj in 1..=8 {
-                let icol = j * 8 + jj; // 1-origin column
-                if icol <= 87 && (istr >> (8 - jj)) & 1 == 1 {
-                    g[i][icol - 1] = 1;
+/// The dense `M×K` parity matrix `gen_matrix[i][j]` (parity bit `i` ← message
+/// bit `j`), parsed once from the generator hex table exactly as `encode174.f90`
+/// fills `gen(M,K)`: 11 bytes per row, 8 bits per byte MSB-first, keeping the
+/// first 87 columns. ref: encode174.f90:22-33.
+fn gen_matrix() -> &'static [[u8; K]; M] {
+    static GEN: OnceLock<[[u8; K]; M]> = OnceLock::new();
+    GEN.get_or_init(|| {
+        let mut g = [[0u8; K]; M];
+        for (i, row) in JS8_174_87_GEN.iter().enumerate() {
+            let bytes = row.as_bytes();
+            for j in 0..11 {
+                let hi = hex_val(bytes[j * 2]);
+                let lo = hex_val(bytes[j * 2 + 1]);
+                let istr = (hi << 4) | lo; // one byte, MSB-first
+                for jj in 1..=8 {
+                    let icol = j * 8 + jj; // 1-origin column
+                    if icol <= 87 && (istr >> (8 - jj)) & 1 == 1 {
+                        g[i][icol - 1] = 1;
+                    }
                 }
             }
         }
-    }
-    g
+        g
+    })
 }
 
 fn hex_val(c: u8) -> u8 {
@@ -103,24 +107,28 @@ pub fn extract_message(codeword: &[u8]) -> [u8; K] {
 /// The JS8 LDPC(174,87) code as an [`Ldpc`]: generator rows are the permuted
 /// codewords of the unit messages (so `Ldpc::encode == encode174`), and the
 /// Tanner graph comes from `NM`/`NRW` (1-origin → 0-origin). Reuses the shared
-/// BP min-sum + OSD decoders.
-pub fn js8_174_87_code() -> Ldpc {
-    // Generator row j = encode174(e_j).
-    let mut gen = vec![vec![0u8; N]; K];
-    for (j, row) in gen.iter_mut().enumerate() {
-        let mut e = [0u8; K];
-        e[j] = 1;
-        let cw = encode174(&e);
-        row.copy_from_slice(&cw);
-    }
-    // Tanner graph: check c covers the NM[c][0..NRW[c]] codeword vars (1-origin).
-    let mut check_vars = vec![Vec::new(); M];
-    for (c, vars) in check_vars.iter_mut().enumerate() {
-        for &v in JS8_174_87_NM[c].iter().take(JS8_174_87_NRW[c] as usize) {
-            vars.push(v as usize - 1);
+/// BP min-sum + OSD decoders. The code is a constant, so it is built once and
+/// cached — the RX path calls this on every window.
+pub fn js8_174_87_code() -> &'static Ldpc {
+    static CODE: OnceLock<Ldpc> = OnceLock::new();
+    CODE.get_or_init(|| {
+        // Generator row j = encode174(e_j).
+        let mut gen = vec![vec![0u8; N]; K];
+        for (j, row) in gen.iter_mut().enumerate() {
+            let mut e = [0u8; K];
+            e[j] = 1;
+            let cw = encode174(&e);
+            row.copy_from_slice(&cw);
         }
-    }
-    Ldpc::from_generator_and_checks(K, gen, check_vars)
+        // Tanner graph: check c covers NM[c][0..NRW[c]] codeword vars (1-origin).
+        let mut check_vars = vec![Vec::new(); M];
+        for (c, vars) in check_vars.iter_mut().enumerate() {
+            for &v in JS8_174_87_NM[c].iter().take(JS8_174_87_NRW[c] as usize) {
+                vars.push(v as usize - 1);
+            }
+        }
+        Ldpc::from_generator_and_checks(K, gen, check_vars)
+    })
 }
 
 /// CRC-12 used by JS8's message CRC, matching boost `augmented_crc<12, 0xc06>`:

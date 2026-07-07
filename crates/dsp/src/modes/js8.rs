@@ -271,13 +271,20 @@ impl Js8Demod {
     }
 }
 
-/// Sync metric: summed energy at the three Costas groups' tones (per-group
-/// arrays support the symmetrical variant). `energy[t][k]`.
-fn sync_metric(energy: &[[f32; 8]], costas: &[[u8; 7]; 3]) -> f32 {
+/// Sync metric at a candidate (base bin, start slot): summed spectrogram energy
+/// at the three Costas groups' tones, read directly from `spec` (per-group
+/// arrays support the symmetrical variant). Allocation-free — this runs for
+/// every candidate in the peak scan. Slot layout matches [`Js8Demod::energy_at`]
+/// (2 slots per symbol). `f_bin + tone` is in range (`tone ≤ 6`, `f_bin` bounded
+/// by `nbins - 8`).
+fn sync_metric_at(spec: &[Vec<f32>], f_bin: usize, t_slot: usize, costas: &[[u8; 7]; 3]) -> f32 {
     let mut sum = 0.0f32;
     for (g, &start) in JS8_COSTAS_STARTS.iter().enumerate() {
         for (i, &tone) in costas[g].iter().enumerate() {
-            sum += energy[start + i][tone as usize];
+            let slot = t_slot + 2 * (start + i);
+            if slot < spec.len() {
+                sum += spec[slot][f_bin + tone as usize];
+            }
         }
     }
     sum
@@ -303,8 +310,7 @@ impl BlockDemodulator for Js8Demod {
         let mut peaks: Vec<(usize, usize, f32)> = Vec::with_capacity(max_bin.max(1) * (max_slot + 1));
         for f_bin in 0..max_bin {
             for t_slot in 0..=max_slot {
-                let e = Js8Demod::energy_at(&spec, f_bin, t_slot);
-                peaks.push((f_bin, t_slot, sync_metric(&e, &costas)));
+                peaks.push((f_bin, t_slot, sync_metric_at(&spec, f_bin, t_slot, &costas)));
             }
         }
         peaks.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));

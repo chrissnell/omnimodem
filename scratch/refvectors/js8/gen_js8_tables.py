@@ -1,5 +1,7 @@
-import re, sys
-JS = "/work/1d8f9b53-fbd4-4904-b388-7257e3f8eb55/57e69dd7/workdir/js8call"
+import os, re, sys
+# Path to the js8call checkout: $JS8CALL, else argv[1], else a sibling ../js8call.
+JS = os.environ.get("JS8CALL") or (sys.argv[1] if len(sys.argv) > 1
+     else os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../js8call"))
 params = open(f"{JS}/lib/ft8/ldpc_174_87_params.f90").read()
 bp = open(f"{JS}/lib/ft8/bpdecode174.f90").read()
 
@@ -90,5 +92,7 @@ for r in mn_rows:
 out.append("];")
 out.append("")
 
-open("omnimodem/crates/dsp/src/fec/js8_tables.rs", "w").write("\n".join(out))
+# Output path: relative to this script (scratch/refvectors/js8 → repo root).
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../crates/dsp/src/fec/js8_tables.rs")
+open(OUT, "w").write("\n".join(out))
 print("wrote js8_tables.rs:", len(gen), "gen rows,", len(colorder), "colorder,", len(nm_rows), "Nm,", len(mn_rows), "Mn,", len(nrw), "nrw")

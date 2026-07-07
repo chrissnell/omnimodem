@@ -66,21 +66,8 @@ pub fn pack_msgbits(msg: &str, i3bit: u8) -> [u8; KK] {
         bits[72 + b] = (i3bit >> (2 - b)) & 1;
     }
 
-    // CRC-12 over the 11-byte buffer: 9 bytes of message (72 bits), then
-    // byte[9] = i3bit<<5, byte[10] = 0. ref: genjs8.f90:44-56.
-    let mut buf = [0u8; 11];
-    for (i, byte) in buf.iter_mut().take(9).enumerate() {
-        let mut v = 0u8;
-        for b in 0..8 {
-            v = (v << 1) | bits[i * 8 + b];
-        }
-        *byte = v;
-    }
-    buf[9] = (i3bit & 0x07) << 5;
-    buf[10] = 0;
-    let crc = js8_crc12(&buf);
-
     // 12 CRC bits (bits 75..87), MSB-first.
+    let crc = frame_crc12(&bits);
     for b in 0..12 {
         bits[75 + b] = ((crc >> (11 - b)) & 1) as u8;
     }
@@ -92,12 +79,13 @@ pub fn frame_type(bits: &[u8; KK]) -> u8 {
     (bits[72] << 2) | (bits[73] << 1) | bits[74]
 }
 
-/// Unpack the 87 LDPC message bits back to `(message, i3bit)`, verifying the
-/// CRC. Returns `None` if the CRC check fails. The message is the 12-char field
-/// (trailing `'0'` padding preserved — callers trim as appropriate).
-pub fn unpack_msgbits(bits: &[u8; KK]) -> Option<(String, u8)> {
+/// Compute the JS8 CRC-12 for a frame's first 75 bits: the 11-byte buffer is
+/// the 72 payload bits (9 bytes) + `byte9 = i3bit<<5` + `byte10 = 0`, and the
+/// result is `js8_crc12` of that. The 12 CRC bits (75..87) are not read, so this
+/// is valid both while packing (before they are written) and when checking.
+/// ref: genjs8.f90:44-56.
+fn frame_crc12(bits: &[u8; KK]) -> u16 {
     let i3bit = frame_type(bits);
-    // Recompute and check the CRC.
     let mut buf = [0u8; 11];
     for (i, byte) in buf.iter_mut().take(9).enumerate() {
         let mut v = 0u8;
@@ -107,13 +95,24 @@ pub fn unpack_msgbits(bits: &[u8; KK]) -> Option<(String, u8)> {
         *byte = v;
     }
     buf[9] = (i3bit & 0x07) << 5;
-    buf[10] = 0;
-    let want = js8_crc12(&buf);
-    let mut got = 0u16;
+    js8_crc12(&buf)
+}
+
+/// Read the 12 CRC bits stored at 75..87.
+fn stored_crc12(bits: &[u8; KK]) -> u16 {
+    let mut v = 0u16;
     for b in 0..12 {
-        got = (got << 1) | bits[75 + b] as u16;
+        v = (v << 1) | bits[75 + b] as u16;
     }
-    if got != want {
+    v
+}
+
+/// Unpack the 87 LDPC message bits back to `(message, i3bit)`, verifying the
+/// CRC. Returns `None` if the CRC check fails. The message is the 12-char field
+/// (trailing `'0'` padding preserved — callers trim as appropriate).
+pub fn unpack_msgbits(bits: &[u8; KK]) -> Option<(String, u8)> {
+    let i3bit = frame_type(bits);
+    if stored_crc12(bits) != frame_crc12(bits) {
         return None;
     }
     // Recover the 12 chars.
@@ -157,17 +156,7 @@ pub fn pack_frame(payload: &[bool; FRAME_BITS], i3bit: u8) -> [u8; KK] {
     for b in 0..3 {
         bits[72 + b] = (i3bit >> (2 - b)) & 1;
     }
-    // CRC-12 over the same 11-byte buffer form as pack_msgbits (byte9 = i3bit<<5).
-    let mut buf = [0u8; 11];
-    for (i, byte) in buf.iter_mut().take(9).enumerate() {
-        let mut v = 0u8;
-        for b in 0..8 {
-            v = (v << 1) | bits[i * 8 + b];
-        }
-        *byte = v;
-    }
-    buf[9] = (i3bit & 0x07) << 5;
-    let crc = js8_crc12(&buf);
+    let crc = frame_crc12(&bits);
     for b in 0..12 {
         bits[75 + b] = ((crc >> (11 - b)) & 1) as u8;
     }
@@ -236,22 +225,7 @@ pub fn unpack_data_frames(frames: &[[bool; FRAME_BITS]]) -> String {
 
 /// Verify the 12-bit CRC of an 87-bit frame (shared by the unpack routers).
 fn crc_ok(bits: &[u8; KK]) -> bool {
-    let i3bit = frame_type(bits);
-    let mut buf = [0u8; 11];
-    for (i, byte) in buf.iter_mut().take(9).enumerate() {
-        let mut v = 0u8;
-        for b in 0..8 {
-            v = (v << 1) | bits[i * 8 + b];
-        }
-        *byte = v;
-    }
-    buf[9] = (i3bit & 0x07) << 5;
-    let want = js8_crc12(&buf);
-    let mut got = 0u16;
-    for b in 0..12 {
-        got = (got << 1) | bits[75 + b] as u16;
-    }
-    got == want
+    stored_crc12(bits) == frame_crc12(bits)
 }
 
 fn payload_bits(bits: &[u8; KK]) -> [bool; FRAME_BITS] {

@@ -257,6 +257,15 @@ fn commands_by_len() -> Vec<(&'static str, u8)> {
 
 /// Parse `text` as a directed message `TO CMD [NUM]`. Returns `None` if it
 /// doesn't start with a callsign followed by a recognised command.
+///
+/// Known divergences from the reference `directed_re` (the exact frame is
+/// gated by cross-decode, and both this and the reference produce the same
+/// frame for the canonical forms operators type):
+/// - the SNR number must be the whole remainder (`W1AW SNR -5`); a trailing
+///   token after the number (`W1AW SNR -5 GRID`) yields `inum = 0` here,
+///   whereas the reference regex still captures the number;
+/// - grid arguments (`optional_grid_pattern`) are not parsed — grids are
+///   carried by compound frames, not the base directed frame, in this port.
 pub fn parse_directed(text: &str) -> Option<ParsedDirected> {
     let text = text.trim_start();
     // callsign: [@]?[A-Z0-9/]+

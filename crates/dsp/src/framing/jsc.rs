@@ -294,11 +294,16 @@ pub fn decompress(bitvec: &[bool]) -> String {
     while start < bytes.len() {
         let mut k = 0usize;
         let mut j = 0u64;
-        while start + k < bytes.len() && bytes[start + k] >= s as u64 {
-            j = j * c as u64 + (bytes[start + k] - s as u64);
+        // Accumulate base-`c` continuation digits. A valid index needs `k <= 5`
+        // (`base[6] > size`); on malformed/noise-derived bits the run can be
+        // arbitrarily long, so cap `k` at `base.len()` and use saturating math so
+        // `j` cannot overflow (the reference C++ relies on benign wrap/UB here).
+        // Either way `j` ends up `>= size` and we stop cleanly rather than panic.
+        while start + k < bytes.len() && k < base.len() && bytes[start + k] >= s as u64 {
+            j = j.saturating_mul(c as u64).saturating_add(bytes[start + k] - s as u64);
             k += 1;
         }
-        if j >= size {
+        if j >= size || k >= base.len() {
             break;
         }
         if start + k >= bytes.len() {
@@ -398,5 +403,26 @@ mod tests {
     fn jsc_single_char() {
         assert_eq!(bits_to_str(&compress_bits("E")), "00000");
         assert_eq!(bits_to_str(&compress_bits("A")), "00100");
+    }
+
+    /// `decompress` must never panic on adversarial/noise-derived bits (it runs
+    /// on data recovered from a CRC-valid but possibly malformed frame). A long
+    /// run of value-`s` continuation nibbles used to drive the `base[k]` index
+    /// out of bounds; it now stops cleanly.
+    #[test]
+    fn jsc_decompress_does_not_panic_on_garbage() {
+        // 4-bit group 0b0111 = 7 = s, repeated: an unterminated continuation run.
+        let sevens: Codeword = std::iter::repeat([false, true, true, true]).take(40).flatten().collect();
+        let _ = decompress(&sevens); // must not panic
+        // All-ones and all-zeros of assorted lengths.
+        for len in [0usize, 1, 3, 4, 5, 71, 72, 200] {
+            let _ = decompress(&vec![true; len]);
+            let _ = decompress(&vec![false; len]);
+        }
+        // A fuzz-ish sweep of deterministic bit patterns.
+        for seed in 0u32..64 {
+            let bits: Codeword = (0..96).map(|i| ((seed.wrapping_mul(2654435761).wrapping_add(i)) >> 7) & 1 == 1).collect();
+            let _ = decompress(&bits);
+        }
     }
 }
