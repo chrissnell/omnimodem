@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // drainCmd runs a command and feeds every resulting message back into the view,
@@ -414,7 +414,7 @@ func TestConfigPttDeviceAutoAppliesAndPersists(t *testing.T) {
 
 	// Open the PTT picker and choose the (only) device.
 	v.focus = fPtt
-	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open picker
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})           // open picker
 	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose → auto-apply
 	if v.pttID != "usb:1:2:" {
 		t.Fatalf("ptt device must be recorded, got %q", v.pttID)
@@ -590,5 +590,91 @@ func TestConfigEscPersistsAllChosenDevices(t *testing.T) {
 	// a snapshot, not by the deviceless ChannelConfigured event.
 	if f.StateCalls == 0 {
 		t.Fatal("esc-close must refresh live state so a reopen reflects the save")
+	}
+}
+
+// The mode selector cascades: Family is chosen first, then Mode within it.
+// Cycling the family must land on that family's first submode and rebuild the
+// settings; cycling the mode must stay inside the current family.
+func TestConfigFamilyCascadesToMode(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+
+	// Start on a known multi-member family so the cascade is observable.
+	v.familyIdx = familyIdxOfMode(modeIdxByLabel("dominoex4"))
+	v.modeIdx = modeIdxByLabel("dominoex4")
+	famName := v.familyName()
+
+	// Cycling Mode moves within the family, never out of it.
+	v.focus = fMode
+	v.cycle(+1)
+	if v.familyName() != famName {
+		t.Fatalf("cycling mode left the family: %q -> %q", famName, v.familyName())
+	}
+	if familyName(v.modeLabel()) != famName {
+		t.Fatalf("mode %q is not in family %q", v.modeLabel(), famName)
+	}
+
+	// Cycling Family lands on the new family's first submode.
+	v.focus = fFamily
+	v.cycle(+1)
+	fam := families[v.familyIdx]
+	if v.modeIdx != fam.modes[0] {
+		t.Fatalf("changing family must select its first mode; got %q want %q",
+			v.modeLabel(), modes[fam.modes[0]].label)
+	}
+}
+
+// Preload must point the Family selector at the family owning the saved mode, so
+// reopening Configure shows the right family/mode pair (not family 0).
+func TestConfigPreloadSelectsMatchingFamily(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "eme", mode: "jt65", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	if v.modeLabel() != "jt65" {
+		t.Fatalf("mode not preloaded: %q", v.modeLabel())
+	}
+	if v.familyName() != "JT65" {
+		t.Fatalf("family must match preloaded mode; got %q", v.familyName())
+	}
+}
+
+// The Render output must present both the Family and Mode rows of the cascade.
+func TestConfigRendersFamilyAndModeRows(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a", mode: "dominoex8", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	out := v.Render(100, 40)
+	if !strings.Contains(out, "Family") {
+		t.Fatalf("Render must show a Family row:\n%s", out)
+	}
+	if !strings.Contains(out, "DominoEX") {
+		t.Fatalf("Render must show the selected family name:\n%s", out)
+	}
+	if !strings.Contains(out, "dominoex8") {
+		t.Fatalf("Render must show the selected mode:\n%s", out)
+	}
+}
+
+// Cycling the Family with an RX device chosen must auto-apply, persisting the
+// new (first-of-family) mode through ConfigureChannel.
+func TestConfigAutoAppliesOnFamilyChange(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+	v.focus = fFamily
+
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd != nil {
+		cmd() // ConfigureChannel
+	}
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("family change must auto-apply ConfigureChannel, got %d", len(f.ChannelCalls))
 	}
 }

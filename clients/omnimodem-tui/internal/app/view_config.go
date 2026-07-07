@@ -37,6 +37,7 @@ const (
 	fName cfgFocus = iota
 	fCall
 	fGrid
+	fFamily
 	fMode
 	fSettings
 	fRx
@@ -71,7 +72,8 @@ type configView struct {
 	name      textinput.Model
 	call      textinput.Model
 	grid      textinput.Model
-	modeIdx   int
+	familyIdx int              // index into `families`; the selected mode family
+	modeIdx   int              // index into `modes`; the specific submode within that family
 	settings  *ui.SettingsForm // the current mode's editable settings
 	rx        list.Model
 	tx        list.Model
@@ -190,6 +192,9 @@ func newConfigView(m *Model) *configView {
 	} else {
 		v.name.SetValue(defaultChannelName(m))
 	}
+	// Point the family selector at whichever family owns the preloaded mode so the
+	// cascading Family→Mode pair opens consistent with the saved submode.
+	v.familyIdx = familyIdxOfMode(v.modeIdx)
 	// Build the settings form for the preloaded mode, seeded from the last values
 	// saved this session (see buildSettings), so reopening Configure shows what was
 	// just set rather than mode defaults.
@@ -264,7 +269,8 @@ func methodIdxOf(m pb.PttMethod) int {
 	return 0
 }
 
-func (v *configView) modeLabel() string { return modes[v.modeIdx].label }
+func (v *configView) modeLabel() string  { return modes[v.modeIdx].label }
+func (v *configView) familyName() string { return families[v.familyIdx].name }
 func (v *configView) method() pb.PttMethod {
 	return pttMethods[v.methodIdx]
 }
@@ -634,12 +640,21 @@ func (v *configView) syncFocus() {
 	}
 }
 
-// cycle steps the mode or method selector when one is focused.
+// cycle steps the focused selector: the mode family, the submode within that
+// family, the PTT method, or an RSID toggle.
 func (v *configView) cycle(d int) {
 	switch v.focus {
-	case fMode:
-		v.modeIdx = (v.modeIdx + d + len(modes)) % len(modes)
+	case fFamily:
+		v.familyIdx = (v.familyIdx + d + len(families)) % len(families)
+		// Landing on a new family selects its first submode so the Mode row is
+		// never left pointing outside the family.
+		v.modeIdx = families[v.familyIdx].modes[0]
 		v.rebuildSettings() // the new mode exposes a different set of settings
+	case fMode:
+		fam := families[v.familyIdx]
+		pos := (familyModePos(fam, v.modeIdx) + d + len(fam.modes)) % len(fam.modes)
+		v.modeIdx = fam.modes[pos]
+		v.rebuildSettings() // the new submode exposes a different set of settings
 	case fMethod:
 		v.methodIdx = (v.methodIdx + d + len(pttMethods)) % len(pttMethods)
 	case fRsidTx:
@@ -711,7 +726,8 @@ func (v *configView) Render(w, h int) string {
 	b.WriteString(field(fGrid, "Grid", v.grid.View()) + "\n\n")
 
 	b.WriteString(ui.Title.Render("MODE") + "\n")
-	b.WriteString(field(fMode, "Mode", "‹ "+v.modeLabel()+" ›"+cyc) + "\n")
+	b.WriteString(field(fFamily, "Family", "‹ "+v.familyName()+" ›"+cyc) + "\n")
+	b.WriteString(field(fMode, "Mode", v.modeSelector()) + "\n")
 	b.WriteString(field(fSettings, "Settings", v.settingsSummary()) + "\n\n")
 
 	b.WriteString(ui.Title.Render("AUDIO") + "\n")
@@ -798,6 +814,21 @@ func txDeviceLabel(txID, rxID string) string {
 		return ui.Accent.Render("✓ "+rxID) + ui.Dim.Render("  (same as RX)")
 	}
 	return ui.Dim.Render("(same as RX)")
+}
+
+// modeSelector renders the Mode row: the specific submode chosen within the
+// current family. A multi-member family gets the ‹ … › cycler plus an "n/total"
+// position; a single-member family (CW, FT8, …) has nothing to cycle, so it
+// shows the lone mode with a quiet "(only mode)" note instead of dead arrows.
+func (v *configView) modeSelector() string {
+	fam := families[v.familyIdx]
+	label := modes[v.modeIdx].label
+	if len(fam.modes) <= 1 {
+		return ui.Accent.Render(label) + ui.Dim.Render("  (only mode)")
+	}
+	pos := familyModePos(fam, v.modeIdx) + 1
+	return ui.Accent.Render("‹ "+label+" ›") +
+		ui.Dim.Render(fmt.Sprintf("  %d/%d (←/→)", pos, len(fam.modes)))
 }
 
 // settingsSummary renders the Settings row's value. It deliberately shows only a
