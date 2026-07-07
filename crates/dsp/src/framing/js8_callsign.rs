@@ -226,6 +226,81 @@ pub fn unpack_callsign(value: u32, portable: bool) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 50-bit compound-callsign packing (heartbeat / compound frames)
+// ---------------------------------------------------------------------------
+//
+// Packs an 11-char field into 50 bits: 9 base-38 alphanumeric positions plus a
+// base-39 leading position and two boolean `/` positions (3 and 7), so compound
+// calls like `VE3/K1ABC` fit. ref: varicode.cpp:863-944.
+
+fn idx38(c: u8) -> u64 {
+    ALPHANUMERIC.iter().position(|&a| a == c).unwrap_or(0) as u64
+}
+
+/// Pack a compound callsign (≤11 useful chars) into a 50-bit value.
+/// ref: varicode.cpp:863-889 (`packAlphaNumeric50`).
+pub fn pack_alphanumeric50(value: &str) -> u64 {
+    // Keep only [A-Z0-9 /@] from the uppercased input.
+    let mut word: Vec<u8> = value
+        .to_ascii_uppercase()
+        .bytes()
+        .filter(|&c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b' ' || c == b'/' || c == b'@')
+        .collect();
+    // Align the `/` separators to positions 3 and 7.
+    if word.len() > 3 && word[3] != b'/' {
+        word.insert(3, b' ');
+    }
+    if word.len() > 7 && word[7] != b'/' {
+        word.insert(7, b' ');
+    }
+    while word.len() < 11 {
+        word.push(b' ');
+    }
+
+    // Positional weights (identical products to the reference).
+    let w = |c: u8| idx38(c);
+    let is_slash = |c: u8| (c == b'/') as u64;
+    let a = 38 * 38 * 38 * 2 * 38 * 38 * 38 * 2 * 38 * 38 * w(word[0]);
+    let b = 38 * 38 * 38 * 2 * 38 * 38 * 38 * 2 * 38 * w(word[1]);
+    let c = 38 * 38 * 38 * 2 * 38 * 38 * 38 * 2 * w(word[2]);
+    let d = 38 * 38 * 38 * 2 * 38 * 38 * 38 * is_slash(word[3]);
+    let e = 38 * 38 * 38 * 2 * 38 * 38 * w(word[4]);
+    let f = 38 * 38 * 38 * 2 * 38 * w(word[5]);
+    let g = 38 * 38 * 38 * 2 * w(word[6]);
+    let h = 38 * 38 * 38 * is_slash(word[7]);
+    let i = 38 * 38 * w(word[8]);
+    let j = 38 * w(word[9]);
+    let k = w(word[10]);
+    a + b + c + d + e + f + g + h + i + j + k
+}
+
+/// Unpack a 50-bit compound-callsign value, stripping spaces.
+/// ref: varicode.cpp:893-944 (`unpackAlphaNumeric50`).
+pub fn unpack_alphanumeric50(mut packed: u64) -> String {
+    let mut word = [b' '; 11];
+    let mut take38 = |p: &mut u64| -> u8 {
+        let t = (*p % 38) as usize;
+        *p /= 38;
+        ALPHANUMERIC[t]
+    };
+    word[10] = take38(&mut packed);
+    word[9] = take38(&mut packed);
+    word[8] = take38(&mut packed);
+    word[7] = if packed % 2 == 1 { b'/' } else { b' ' };
+    packed /= 2;
+    word[6] = take38(&mut packed);
+    word[5] = take38(&mut packed);
+    word[4] = take38(&mut packed);
+    word[3] = if packed % 2 == 1 { b'/' } else { b' ' };
+    packed /= 2;
+    word[2] = take38(&mut packed);
+    word[1] = take38(&mut packed);
+    word[0] = ALPHANUMERIC[(packed % 39) as usize];
+
+    String::from_utf8_lossy(&word).replace(' ', "")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +348,23 @@ mod tests {
     fn cq_group_value() {
         let (packed, _) = pack_callsign("@CQ");
         assert_eq!(packed, NBASECALL + 44);
+    }
+
+    /// Compound callsigns round-trip through the 50-bit packer (spaces are
+    /// stripped on unpack, so the `/` separators must land on positions 3/7).
+    #[test]
+    fn alphanumeric50_roundtrip() {
+        for call in ["K1ABC", "W1AW", "VE3/K1ABC", "K1ABC/P", "@ALLCALL", "N5AC"] {
+            let packed = pack_alphanumeric50(call);
+            assert!(packed < (1u64 << 50), "{call} must fit in 50 bits");
+            assert_eq!(unpack_alphanumeric50(packed), call, "50-bit roundtrip failed for {call}");
+        }
+    }
+
+    /// The 50-bit value fits its field for a maximal 11-char compound call.
+    #[test]
+    fn alphanumeric50_bounds() {
+        let packed = pack_alphanumeric50("VE3/K1ABC/P");
+        assert!(packed < (1u64 << 50));
     }
 }
