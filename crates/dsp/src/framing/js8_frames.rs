@@ -15,7 +15,7 @@
 //! this layout — they differ only in the `type` value and how the caller fills
 //! `num`/`bits3`. Round-trip gated; on-air authority is the cross-decode gate.
 
-use super::js8_callsign::{pack_alphanumeric50, unpack_alphanumeric50};
+use super::js8_callsign::{pack_alphanumeric50, pack_callsign, unpack_alphanumeric50, unpack_callsign};
 
 /// Frame types (payload bits 0..3). ref: varicode.h:50-57.
 pub const FRAME_HEARTBEAT: u8 = 0; // [000]
@@ -89,6 +89,133 @@ pub fn unpack_compound_frame(payload: &FramePayload72) -> Option<CompoundFrame> 
     Some(CompoundFrame { callsign, ftype, num, bits3 })
 }
 
+// ---------------------------------------------------------------------------
+// Directed frames (directed calls: TO CMD [NUM])
+// ---------------------------------------------------------------------------
+//
+// A directed frame carries two 28-bit packed callsigns (from/to), a 5-bit
+// command, and a rem byte `[portable_from:1][portable_to:1][inum:6]`:
+//
+//     [type:3][from:28][to:28][cmd:5] [pfrom:1][pto:1][inum:6]   = 72
+//
+// The `inum` field is the command's number argument offset by 31 (an SNR or a
+// generic count); callers encode/decode the offset. The text→(to,cmd,num) parse
+// (a `QRegularExpression` in the reference) is a UI concern layered on top.
+// ref: varicode.cpp packDirectedMessage / unpackDirectedMessage.
+
+/// Directed command table `(name, code)`. Codes 0..32 pack into the 5-bit field;
+/// `-1` marks the faux HEARTBEAT/HB/CQ entries (not real directed commands).
+/// ref: varicode.cpp:46-112 (`directed_cmds`).
+pub const DIRECTED_CMDS: &[(&str, i8)] = &[
+    (" HEARTBEAT", -1), (" HB", -1), (" CQ", -1),
+    (" SNR?", 0), ("?", 0),
+    (" DIT DIT", 1),
+    (" NACK", 2),
+    (" HEARING?", 3),
+    (" GRID?", 4),
+    (">", 5),
+    (" STATUS?", 6),
+    (" STATUS", 7),
+    (" HEARING", 8),
+    (" MSG", 9),
+    (" MSG TO:", 10),
+    (" QUERY", 11),
+    (" QUERY MSGS", 12), (" QUERY MSGS?", 12),
+    (" QUERY CALL", 13),
+    (" ACK", 14),
+    (" GRID", 15),
+    (" INFO?", 16),
+    (" INFO", 17),
+    (" FB", 18),
+    (" HW CPY?", 19),
+    (" SK", 20),
+    (" RR", 21),
+    (" QSL?", 22),
+    (" QSL", 23),
+    (" CMD", 24),
+    (" SNR", 25),
+    (" NO", 26),
+    (" YES", 27),
+    (" 73", 28),
+    (" HEARTBEAT SNR", 29),
+    (" AGN?", 30),
+    ("  ", 31), (" ", 31),
+];
+
+/// Command codes that carry an SNR value in `inum` (`inum - 31` dB).
+/// ref: varicode.cpp:123 (`snr_cmds`).
+pub fn is_snr_command(code: u8) -> bool {
+    code == 25 || code == 29
+}
+
+/// Look up a directed command's 5-bit code by name (only real commands, 0..32).
+pub fn directed_cmd_code(name: &str) -> Option<u8> {
+    DIRECTED_CMDS
+        .iter()
+        .find(|(n, c)| *n == name && *c >= 0)
+        .map(|(_, c)| *c as u8)
+}
+
+/// The first (canonical) command name for a code, for display on decode.
+pub fn directed_cmd_name(code: u8) -> Option<&'static str> {
+    DIRECTED_CMDS.iter().find(|(_, c)| *c == code as i8).map(|(n, _)| *n)
+}
+
+/// A decoded directed frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectedFrame {
+    pub from: String,
+    pub to: String,
+    pub cmd: u8,
+    /// Raw 6-bit number field; `inum - 31` is the SNR/count when non-zero.
+    pub inum: u8,
+    pub portable_from: bool,
+    pub portable_to: bool,
+}
+
+/// Assemble a directed frame payload from resolved fields. Returns `None` if a
+/// callsign can't be packed. `cmd` is a 5-bit code, `inum` a 6-bit value.
+/// ref: varicode.cpp:1600-1640.
+pub fn pack_directed_frame(from: &str, to: &str, cmd: u8, inum: u8) -> Option<FramePayload72> {
+    let (packed_from, portable_from) = pack_callsign(from);
+    let (packed_to, portable_to) = pack_callsign(to);
+    if packed_from == 0 || packed_to == 0 {
+        return None;
+    }
+    let mut payload = [false; 72];
+    put_bits(&mut payload, 0, FRAME_DIRECTED as u64, 3);
+    put_bits(&mut payload, 3, packed_from as u64, 28);
+    put_bits(&mut payload, 31, packed_to as u64, 28);
+    put_bits(&mut payload, 59, (cmd % 32) as u64, 5);
+    // rem byte: [pfrom:1][pto:1][inum:6]
+    payload[64] = portable_from;
+    payload[65] = portable_to;
+    put_bits(&mut payload, 66, (inum & 0x3f) as u64, 6);
+    Some(payload)
+}
+
+/// Decode a directed frame payload, or `None` if the type field isn't Directed.
+/// ref: varicode.cpp:1641-1682.
+pub fn unpack_directed_frame(payload: &FramePayload72) -> Option<DirectedFrame> {
+    if get_bits(payload, 0, 3) as u8 != FRAME_DIRECTED {
+        return None;
+    }
+    let packed_from = get_bits(payload, 3, 28) as u32;
+    let packed_to = get_bits(payload, 31, 28) as u32;
+    let cmd = get_bits(payload, 59, 5) as u8;
+    let portable_from = payload[64];
+    let portable_to = payload[65];
+    let inum = get_bits(payload, 66, 6) as u8;
+    Some(DirectedFrame {
+        from: unpack_callsign(packed_from, portable_from),
+        to: unpack_callsign(packed_to, portable_to),
+        cmd,
+        inum,
+        portable_from,
+        portable_to,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +255,57 @@ mod tests {
         let payload = pack_compound_frame("K1ABC", FRAME_COMPOUND, 0b1010_1010_101_10011, 0).unwrap();
         let got = unpack_compound_frame(&payload).unwrap();
         assert_eq!(got.num, 0b1010_1010_101_10011);
+    }
+
+    /// Directed frames round-trip: from/to callsigns, command, and inum survive.
+    #[test]
+    fn directed_frame_roundtrip() {
+        let snr = directed_cmd_code(" SNR").unwrap();
+        for (from, to, cmd, inum) in [
+            ("K1ABC", "W1AW", directed_cmd_code(" SNR?").unwrap(), 0u8),
+            ("K1ABC", "W1AW", snr, 42),
+            ("N5AC", "VK3ABC", directed_cmd_code(" 73").unwrap(), 0),
+            ("K1ABC", "@ALLCALL", directed_cmd_code(" QSL?").unwrap(), 0),
+        ] {
+            let payload = pack_directed_frame(from, to, cmd, inum).expect("packable");
+            let got = unpack_directed_frame(&payload).expect("decodable");
+            assert_eq!(got.from, from, "from mismatch");
+            assert_eq!(got.to, to, "to mismatch");
+            assert_eq!(got.cmd, cmd, "cmd mismatch");
+            assert_eq!(got.inum, inum, "inum mismatch");
+        }
+    }
+
+    /// Portable `/P` on the `to` field round-trips via the frame's portable bit.
+    #[test]
+    fn directed_portable_roundtrip() {
+        let cmd = directed_cmd_code(" RR").unwrap();
+        let payload = pack_directed_frame("K1ABC", "W1AW/P", cmd, 0).unwrap();
+        let got = unpack_directed_frame(&payload).unwrap();
+        assert_eq!(got.to, "W1AW/P");
+        assert!(got.portable_to);
+    }
+
+    /// Command table: SNR commands are flagged, names resolve to codes and back.
+    #[test]
+    fn directed_command_table() {
+        assert!(is_snr_command(directed_cmd_code(" SNR").unwrap()));
+        assert!(is_snr_command(directed_cmd_code(" HEARTBEAT SNR").unwrap()));
+        assert!(!is_snr_command(directed_cmd_code(" 73").unwrap()));
+        assert_eq!(directed_cmd_code(" ACK"), Some(14));
+        assert_eq!(directed_cmd_code(" HEARTBEAT"), None); // faux (-1), not packable
+        // Every real code decodes to some canonical name.
+        for &(_, c) in DIRECTED_CMDS {
+            if c >= 0 {
+                assert!(directed_cmd_name(c as u8).is_some());
+            }
+        }
+    }
+
+    /// A non-directed payload (Compound type) is rejected by the directed unpacker.
+    #[test]
+    fn directed_rejects_compound() {
+        let payload = pack_compound_frame("K1ABC", FRAME_COMPOUND, 0, 0).unwrap();
+        assert!(unpack_directed_frame(&payload).is_none());
     }
 }
