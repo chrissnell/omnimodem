@@ -15,6 +15,7 @@ use omnimodem_dsp::modes::{
     ft8::{Ft8Demod, Ft8Mod},
     hell::{HellDemod, HellMod, HellVariant},
     ifkp::{IfkpDemod, IfkpMod, IfkpSpeed},
+    jt4::{Jt4Demod, Jt4Mod, Jt4Submode},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
     mfsk::{MfskDemod, MfskMod, MfskVariant},
@@ -110,6 +111,10 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Jt9 => windowed(Box::new(Jt9Demod::new())),
         ModeConfig::Wspr => windowed(Box::new(WsprDemod::new())),
         ModeConfig::Fst4 { tr_s } => windowed(Box::new(Fst4Demod::new(*tr_s as u32))),
+        ModeConfig::Jt4 { submode } => {
+            let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
+            windowed(Box::new(Jt4Demod::new(v)))
+        }
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
@@ -189,6 +194,10 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Jt9 => Some(Box::new(Jt9Mod::new())),
         ModeConfig::Wspr => Some(Box::new(WsprMod::new())),
         ModeConfig::Fst4 { tr_s } => Some(Box::new(Fst4Mod::new(*tr_s as u32))),
+        ModeConfig::Jt4 { submode } => {
+            let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
+            Some(Box::new(Jt4Mod::new(v)))
+        }
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
         }
@@ -241,6 +250,19 @@ mod tests {
         }
         assert_eq!(tx_slot_s(&ModeConfig::Wspr), Some(120.0));
         assert_eq!(tx_slot_s(&ModeConfig::Ft4), Some(7.5));
+    }
+
+    #[test]
+    fn jt4_submodes_are_windowed_60s_with_modulators() {
+        for label in ["jt4a", "jt4b", "jt4c", "jt4d", "jt4e", "jt4f", "jt4g"] {
+            let cfg = ModeConfig::Jt4 { submode: label.into() };
+            assert!(
+                matches!(demod_kind(&cfg), DemodKind::Windowed(_, w) if (w - 60.0).abs() < 0.5),
+                "{label} not windowed @ 60 s"
+            );
+            assert!(build_modulator(&cfg).is_some(), "no modulator for {label}");
+            assert_eq!(tx_slot_s(&cfg), Some(60.0));
+        }
     }
 
     #[test]

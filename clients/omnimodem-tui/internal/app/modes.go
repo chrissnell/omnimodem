@@ -164,6 +164,15 @@ var modes = []modeInfo{
 	{"jt65", "sequencer", 60, nil},
 	{"jt9", "sequencer", 60, nil},
 	{"fst4", "sequencer", 15, nil}, // LF/MF weak-signal QSO; default 15 s T/R
+	// The WSJT-X JT4 family (legacy EME): submodes A–G differ only in 4-FSK tone
+	// spacing; 60 s on the minute, same auto-sequence ladder as JT65/JT9.
+	{"jt4a", "sequencer", 60, nil},
+	{"jt4b", "sequencer", 60, nil},
+	{"jt4c", "sequencer", 60, nil},
+	{"jt4d", "sequencer", 60, nil},
+	{"jt4e", "sequencer", 60, nil},
+	{"jt4f", "sequencer", 60, nil},
+	{"jt4g", "sequencer", 60, nil},
 	{"wspr", "beacon", 120, nil},
 }
 

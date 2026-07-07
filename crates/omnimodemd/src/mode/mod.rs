@@ -72,6 +72,9 @@ pub enum ModeConfig {
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
     Fst4 { tr_s: u16 },
+    /// JT4 (WSJT-X legacy EME): `submode` is a `jt4::Jt4Submode` label
+    /// (`jt4a`…`jt4g`), differing only in 4-FSK tone spacing. 60 s on the minute.
+    Jt4 { submode: String },
 }
 
 impl ModeConfig {
@@ -184,6 +187,9 @@ impl ModeConfig {
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
             "fst4" => Some(ModeConfig::Fst4 { tr_s: u("tr", 15) }),
+            m if omnimodem_dsp::modes::jt4::Jt4Submode::from_label(m).is_some() => {
+                Some(ModeConfig::Jt4 { submode: m.to_string() })
+            }
             "olivia" => {
                 Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
             }
@@ -216,6 +222,8 @@ impl ModeConfig {
             // The tones/bw live in the Contestia label itself (contestia8_500).
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
+            // The submode lives in the JT4 label itself (jt4a…jt4g).
+            ModeConfig::Jt4 { submode } => submode.clone(),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
             }
@@ -339,6 +347,9 @@ impl ModeConfig {
             ModeConfig::Jt9 => "jt9",
             ModeConfig::Wspr => "wspr",
             ModeConfig::Fst4 { .. } => "fst4",
+            ModeConfig::Jt4 { submode } => omnimodem_dsp::modes::jt4::Jt4Submode::from_label(submode)
+                .map(|v| v.label())
+                .unwrap_or("jt4a"),
             ModeConfig::Olivia { .. } => "olivia",
         }
     }
@@ -691,6 +702,20 @@ mod tests {
         assert_eq!(ModeConfig::parse("jt65"), Some(ModeConfig::Jt65));
         assert_eq!(ModeConfig::parse("jt9"), Some(ModeConfig::Jt9));
         assert_eq!(ModeConfig::parse("wspr"), Some(ModeConfig::Wspr));
+    }
+
+    #[test]
+    fn parse_resolves_jt4_submodes() {
+        for label in ["jt4a", "jt4b", "jt4c", "jt4d", "jt4e", "jt4f", "jt4g"] {
+            let cfg = ModeConfig::parse(label);
+            assert_eq!(cfg, Some(ModeConfig::Jt4 { submode: label.into() }));
+            // Round-trips through the canonical string and reports its own label.
+            let cfg = cfg.unwrap();
+            assert_eq!(cfg.to_mode_string(), label);
+            assert_eq!(cfg.label(), label);
+        }
+        assert_eq!(ModeConfig::parse("jt4"), None);
+        assert_eq!(ModeConfig::parse("jt4h"), None);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub mod fst4;
 pub mod ifk33;
 pub mod ifkp;
 pub mod ifkp_pic;
+pub mod jt4;
 pub mod jt65;
 pub mod jt9;
 pub mod mfsk;
