@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "upstream": "js8call/js8call @ a7ff1be",
+    "files": ["lib/ft8/encode174.f90", "lib/ft8/ldpc_174_87_params.f90", "lib/ft8/bpdecode174.f90"],
+    "cmd": "gfortran -O2 dump_encode174.f90 encode174.f90 -o dump_encode174 && ./dump_encode174",
+    "note": "Authoritative (174,87) LDPC codeword from the UNMODIFIED reference encoder. 'msgbits' is a fixed deterministic 87-bit message (bit i(1-origin) = (i*37+5)>>1 & 1); 'codeword' is encode174(msgbits) — [parity|message] permuted by colorder. Gates the Rust encode174 bit-exact; parity_errors under the transcribed Nm tables must be 0. CRC-12 is validated separately (cross-decode gate)."
+  },
+  "msgbits": "110011001100110011001100110011001100110011001100110011001100110011001100110011001100110",
+  "codeword": "101100101110111011110010100110011000110101100001110001110110001101011001010010010000110110011001100110011001100110011001100110011001100110011001100110011001100110011001100110"
+}
