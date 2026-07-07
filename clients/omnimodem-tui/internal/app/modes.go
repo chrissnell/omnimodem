@@ -173,6 +173,7 @@ var modes = []modeInfo{
 	{"jt4e", "sequencer", 60, nil},
 	{"jt4f", "sequencer", 60, nil},
 	{"jt4g", "sequencer", 60, nil},
+	{"msk144", "sequencer", 0, nil}, // VHF meteor scatter; streaming short bursts (default 1500 Hz)
 	{"wspr", "beacon", 120, nil},
 }
 
