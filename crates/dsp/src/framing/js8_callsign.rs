@@ -279,7 +279,7 @@ pub fn pack_alphanumeric50(value: &str) -> u64 {
 /// ref: varicode.cpp:893-944 (`unpackAlphaNumeric50`).
 pub fn unpack_alphanumeric50(mut packed: u64) -> String {
     let mut word = [b' '; 11];
-    let mut take38 = |p: &mut u64| -> u8 {
+    let take38 = |p: &mut u64| -> u8 {
         let t = (*p % 38) as usize;
         *p /= 38;
         ALPHANUMERIC[t]
