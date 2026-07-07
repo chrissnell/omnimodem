@@ -459,4 +459,48 @@ mod tests {
     fn build_directed_declines_freetext() {
         assert!(build_directed("K1ABC", "HELLO WORLD", true, true).is_none());
     }
+
+    /// Convert a reference `pack72bits` 12-char frame string into the 72-bit
+    /// payload: each char is a 6-bit `alphabet72` index, MSB-first, giving
+    /// `value(64) || rem(8)`.
+    fn frame_str_to_payload(s: &str) -> FramePayload72 {
+        use super::super::js8_message::JS8_ALPHABET;
+        let mut out = [false; 72];
+        for (ci, ch) in s.bytes().enumerate() {
+            let idx = JS8_ALPHABET.iter().position(|&a| a == ch).unwrap() as u8;
+            for b in 0..6 {
+                out[ci * 6 + b] = (idx >> (5 - b)) & 1 == 1;
+            }
+        }
+        out
+    }
+
+    /// Bit-exact vs the real `varicode.cpp` `packCompoundFrame` (Qt build). Golden
+    /// 12-char frame strings from `scratch/refvectors/js8/framesqt/frames_dump.cpp`.
+    #[test]
+    fn pack_compound_frame_matches_reference() {
+        // (callsign, type, num, bits3, reference 12-char frame)
+        let cases: &[(&str, u8, u16, u8, &str)] = &[
+            ("K1ABC", FRAME_HEARTBEAT, 0, 0, "2URtg4DOO000"),
+            ("VE3/K1ABC", FRAME_COMPOUND, 1234, 5, "Bu6RmCOxm2QL"),
+        ];
+        for (call, ftype, num, bits3, refstr) in cases {
+            let got = pack_compound_frame(call, *ftype, *num, *bits3).unwrap();
+            assert_eq!(got, frame_str_to_payload(refstr), "packCompoundFrame({call}) mismatch");
+        }
+    }
+
+    /// Bit-exact vs the real `varicode.cpp` `packDirectedMessage` (Qt build).
+    #[test]
+    fn pack_directed_frame_matches_reference() {
+        // build_directed("K1ABC", text) must equal the reference frame.
+        let cases: &[(&str, &str)] = &[
+            ("W1AW SNR -5", "Vk64SVAPtVaQ"),
+            ("W1AW SNR?", "Vk64SVAPtU00"),
+        ];
+        for (text, refstr) in cases {
+            let (payload, _i3) = build_directed("K1ABC", text, true, true).unwrap();
+            assert_eq!(payload, frame_str_to_payload(refstr), "packDirectedMessage({text}) mismatch");
+        }
+    }
 }

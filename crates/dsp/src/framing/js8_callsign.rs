@@ -367,4 +367,40 @@ mod tests {
         let packed = pack_alphanumeric50("VE3/K1ABC/P");
         assert!(packed < (1u64 << 50));
     }
+
+    /// Bit-exact vs the real `varicode.cpp` `packCallsign` (Qt build). Golden
+    /// values from `scratch/refvectors/js8/framesqt/frames_dump.cpp` (js8call @
+    /// a7ff1be). Confirms the base-40 encoding + group calls against the reference.
+    #[test]
+    fn pack_callsign_matches_reference() {
+        let cases: &[(&str, u32)] = &[
+            ("K1ABC", 259047992),
+            ("W1AW", 261410543),
+            ("VK3ABC", 223657958),
+            ("G0ABC", 258240989),
+            ("N5AC", 259717265),
+            ("AA1A", 72847511),
+            ("@CQ", 262177604),
+            ("@ALLCALL", 262177562),
+        ];
+        for (call, want) in cases {
+            assert_eq!(pack_callsign(call).0, *want, "packCallsign({call}) mismatch");
+        }
+    }
+
+    /// Bit-exact vs the real `varicode.cpp` `packAlphaNumeric50` (Qt build).
+    #[test]
+    fn pack_alphanumeric50_matches_reference() {
+        let cases: &[(&str, u64)] = &[
+            ("K1ABC", 348403268086540),
+            ("W1AW", 557100718697932),
+            ("VE3/K1ABC", 545578825598840),
+            ("K1ABC/P", 348403268180400),
+            ("@ALLCALL", 665697326060246),
+            ("N5AC", 402407681626828),
+        ];
+        for (call, want) in cases {
+            assert_eq!(pack_alphanumeric50(call), *want, "packAlphaNumeric50({call}) mismatch");
+        }
+    }
 }
