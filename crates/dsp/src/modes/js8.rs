@@ -19,7 +19,7 @@ use crate::fec::ldpc_js8::{encode174, extract_message, js8_174_87_code};
 use crate::fec::llr::demap_fsk_identity;
 use crate::fec::osd::osd_decode;
 use crate::framing::js8_message::{
-    pack_fast_data, pack_frame, unpack_frame, JS8_DATA, JS8_FIRST, JS8_LAST,
+    decode_frame, pack_fast_data, pack_frame, JS8_DATA, JS8_FIRST, JS8_LAST,
 };
 use crate::frontend::modulate::Gfsk;
 use crate::mode::{BlockDemodulator, DemodShape, Duplex, ModError, ModeCaps, Modulator};
@@ -337,10 +337,11 @@ impl BlockDemodulator for Js8Demod {
                 }
             }
             let msgbits = extract_message(&cw);
-            let (text, _i3) = match unpack_frame(&msgbits) {
+            let (frame, _i3) = match decode_frame(&msgbits) {
                 Some(v) => v,
                 None => continue,
             };
+            let text = frame.display();
             if text.is_empty() || !seen.insert(text.clone()) {
                 continue;
             }
@@ -509,6 +510,36 @@ mod tests {
             got.push_str(&frame_text);
         }
         assert_eq!(got, message, "reassembled multi-frame message mismatch");
+    }
+
+    /// A directed frame (non-data) survives the full audio channel and decodes
+    /// to its rendered form, exercising the payload-type routing in the demod.
+    #[test]
+    fn directed_frame_audio_roundtrip() {
+        use crate::framing::js8_frames::{directed_cmd_code, pack_directed_frame};
+        let cmd = directed_cmd_code(" SNR?").unwrap();
+        let payload = pack_directed_frame("K1ABC", "W1AW", cmd, 0).unwrap();
+        let bits = pack_frame(&payload, JS8_FIRST | JS8_LAST); // no DATA flag
+        let sm = Js8Submode::Turbo;
+        let p = sm.params();
+        let syms = js8_symbols(&bits, sm);
+        let gfsk = Gfsk::new(JS8_RATE as f32, p.nsps, JS8_BASE_HZ, p.tone_spacing as f32, 2.0);
+        let wave = gfsk.modulate(&syms.iter().map(|&s| s as u32).collect::<Vec<_>>());
+        let win_len = (JS8_RATE as f32 * p.tx_seconds as f32) as usize;
+        let mut win = vec![0.0f32; win_len.max(wave.len())];
+        win[..wave.len()].copy_from_slice(&wave);
+        let decodes = Js8Demod::new(sm).decode_window(&win, 0);
+        let texts: Vec<String> = decodes
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "K1ABC: W1AW SNR?"),
+            "directed frame did not decode; got {texts:?}"
+        );
     }
 
     /// Loopback survives AWGN.

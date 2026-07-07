@@ -17,6 +17,10 @@
 //! unavailable to capture a native golden CRC). Pack/unpack are self-consistent.
 
 use crate::fec::ldpc_js8::js8_crc12;
+use crate::framing::js8_frames::{
+    directed_cmd_name, is_snr_command, unpack_compound_frame, unpack_directed_frame, CompoundFrame,
+    DirectedFrame, FRAME_DIRECTED,
+};
 
 /// JS8's 67-symbol message alphabet. Char → 0-based index; only the low 6 bits
 /// of the index survive `genjs8`'s `b6.6` packing (indices 64–66 alias to
@@ -230,12 +234,9 @@ pub fn unpack_data_frames(frames: &[[bool; FRAME_BITS]]) -> String {
     frames.iter().map(unpack_fast_data).collect()
 }
 
-/// Verify the CRC of an 87-bit frame and decode it, routing by frame type:
-/// a `JS8_DATA`-flagged frame is JSC-decompressed; otherwise it is the base
-/// 12-char text frame. Returns `(text, i3bit)`, or `None` if the CRC fails.
-pub fn unpack_frame(bits: &[u8; KK]) -> Option<(String, u8)> {
+/// Verify the 12-bit CRC of an 87-bit frame (shared by the unpack routers).
+fn crc_ok(bits: &[u8; KK]) -> bool {
     let i3bit = frame_type(bits);
-    // CRC check (same buffer form as pack).
     let mut buf = [0u8; 11];
     for (i, byte) in buf.iter_mut().take(9).enumerate() {
         let mut v = 0u8;
@@ -250,26 +251,71 @@ pub fn unpack_frame(bits: &[u8; KK]) -> Option<(String, u8)> {
     for b in 0..12 {
         got = (got << 1) | bits[75 + b] as u16;
     }
-    if got != want {
+    got == want
+}
+
+fn payload_bits(bits: &[u8; KK]) -> [bool; FRAME_BITS] {
+    let mut payload = [false; FRAME_BITS];
+    for (i, p) in payload.iter_mut().enumerate() {
+        *p = bits[i] != 0;
+    }
+    payload
+}
+
+/// A decoded JS8 frame, routed by frame type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Js8Frame {
+    /// Free-text (JSC-compressed) data frame.
+    Data(String),
+    /// Heartbeat / compound frame (a compound callsign + type/num/bits3).
+    Compound(CompoundFrame),
+    /// Directed call (from → to + command [+ number/SNR]).
+    Directed(DirectedFrame),
+}
+
+impl Js8Frame {
+    /// A human-readable rendering of the frame (approximate JS8Call display;
+    /// the exact wording is a UI concern validated by cross-decode).
+    pub fn display(&self) -> String {
+        match self {
+            Js8Frame::Data(t) => t.clone(),
+            Js8Frame::Compound(c) => c.callsign.clone(),
+            Js8Frame::Directed(d) => {
+                let cmd = directed_cmd_name(d.cmd).unwrap_or("");
+                let mut s = format!("{}: {}{}", d.from, d.to, cmd);
+                if d.inum != 0 {
+                    let val = d.inum as i32 - 31;
+                    if is_snr_command(d.cmd) {
+                        s.push_str(&format!(" {val:+03}"));
+                    } else {
+                        s.push_str(&format!(" {val}"));
+                    }
+                }
+                s
+            }
+        }
+    }
+}
+
+/// CRC-check an 87-bit frame and decode it into a structured [`Js8Frame`],
+/// routing by frame type: a `JS8_DATA`-flagged frame is JSC free-text; otherwise
+/// the payload's 3-bit type field selects Directed vs Compound/heartbeat.
+/// Returns `(frame, i3bit)`, or `None` if the CRC fails or the frame is malformed.
+pub fn decode_frame(bits: &[u8; KK]) -> Option<(Js8Frame, u8)> {
+    if !crc_ok(bits) {
         return None;
     }
+    let i3bit = frame_type(bits);
+    let payload = payload_bits(bits);
     if i3bit & JS8_DATA != 0 {
-        let mut payload = [false; FRAME_BITS];
-        for (i, p) in payload.iter_mut().enumerate() {
-            *p = bits[i] != 0;
-        }
-        Some((unpack_fast_data(&payload), i3bit))
+        return Some((Js8Frame::Data(unpack_fast_data(&payload)), i3bit));
+    }
+    // Non-data: the frame type lives in the payload's first 3 bits.
+    let ftype = ((payload[0] as u8) << 2) | ((payload[1] as u8) << 1) | payload[2] as u8;
+    if ftype == FRAME_DIRECTED {
+        unpack_directed_frame(&payload).map(|d| (Js8Frame::Directed(d), i3bit))
     } else {
-        // Base 12-char text field.
-        let mut msg = String::with_capacity(MSG_CHARS);
-        for i in 0..MSG_CHARS {
-            let mut w = 0u32;
-            for b in 0..6 {
-                w = (w << 1) | bits[i * 6 + b] as u32;
-            }
-            msg.push(JS8_ALPHABET[w as usize] as char);
-        }
-        Some((msg, i3bit))
+        unpack_compound_frame(&payload).map(|c| (Js8Frame::Compound(c), i3bit))
     }
 }
 
@@ -326,6 +372,50 @@ mod tests {
         // CRC is self-consistent: unpack_msgbits verifies it (payload isn't a
         // valid 12-char field, but the CRC must still check).
         assert!(unpack_msgbits(&bits).is_some(), "data-frame CRC must verify");
+    }
+
+    /// `decode_frame` routes a data frame to `Js8Frame::Data`.
+    #[test]
+    fn decode_frame_routes_data() {
+        let (payload, _) = pack_fast_data("CQ K1ABC");
+        let bits = pack_frame(&payload, JS8_DATA | JS8_FIRST | JS8_LAST);
+        let (frame, _i3) = decode_frame(&bits).expect("crc ok");
+        assert_eq!(frame, Js8Frame::Data("CQ K1ABC".to_string()));
+        assert_eq!(frame.display(), "CQ K1ABC");
+    }
+
+    /// `decode_frame` routes a directed frame (non-data i3bit) to
+    /// `Js8Frame::Directed` by the payload type field, with correct fields.
+    #[test]
+    fn decode_frame_routes_directed() {
+        use crate::framing::js8_frames::{directed_cmd_code, pack_directed_frame};
+        let cmd = directed_cmd_code(" SNR").unwrap();
+        let payload = pack_directed_frame("K1ABC", "W1AW", cmd, 26).unwrap(); // 26-31 = -5 dB
+        let bits = pack_frame(&payload, JS8_FIRST | JS8_LAST); // no DATA flag
+        let (frame, _i3) = decode_frame(&bits).expect("crc ok");
+        match &frame {
+            Js8Frame::Directed(d) => {
+                assert_eq!(d.from, "K1ABC");
+                assert_eq!(d.to, "W1AW");
+                assert_eq!(d.cmd, cmd);
+                assert_eq!(d.inum, 26);
+            }
+            other => panic!("expected Directed, got {other:?}"),
+        }
+        assert_eq!(frame.display(), "K1ABC: W1AW SNR -05");
+    }
+
+    /// `decode_frame` routes a compound/heartbeat frame to `Js8Frame::Compound`.
+    #[test]
+    fn decode_frame_routes_compound() {
+        use crate::framing::js8_frames::{pack_compound_frame, FRAME_HEARTBEAT};
+        let payload = pack_compound_frame("K1ABC", FRAME_HEARTBEAT, 0, 0).unwrap();
+        let bits = pack_frame(&payload, JS8_FIRST | JS8_LAST);
+        let (frame, _i3) = decode_frame(&bits).expect("crc ok");
+        match &frame {
+            Js8Frame::Compound(c) => assert_eq!(c.callsign, "K1ABC"),
+            other => panic!("expected Compound, got {other:?}"),
+        }
     }
 
     /// A single flipped message bit fails the CRC check.
