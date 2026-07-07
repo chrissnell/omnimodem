@@ -88,7 +88,16 @@ Pinned from `js8call/` at the workspace commit (record the exact hash — `a7ff1
 
 ---
 
-## Task 0 — LDPC(174,87) + CRC-12 building block (KAT-gated first)
+## Progress (updated 2026-07-07)
+
+- ✅ **Task 1 — JSC codec** landed & gated bit-exact (`framing/jsc.rs`, 262 k-word dictionary blob, `tests/vectors/js8_jsc.json`).
+- ✅ **Task 0 — LDPC(174,87) + CRC-12** landed & gated (`fec/{js8_tables,ldpc_js8}.rs`): `encode174` bit-exact vs the authoritative Fortran encoder, generator/`Nm` agreement, `Mn`/`Nm` consistency, BP+OSD message recovery. CRC-12 transcribed (on-air authority deferred to the Task-5 cross-decode gate — boost unavailable to capture a native golden CRC).
+- ✅ **Task 3 (TX core) — modem symbol assembly** landed & gated (`modes/js8.rs`): submode grid + Costas variants + `js8_symbols` bit-exact vs `genjs8` for both Costas variants (`tests/vectors/js8_symbols.json`).
+- ⬜ Remaining: Task 2 (75-bit message + directed frames), Task 3 (GFSK waveform `Modulator` + `BlockDemodulator` decode), Task 4 (registry), Task 5 (cross-decode + BER), Task 6 (TUI `directed` shape), Task 7 (PR).
+
+---
+
+## Task 0 — LDPC(174,87) + CRC-12 building block (KAT-gated first) — ✅ DONE
 
 **Foundational; lands green BEFORE any mode uses it (Doctrine §6).** The existing `Ldpc` already carries a general BP decoder + systematic encode (`fec/ldpc.rs`) and `osd_decode` works against any `Ldpc`; we add one table-backed constructor and the CRC-12.
 
@@ -108,7 +117,7 @@ Pinned from `js8call/` at the workspace commit (record the exact hash — `a7ff1
 
 ---
 
-## Task 1 — JSC compressed-text codec (KAT-gated, the bulk of the work)
+## Task 1 — JSC compressed-text codec (KAT-gated, the bulk of the work) — ✅ DONE
 
 **Second foundational block, fully independent of the modem — pure integer/bit domain, so its gate is a hermetic bit-exact KAT (no reference binary needed once vectors are captured).**
 
