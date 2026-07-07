@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
@@ -249,6 +250,146 @@ func modeByLabel(label string) *modeInfo {
 	return nil
 }
 
+// modeFamilyGroup is one row of the family selector: a display name and the
+// indices (into `modes`) of every submode that belongs to it, in table order.
+// The operate/config screen picks a family first, then a specific mode within
+// it — turning one ~200-entry cycle into a family cycle plus a short submode
+// cycle.
+type modeFamilyGroup struct {
+	name  string
+	modes []int
+}
+
+// families is the ordered family list, computed once from the modes table so a
+// family's membership can never drift from the source of truth. Order follows
+// each family's first appearance in `modes`.
+var families = buildFamilies()
+
+func buildFamilies() []modeFamilyGroup {
+	var out []modeFamilyGroup
+	idx := make(map[string]int, len(modes))
+	for i := range modes {
+		name := familyName(modes[i].label)
+		fi, ok := idx[name]
+		if !ok {
+			fi = len(out)
+			idx[name] = fi
+			out = append(out, modeFamilyGroup{name: name})
+		}
+		out[fi].modes = append(out[fi].modes, i)
+	}
+	return out
+}
+
+// familyName classifies a bare mode label into the display family it belongs to.
+// The big prefix families (PSK/DominoEX/THOR/MFSK/…) collapse dozens of submodes
+// into one selectable group; standalone modes (CW, RTTY, FT8, …) form a family
+// of one so the cascading selector treats every mode the same way.
+func familyName(label string) string {
+	switch label {
+	case "cw":
+		return "CW"
+	case "rtty":
+		return "RTTY"
+	case "olivia":
+		return "Olivia"
+	case "afsk1200":
+		return "Packet"
+	case "navtex", "sitorb":
+		return "NAVTEX / SITOR-B"
+	case "wefax576", "wefax288":
+		return "WEFAX"
+	case "ft8":
+		return "FT8"
+	case "ft4":
+		return "FT4"
+	case "jt65":
+		return "JT65"
+	case "jt9":
+		return "JT9"
+	case "fst4":
+		return "FST4"
+	case "msk144":
+		return "MSK144"
+	case "wspr":
+		return "WSPR"
+	case "js8":
+		return "JS8"
+	}
+	switch {
+	case strings.HasPrefix(label, "jt4"): // jt4a..jt4g
+		return "JT4"
+	case strings.HasPrefix(label, "qpsk"):
+		return "QPSK"
+	case strings.HasPrefix(label, "psk"):
+		return pskFamily(label)
+	case strings.HasPrefix(label, "dominoex"):
+		return "DominoEX"
+	case strings.HasPrefix(label, "thor"):
+		return "THOR"
+	case strings.HasPrefix(label, "ifkp"):
+		return "IFKP"
+	case strings.HasPrefix(label, "fsq"):
+		return "FSQ"
+	case strings.HasPrefix(label, "mfsk"):
+		return "MFSK"
+	case strings.HasPrefix(label, "contestia"):
+		return "Contestia"
+	case strings.HasPrefix(label, "mt63"):
+		return "MT63"
+	case strings.HasPrefix(label, "throb"): // throb + throbx
+		return "Throb"
+	case strings.Contains(label, "hell"): // feldhell/slowhell/hellx*/hell80
+		return "Hell"
+	}
+	// Everything left is an SSTV colour/mono submode (all shape "image"); WEFAX
+	// and Hell — the other image modes — are handled above.
+	if mi := modeByLabel(label); mi != nil && mi.shape == "image" {
+		return "SSTV"
+	}
+	return "Other"
+}
+
+// pskFamily splits the PSK label space into the fldigi-style sub-families: plain
+// BPSK, robust (…r/…f), robust multi-carrier (…rc…), and plain multi-carrier
+// (…c…). QPSK is handled by the caller before this runs.
+func pskFamily(label string) string {
+	rest := strings.TrimPrefix(label, "psk")
+	switch {
+	case strings.Contains(rest, "rc"):
+		return "PSK-RC"
+	case strings.HasSuffix(rest, "r"), strings.HasSuffix(rest, "f"):
+		return "PSK-R"
+	case strings.ContainsRune(rest, 'c'):
+		return "PSK-C"
+	default:
+		return "PSK"
+	}
+}
+
+// familyIdxOfMode returns the index into `families` of the family containing the
+// mode at modeIdx (0 if somehow unclassified).
+func familyIdxOfMode(modeIdx int) int {
+	name := familyName(modes[modeIdx].label)
+	for i := range families {
+		if families[i].name == name {
+			return i
+		}
+	}
+	return 0
+}
+
+// familyModePos returns the position of modeIdx within a family's submode list
+// (0 if not present, which shouldn't happen for a family's own modes).
+func familyModePos(fam modeFamilyGroup, modeIdx int) int {
+	for pos, mi := range fam.modes {
+		if mi == modeIdx {
+			return pos
+		}
+	}
+	return 0
+}
+
 // modeParamsFor builds the typed ModeParams oneof for a mode, or nil for modes
 // without params (the daemon then uses the bare-label defaults).
 func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
@@ -372,4 +513,47 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 	default:
 		return nil // ft8/ft4/jt65/jt9/wspr: no params
 	}
+}
+
+// modeStringFor builds the ConfigureChannel `mode` string for a mode. Most modes
+// carry their settings in a typed ModeParams message and just need the bare
+// label here; but FST4, JS8, and MSK144 have no typed proto message — the daemon
+// reads their extra parameters from the mode string's `:key=value` tail
+// (ModeConfig::parse), so this appends that tail from the settings-form values.
+// vals is the form's raw string values (SettingsForm.Values()).
+func modeStringFor(label string, vals map[string]string) string {
+	pick := func(k, d string) string {
+		if v, ok := vals[k]; ok && v != "" {
+			return v
+		}
+		return d
+	}
+	switch label {
+	case "fst4":
+		return "fst4:tr=" + pick("tr", "15")
+	case "js8":
+		return "js8:sub=" + pick("sub", "normal")
+	case "msk144":
+		return "msk144:freq=" + pick("freq", "1500")
+	default:
+		return label
+	}
+}
+
+// modeStringParam reads a numeric key from a mode string's `:key=value` tail
+// (e.g. modeStringParam("fst4:tr=300", "tr", 15) == 300), returning def when the
+// mode has no tail or the key is absent/unparseable.
+func modeStringParam(mode, key string, def float64) float64 {
+	_, tail, ok := strings.Cut(mode, ":")
+	if !ok {
+		return def
+	}
+	for _, kv := range strings.Split(tail, ",") {
+		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				return f
+			}
+		}
+	}
+	return def
 }

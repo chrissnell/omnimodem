@@ -355,7 +355,7 @@ impl BlockDemodulator for Js8Demod {
 
             let (mut cw, perr) = code.decode_minsum(&llrs, 30);
             if perr != 0 {
-                match osd_decode(&code, &llrs, 2) {
+                match osd_decode(code, &llrs, 2) {
                     Some(better) => cw = better,
                     None => continue,
                 }

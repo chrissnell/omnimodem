@@ -251,7 +251,7 @@ fn commands_by_len() -> Vec<(&'static str, u8)> {
         .map(|(n, c)| (n.trim(), *c as u8))
         .filter(|(n, _)| !n.is_empty())
         .collect();
-    v.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    v.sort_by_key(|c| std::cmp::Reverse(c.0.len()));
     v
 }
 
@@ -365,6 +365,8 @@ mod tests {
     }
 
     /// The 16-bit `num` splits into 11 high + 5 low bits and recombines exactly.
+    // The 11_5 underscore grouping mirrors that bit split on purpose, so keep it.
+    #[allow(clippy::unusual_byte_groupings)]
     #[test]
     fn num_split_recombine() {
         let payload = pack_compound_frame("K1ABC", FRAME_COMPOUND, 0b1010_1010_101_10011, 0).unwrap();
