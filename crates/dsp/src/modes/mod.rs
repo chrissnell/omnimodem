@@ -33,6 +33,7 @@ pub mod picture;
 pub mod psk;
 pub mod psk31;
 pub mod rtty;
+pub mod sstv;
 pub mod thor;
 pub mod thor_pic;
 pub mod throb;
