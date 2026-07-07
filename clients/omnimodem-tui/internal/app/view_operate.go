@@ -345,7 +345,7 @@ func (v *operateView) sendImage() tea.Cmd {
 	ps, ok := buildPictureSend(v.modeLabel, v.staged.img)
 	if !ok {
 		v.m.toast = ui.NewToast(
-			fmt.Sprintf("%s can't transmit a picture — switch to wefax576 or wefax288", v.modeLabel),
+			fmt.Sprintf("%s can't transmit a picture — use an SSTV or WEFAX mode", v.modeLabel),
 			ui.SeverityError)
 		return nil
 	}

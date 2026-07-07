@@ -42,10 +42,33 @@ func TestBuildPictureSendWefax576(t *testing.T) {
 	}
 }
 
-// Modes the daemon can't carry a picture on report not-ok so the caller can warn.
+// Hell modes paint text as pixels — not a picture-send mode — so they report
+// not-ok and the caller warns instead of transmitting garbage.
 func TestBuildPictureSendUnsupported(t *testing.T) {
-	if _, ok := buildPictureSend("feldhell", solidImage(64, 64)); ok {
-		t.Fatal("feldhell is not a picture-send mode")
+	for _, m := range []string{"feldhell", "slowhell", "hell80"} {
+		if _, ok := buildPictureSend(m, solidImage(64, 64)); ok {
+			t.Fatalf("%s is not a picture-send mode", m)
+		}
+	}
+}
+
+// SSTV modes are colour picture modes: they build a colour raster (the daemon
+// resamples it to the submode's native geometry) with a generous TX watchdog.
+func TestBuildPictureSendSstv(t *testing.T) {
+	for _, m := range []string{"mc180-n", "scottie1", "martin2", "pd120", "robot36"} {
+		ps, ok := buildPictureSend(m, solidImage(1024, 768))
+		if !ok {
+			t.Fatalf("%s should be a picture-send mode", m)
+		}
+		if !ps.color {
+			t.Fatalf("%s is a colour SSTV mode", m)
+		}
+		if want := int(ps.width) * int(ps.height) * 3; len(ps.rgb) != want {
+			t.Fatalf("%s rgb %d != width*height*3 %d", m, len(ps.rgb), want)
+		}
+		if ps.txSecs <= 0 {
+			t.Fatalf("%s needs a TX watchdog budget", m)
+		}
 	}
 }
 

@@ -135,6 +135,34 @@ func TestImageStageAndTransmit(t *testing.T) {
 	}
 }
 
+// An SSTV channel (e.g. MC180-N) transmits the staged picture through the colour
+// TransmitImage path, not the text Transmit RPC.
+func TestSstvImageStageAndTransmit(t *testing.T) {
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "pic.png")
+	writeTestPNG(t, pngPath)
+
+	f := &client.Fake{}
+	v := imageOperateViewMode(t, f, "mc180-n")
+
+	v.stageImage(pngPath)
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		cmd()
+	}
+	if _, cmd := v.Update(leaseMsg{&pb.TxLeaseResponse{Granted: true}}); cmd != nil {
+		cmd()
+	}
+	if len(f.TransmitCalls) != 0 {
+		t.Fatalf("SSTV picture must not use the text Transmit RPC, got %d calls", len(f.TransmitCalls))
+	}
+	if len(f.TransmitImageCalls) != 1 {
+		t.Fatalf("expected one TransmitImage call, got %d", len(f.TransmitImageCalls))
+	}
+	if !f.TransmitImageCalls[0].Color {
+		t.Fatal("SSTV is a colour mode; color flag should be true")
+	}
+}
+
 // On a mode the daemon can't carry a picture (the Hell text-raster modes), enter
 // surfaces a clear message instead of silently doing nothing (or sending garbage).
 func TestImageSendUnsupportedModeToasts(t *testing.T) {

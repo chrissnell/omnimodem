@@ -3,6 +3,7 @@ package app
 import (
 	"image"
 	"math"
+	"strings"
 )
 
 // pictureSend is a raster staged for the daemon's TransmitImage RPC: row-major
@@ -16,27 +17,42 @@ type pictureSend struct {
 	txSecs        float64
 }
 
-// buildPictureSend downsamples a staged image into a transmit raster sized for the
-// channel's mode. Returns ok=false for modes the daemon can't carry a picture on
-// (e.g. the Hell text-raster modes), so the caller can surface a clear message
-// instead of a silent no-op. Only WEFAX is wired here today — the fldigi picture
-// families (MFSK/THOR/IFKP/FSQ) are not yet exposed as image-shape in the TUI.
+// buildPictureSend downsamples a staged image into a transmit raster for the
+// channel's mode. Returns ok=false only for image-shape modes the daemon can't
+// carry a picture on (the Hell text-raster modes), so the caller can surface a
+// clear message instead of a silent no-op. WEFAX gets a grayscale, row-capped
+// raster; every other picture mode (SSTV and any future fixed-geometry mode) gets
+// a colour raster that the daemon resamples to the submode's native size.
 func buildPictureSend(modeLabel string, img image.Image) (pictureSend, bool) {
-	// WEFAX stretches each source row to a fixed line width, so only the row count
-	// drives duration. Cap rows to keep the on-air time near ~2.5 min, preserving
-	// aspect. wefax576 runs 120 lpm (0.5 s/line); wefax288 runs 60 lpm (1 s/line).
-	var maxW, maxRows int
-	var secPerLine float64
-	switch modeLabel {
-	case "wefax576":
-		maxW, maxRows, secPerLine = 800, 280, 0.5
-	case "wefax288":
-		maxW, maxRows, secPerLine = 400, 140, 1.0
-	default:
-		return pictureSend{}, false
-	}
-
 	b := img.Bounds()
+	switch {
+	case modeLabel == "wefax576":
+		return wefaxSend(img, b, 800, 280, 0.5), true
+	case modeLabel == "wefax288":
+		return wefaxSend(img, b, 400, 140, 1.0), true
+	case strings.Contains(modeLabel, "hell"):
+		// Hell paints text as a pixel raster; it isn't a picture-send mode.
+		return pictureSend{}, false
+	default:
+		// SSTV (and any future fixed-geometry colour picture mode): send a colour
+		// raster; the daemon fits it to the submode's native geometry. The source
+		// box is generous enough to cover the largest SSTV raster (800×616) without
+		// upscaling. The watchdog budget spans the slowest SSTV modes (~5 min).
+		w, h := fitBox(b.Dx(), b.Dy(), 800, 616)
+		return pictureSend{
+			width:  uint32(w),
+			height: uint32(h),
+			rgb:    resampleToRGB(img, w, h),
+			color:  true,
+			txSecs: 320,
+		}, true
+	}
+}
+
+// wefaxSend builds a grayscale WEFAX raster: rows are capped (maxRows) to keep the
+// on-air facsimile time bounded, preserving aspect. secPerLine sizes the watchdog
+// estimate (wefax576 runs 120 lpm = 0.5 s/line; wefax288 runs 60 lpm = 1 s/line).
+func wefaxSend(img image.Image, b image.Rectangle, maxW, maxRows int, secPerLine float64) pictureSend {
 	w, h := fitBox(b.Dx(), b.Dy(), maxW, maxRows)
 	// APT tones + 20 phasing lines + start/stop overhead, generously rounded.
 	overhead := float64(24)*secPerLine + 4
@@ -45,9 +61,8 @@ func buildPictureSend(modeLabel string, img image.Image) (pictureSend, bool) {
 		height: uint32(h),
 		rgb:    resampleToRGB(img, w, h),
 		color:  false, // WEFAX is grayscale; the daemon folds RGB to luma.
-		txspp:  0,
 		txSecs: float64(h)*secPerLine + overhead,
-	}, true
+	}
 }
 
 // fitBox scales (srcW,srcH) to fit within (maxW,maxH) preserving aspect ratio,
