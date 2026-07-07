@@ -175,6 +175,10 @@ impl Modulator for Jt4Mod {
         let bits = pack72(&text).ok_or_else(|| ModError::TooLong(text.clone()))?;
         let coded = encode_bits(&self.fano, &bits);
         let sync = sync_bits();
+        // Normal sync only. gen4.f90:35-38 inverts the sync (`2*data + (1-npr)`)
+        // for shorthand messages whose text carries a `-0..3` suffix at index ≥9;
+        // that shorthand path is out of scope here (ordinary QSO text never hits
+        // it), so we always take the normal `2*data + npr` branch.
         // tone(i) = 2*data(i) + sync(i): data is the MSB, sync the LSB.
         let symbols: Vec<u32> =
             coded.iter().zip(sync).map(|(&d, &s)| 2 * d as u32 + s as u32).collect();
