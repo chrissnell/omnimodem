@@ -39,6 +39,8 @@ pub enum PictureError {
     BadSize { w: u32, h: u32, color: bool },
     #[error("image byte length {got} != width*height*3 ({want})")]
     BadLength { got: usize, want: usize },
+    #[error("wefax modulation failed: {0}")]
+    Modulate(String),
 }
 
 /// Build the complete picture-send audio for `cfg`'s configured mode, returning
@@ -84,6 +86,33 @@ pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<(Vec<f32>, u32), Pi
             let mode = fsq_pic::FsqPicMode::from_dims(send.width, send.height, grey)
                 .ok_or_else(bad_size)?;
             Ok((fsq_pic::build_tx(s, *center_hz, mycall, mode, &send.rgb), fsq_pic::SAMPLE_RATE as u32))
+        }
+        ModeConfig::Wefax { submode, .. } => {
+            use omnimodem_dsp::mode::Modulator;
+            use omnimodem_dsp::modes::wefax;
+            use omnimodem_dsp::types::{Frame, FramePayload};
+            let v = wefax::WefaxVariant::from_label(submode)
+                .ok_or_else(|| PictureError::BadSubmode(submode.clone()))?;
+            // WEFAX is a grayscale facsimile: collapse RGB to BT.601 luma. The
+            // modulator stretches each source row to the mode's fixed line width,
+            // so any source width is fine; the row count sets the on-air duration.
+            let luma: Vec<u8> = send
+                .rgb
+                .chunks_exact(3)
+                .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+                .collect();
+            let frame = Frame {
+                payload: FramePayload::Image {
+                    width: send.width as u16,
+                    channels: 1,
+                    pixels: luma,
+                },
+                meta: Default::default(),
+            };
+            let audio = wefax::WefaxMod::new(v, wefax::CARRIER_HZ)
+                .modulate(&frame)
+                .map_err(|e| PictureError::Modulate(e.to_string()))?;
+            Ok((audio, wefax::WEFAX_RATE))
         }
         other => Err(PictureError::Unsupported(other.to_mode_string())),
     }
@@ -157,6 +186,30 @@ mod tests {
         assert_eq!(
             build(&cfg, &send(59, 74, false)),
             Err(PictureError::BadSize { w: 59, h: 74, color: false })
+        );
+    }
+
+    #[test]
+    fn wefax_builds_any_size_as_grayscale_facsimile() {
+        let cfg = ModeConfig::Wefax { submode: "wefax576".into(), center_hz: 1900.0 };
+        // WEFAX carries any raster (rows set the on-air length); colour is folded
+        // to luma, so a colour request builds the same as grey.
+        let (audio, rate) = build(&cfg, &send(64, 32, true)).expect("wefax picture builds");
+        assert!(!audio.is_empty());
+        assert_eq!(rate, 11_025, "wefax native rate");
+        assert_eq!(
+            build(&cfg, &send(200, 8, false)),
+            build(&cfg, &send(200, 8, true)),
+            "wefax ignores the colour flag"
+        );
+    }
+
+    #[test]
+    fn wefax_rejects_bad_submode() {
+        let cfg = ModeConfig::Wefax { submode: "wefax999".into(), center_hz: 1900.0 };
+        assert_eq!(
+            build(&cfg, &send(64, 32, false)),
+            Err(PictureError::BadSubmode("wefax999".into()))
         );
     }
 

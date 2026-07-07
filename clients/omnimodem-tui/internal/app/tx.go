@@ -3,8 +3,8 @@ package app
 import (
 	"time"
 
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 )
 
 type txPhase int
@@ -20,21 +20,40 @@ const (
 type txState struct {
 	phase     txPhase
 	payload   []byte
+	image     *pictureSend // non-nil when the pending TX is a picture (TransmitImage)
 	id        uint64
 	startedAt time.Time
 	watchdog  time.Duration // 0 = disabled
+	baseDog   time.Duration // mode-default watchdog, restored after an image send
 }
 
 func (t *txState) begin(payload []byte) {
 	t.phase = txAcquiring
 	t.payload = payload
+	t.image = nil
+}
+
+// beginImage stages a picture for TransmitImage. A facsimile can key for minutes,
+// so the watchdog is widened to the estimated on-air time (plus margin) for the
+// duration of this send, then restored on completion.
+func (t *txState) beginImage(ps pictureSend) {
+	t.phase = txAcquiring
+	t.payload = nil
+	t.image = &ps
+	t.watchdog = time.Duration(ps.txSecs*1.5*float64(time.Second)) + txWatchdogMargin
 }
 func (t *txState) onLeaseGranted() {
 	t.phase = txTransmitting
 	t.startedAt = time.Now()
 }
-func (t *txState) onComplete()  { t.phase = txIdle; t.payload = nil }
-func (t *txState) halt()        { t.phase = txIdle; t.payload = nil }
+func (t *txState) onComplete() { t.reset() }
+func (t *txState) halt()       { t.reset() }
+func (t *txState) reset() {
+	t.phase = txIdle
+	t.payload = nil
+	t.image = nil
+	t.watchdog = t.baseDog
+}
 func (t *txState) active() bool { return t.phase != txIdle }
 func (t *txState) watchdogExpired(now time.Time) bool {
 	return t.watchdog > 0 && t.phase == txTransmitting && now.Sub(t.startedAt) > t.watchdog
@@ -77,6 +96,17 @@ func transmitCmd(c client.ModemClient, ch uint32, payload []byte) tea.Cmd {
 		ctx, cancel := rpcCtx()
 		defer cancel()
 		id, err := c.Transmit(ctx, ch, payload)
+		if err != nil {
+			return rpcErrMsg{err}
+		}
+		return transmitMsg{id}
+	}
+}
+func transmitImageCmd(c client.ModemClient, ch uint32, ps *pictureSend) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := rpcCtx()
+		defer cancel()
+		id, err := c.TransmitImage(ctx, ch, ps.width, ps.height, ps.rgb, ps.color, ps.txspp)
 		if err != nil {
 			return rpcErrMsg{err}
 		}
