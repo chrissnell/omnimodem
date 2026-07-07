@@ -15,6 +15,7 @@
 //!     its ordering is load-bearing — longest matches come first within a
 //!     first-byte bucket),
 //!   - `prefix` — the 103-entry first-byte jump table.
+//!
 //! Blob format is documented at the extractor (`dumper.cpp`). The bit-domain
 //! output is deterministic and asserted **bit-exact** against reference golden
 //! vectors (`tests/vectors/js8_jsc.json`) — see the tests below.
@@ -412,7 +413,7 @@ mod tests {
     #[test]
     fn jsc_decompress_does_not_panic_on_garbage() {
         // 4-bit group 0b0111 = 7 = s, repeated: an unterminated continuation run.
-        let sevens: Codeword = std::iter::repeat([false, true, true, true]).take(40).flatten().collect();
+        let sevens: Codeword = std::iter::repeat_n([false, true, true, true], 40).flatten().collect();
         let _ = decompress(&sevens); // must not panic
         // All-ones and all-zeros of assorted lengths.
         for len in [0usize, 1, 3, 4, 5, 71, 72, 200] {
