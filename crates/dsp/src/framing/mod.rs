@@ -15,6 +15,7 @@ pub mod varicode;
 pub mod jsc;
 pub mod js8_message;
 pub mod js8_callsign;
+pub mod js8_frames;
 pub mod dominoex_varicode;
 pub mod thor_varicode;
 pub mod ifkp_varicode;
