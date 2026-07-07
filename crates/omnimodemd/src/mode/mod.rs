@@ -78,6 +78,8 @@ pub enum ModeConfig {
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
     Fst4 { tr_s: u16 },
+    // W5 JS8: parametric over the submode (normal/fast/turbo/slow).
+    Js8 { submode: String },
     /// JT4 (WSJT-X legacy EME): `submode` is a `jt4::Jt4Submode` label
     /// (`jt4a`…`jt4g`), differing only in 4-FSK tone spacing. 60 s on the minute.
     Jt4 { submode: String },
@@ -199,10 +201,17 @@ impl ModeConfig {
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
             "fst4" => Some(ModeConfig::Fst4 { tr_s: u("tr", 15) }),
+            "js8" => Some(ModeConfig::Js8 {
+                submode: match kv.get("sub").copied().unwrap_or("normal") {
+                    s @ ("normal" | "fast" | "turbo" | "slow") => s,
+                    _ => "normal",
+                }
+                .to_string(),
+            }),
+            "msk144" => Some(ModeConfig::Msk144 { freq_hz: f("freq", 1500.0) }),
             m if omnimodem_dsp::modes::jt4::Jt4Submode::from_label(m).is_some() => {
                 Some(ModeConfig::Jt4 { submode: m.to_string() })
             }
-            "msk144" => Some(ModeConfig::Msk144 { freq_hz: f("freq", 1500.0) }),
             "olivia" => {
                 Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
             }
@@ -236,6 +245,7 @@ impl ModeConfig {
             // The tones/bw live in the Contestia label itself (contestia8_500).
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
+            ModeConfig::Js8 { submode } => format!("js8:sub={submode}"),
             // The submode lives in the JT4 label itself (jt4a…jt4g).
             ModeConfig::Jt4 { submode } => submode.clone(),
             ModeConfig::Msk144 { freq_hz } => format!("msk144:freq={freq_hz}"),
@@ -365,6 +375,7 @@ impl ModeConfig {
             ModeConfig::Jt9 => "jt9",
             ModeConfig::Wspr => "wspr",
             ModeConfig::Fst4 { .. } => "fst4",
+            ModeConfig::Js8 { .. } => "js8",
             ModeConfig::Jt4 { submode } => omnimodem_dsp::modes::jt4::Jt4Submode::from_label(submode)
                 .map(|v| v.label())
                 .unwrap_or("jt4a"),

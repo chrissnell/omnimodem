@@ -15,6 +15,7 @@ use omnimodem_dsp::modes::{
     ft8::{Ft8Demod, Ft8Mod},
     hell::{HellDemod, HellMod, HellVariant},
     ifkp::{IfkpDemod, IfkpMod, IfkpSpeed},
+    js8::{Js8Demod, Js8Mod, Js8Submode},
     jt4::{Jt4Demod, Jt4Mod, Jt4Submode},
     jt65::{Jt65Demod, Jt65Mod},
     jt9::{Jt9Demod, Jt9Mod},
@@ -43,6 +44,16 @@ pub enum DemodKind {
 }
 
 /// Wrap a block demod as a `Windowed` kind, reading its window length from caps.
+/// Map a JS8 submode label to its DSP submode (defaults to Normal).
+fn js8_submode(s: &str) -> Js8Submode {
+    match s {
+        "fast" => Js8Submode::Fast,
+        "turbo" => Js8Submode::Turbo,
+        "slow" => Js8Submode::Slow,
+        _ => Js8Submode::Normal,
+    }
+}
+
 fn windowed(bd: Box<dyn BlockDemodulator>) -> DemodKind {
     let window_s = match bd.caps().shape {
         DemodShape::Windowed { window_s, .. } => window_s,
@@ -118,6 +129,7 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Jt9 => windowed(Box::new(Jt9Demod::new())),
         ModeConfig::Wspr => windowed(Box::new(WsprDemod::new())),
         ModeConfig::Fst4 { tr_s } => windowed(Box::new(Fst4Demod::new(*tr_s as u32))),
+        ModeConfig::Js8 { submode } => windowed(Box::new(Js8Demod::new(js8_submode(submode)))),
         ModeConfig::Jt4 { submode } => {
             let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
             windowed(Box::new(Jt4Demod::new(v)))
@@ -209,6 +221,7 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Jt9 => Some(Box::new(Jt9Mod::new())),
         ModeConfig::Wspr => Some(Box::new(WsprMod::new())),
         ModeConfig::Fst4 { tr_s } => Some(Box::new(Fst4Mod::new(*tr_s as u32))),
+        ModeConfig::Js8 { submode } => Some(Box::new(Js8Mod::new(js8_submode(submode)))),
         ModeConfig::Jt4 { submode } => {
             let v = Jt4Submode::from_label(submode).expect("validated by ModeConfig::parse");
             Some(Box::new(Jt4Mod::new(v)))
@@ -296,6 +309,25 @@ mod tests {
         assert_eq!(ModeConfig::parse("fst4"), Some(ModeConfig::Fst4 { tr_s: 15 }));
         assert_eq!(ModeConfig::parse("fst4:tr=120"), Some(ModeConfig::Fst4 { tr_s: 120 }));
         assert_eq!(ModeConfig::Fst4 { tr_s: 60 }.to_mode_string(), "fst4:tr=60");
+    }
+
+    #[test]
+    fn js8_is_windowed_with_a_modulator_per_submode() {
+        for (sub, win) in [("normal", 15.0f32), ("fast", 10.0), ("turbo", 6.0), ("slow", 30.0)] {
+            let cfg = ModeConfig::Js8 { submode: sub.into() };
+            assert!(
+                matches!(demod_kind(&cfg), DemodKind::Windowed(_, w) if (w - win).abs() < 0.5),
+                "js8 {sub} not windowed @ {win}"
+            );
+            assert!(build_modulator(&cfg).is_some(), "no modulator for js8 {sub}");
+            assert_eq!(native_rate(&cfg), Some(12_000));
+            assert_eq!(tx_slot_s(&cfg), Some(win));
+        }
+        // Parse + canonical round-trip; unknown submode falls back to normal.
+        assert_eq!(ModeConfig::parse("js8"), Some(ModeConfig::Js8 { submode: "normal".into() }));
+        assert_eq!(ModeConfig::parse("js8:sub=turbo"), Some(ModeConfig::Js8 { submode: "turbo".into() }));
+        assert_eq!(ModeConfig::parse("js8:sub=bogus"), Some(ModeConfig::Js8 { submode: "normal".into() }));
+        assert_eq!(ModeConfig::Js8 { submode: "fast".into() }.to_mode_string(), "js8:sub=fast");
     }
 
     #[test]

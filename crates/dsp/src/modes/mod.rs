@@ -17,6 +17,7 @@ pub mod fsq;
 pub mod fsq_pic;
 pub mod ft4;
 pub mod fst4;
+pub mod js8;
 pub mod ifk33;
 pub mod ifkp;
 pub mod msk144;

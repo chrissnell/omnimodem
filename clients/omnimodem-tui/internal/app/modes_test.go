@@ -41,7 +41,7 @@ func TestAllDaemonModesAreExposed(t *testing.T) {
 		"contestia64_500", "contestia64_1000", "contestia64_2000",
 		"mt63_500s", "mt63_500l", "mt63_1000s", "mt63_1000l", "mt63_2000s", "mt63_2000l",
 		"navtex", "sitorb", "wefax576", "wefax288",
-		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "msk144", "wspr",
+		"rtty", "cw", "afsk1200", "olivia", "ft8", "ft4", "jt65", "jt9", "fst4", "msk144", "wspr", "js8",
 	}
 	for _, label := range want {
 		if modeByLabel(label) == nil {

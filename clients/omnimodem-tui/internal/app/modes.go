@@ -221,6 +221,11 @@ var modes = []modeInfo{
 	{"jt4g", "sequencer", 60, nil},
 	{"msk144", "sequencer", 0, nil}, // VHF meteor scatter; streaming short bursts (default 1500 Hz)
 	{"wspr", "beacon", 120, nil},
+	// W5 JS8Call JS8: 8-GFSK weak-signal keyboard mode on the FT8 core. Like FSQ
+	// it is a free-text/directed surface (chat), windowed by the daemon at the
+	// submode's T/R period. Registered as the Normal submode; the submode
+	// selector and full directed-protocol view are follow-on work.
+	{"js8", "chat", 0, nil},
 }
 
 // baseModeLabel strips the daemon's parameter suffix from a live mode string.
