@@ -459,6 +459,18 @@ mod tests {
         assert!(loopback_ok(Js8Submode::Fast, "TESTFAST0000", None), "Fast loopback failed");
     }
 
+    /// Turbo (nsps=600, 20-baud, symmetrical Costas) round-trips end to end.
+    #[test]
+    fn loopback_turbo() {
+        assert!(loopback_ok(Js8Submode::Turbo, "TURBO0000000", None), "Turbo loopback failed");
+    }
+
+    /// Slow (nsps=3840, 3.125-baud, symmetrical Costas) round-trips end to end.
+    #[test]
+    fn loopback_slow() {
+        assert!(loopback_ok(Js8Submode::Slow, "SLOW00000000", None), "Slow loopback failed");
+    }
+
     /// Loopback survives AWGN.
     #[test]
     fn loopback_under_awgn() {

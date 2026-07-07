@@ -12,6 +12,7 @@ use omnimodem_dsp::modes::{
     fsq::{FsqDemod, FsqMod, FsqSpeed},
     ft8::{Ft8Demod, Ft8Mod, FT8_RATE, FT8_WINDOW_S},
     ifkp::{IfkpDemod, IfkpMod, IfkpSpeed},
+    js8::{Js8Demod, Js8Mod, Js8Submode, JS8_RATE},
     psk31::{Psk31Demod, Psk31Mod},
     rtty::{RttyDemod, RttyMod},
 };
@@ -114,6 +115,29 @@ fn ft8_decode_rate() {
     });
     eprintln!("FT8 decode rate @ sigma=0.30: {rate}");
     assert!(rate >= 0.85, "FT8 decode rate {rate} below floor 0.85");
+}
+
+/// JS8 AWGN decode-rate sweep over the submode grid. JS8 shares FT8's windowed
+/// decode path (Costas + LDPC BP+OSD), so it clears a comparable floor; the
+/// bidirectional cross-decode vs JS8Call is the `#[ignore]` oracle gate.
+#[test]
+fn js8_decode_rate() {
+    for (submode, msg, sigma, floor) in [
+        (Js8Submode::Normal, "K1ABCFN42000", 0.30f32, 0.85f32),
+        (Js8Submode::Fast, "TESTFAST0000", 0.20, 0.80),
+    ] {
+        let rate = decode_rate(8, |seed| {
+            let wave = Js8Mod::new(submode).modulate(&Frame::text(msg)).unwrap();
+            let win_len = (JS8_RATE as f32 * submode.params().tx_seconds as f32) as usize;
+            let mut win = vec![0.0f32; win_len.max(wave.len())];
+            win[..wave.len()].copy_from_slice(&wave);
+            let mut rng = Rng::new(700 + seed as u64);
+            add_awgn(&mut win, sigma, &mut rng);
+            has_text(&Js8Demod::new(submode).decode_window(&win, 0), msg)
+        });
+        eprintln!("JS8 {:?} decode rate @ sigma={sigma}: {rate}", submode);
+        assert!(rate >= floor, "JS8 {submode:?} decode rate {rate} below floor {floor}");
+    }
 }
 
 /// Concatenate the per-character text frames a streaming keyboard demod emits.
