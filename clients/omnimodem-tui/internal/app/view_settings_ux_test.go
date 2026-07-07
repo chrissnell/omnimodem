@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // The Settings row shows a count and an edit cue, not the individual values —
@@ -18,7 +18,7 @@ func TestSettingsRowShowsCountNotValue(t *testing.T) {
 	v.modeIdx = modeIdxByLabel("psk31")
 	v.rebuildSettings()
 	out := v.Render(100, 30)
-	if !strings.Contains(out, "1 setting") || !strings.Contains(out, "enter to edit") {
+	if !strings.Contains(out, "1 setting") || !strings.Contains(out, "edit") {
 		t.Fatalf("Settings row must show a count + edit cue:\n%s", out)
 	}
 	if strings.Contains(out, "1000") {

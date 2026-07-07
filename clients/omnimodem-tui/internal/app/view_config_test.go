@@ -311,12 +311,12 @@ func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
 // device with a "(same as RX)" note, not a bare "(same as RX)" that reads as if
 // the TX choice was lost.
 func TestConfigTxShowsEffectiveDeviceWhenSameAsRx(t *testing.T) {
-	// Distinct TX device: shown outright.
-	if got := txDeviceLabel("virtual:BlackHole 16ch", "virtual:BlackHole 2ch"); !strings.Contains(got, "BlackHole 16ch") {
+	// Distinct TX device: shown outright (wide budget so nothing clips).
+	if got := txDeviceValue("virtual:BlackHole 16ch", "virtual:BlackHole 2ch", 40); !strings.Contains(got, "BlackHole 16ch") {
 		t.Fatalf("distinct TX must show its own device, got %q", got)
 	}
 	// TX mirrors RX (empty tx): show the RX device AND the note.
-	got := txDeviceLabel("", "virtual:BlackHole 2ch")
+	got := txDeviceValue("", "virtual:BlackHole 2ch", 40)
 	if !strings.Contains(got, "BlackHole 2ch") {
 		t.Fatalf("TX mirroring RX must show the RX device, got %q", got)
 	}
@@ -324,7 +324,7 @@ func TestConfigTxShowsEffectiveDeviceWhenSameAsRx(t *testing.T) {
 		t.Fatalf("TX mirroring RX must still note (same as RX), got %q", got)
 	}
 	// No RX yet: bare note is fine.
-	if got := txDeviceLabel("", ""); strings.Contains(got, "✓") {
+	if got := txDeviceValue("", "", 40); strings.Contains(got, "✓") {
 		t.Fatalf("with no RX, TX must not claim a device, got %q", got)
 	}
 }
@@ -796,5 +796,82 @@ func TestFst4TrReachesModeStringAndSlotClock(t *testing.T) {
 	ov := newOperateView(m)
 	if ov.slotSecs != 300 {
 		t.Fatalf("operate slot clock must reflect the FST4 T/R period, got %v", ov.slotSecs)
+	}
+}
+
+// The device picker filters by the focused field's capability (RX shows only
+// capture devices), navigates with the cursor, narrows with '/', and enter
+// chooses the highlighted (possibly filtered) device.
+func TestConfigDevicePickerNavFilterCapability(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{
+		devItem("usb:mic", "USB Mic", true, false),
+		devItem("bh:2", "BlackHole 2ch", true, true),
+		devItem("spk:only", "Speakers", false, true), // playback-only
+		devItem("hw:cap", "Line In", true, false),
+	})
+	v.focus = fRx
+
+	// RX picker must exclude the playback-only device.
+	for _, d := range v.pickerDevices() {
+		if d.id == "spk:only" {
+			t.Fatalf("RX picker must exclude playback-only devices")
+		}
+	}
+	if len(v.pickerDevices()) != 3 {
+		t.Fatalf("RX picker should show 3 capture devices, got %d", len(v.pickerDevices()))
+	}
+
+	// Open and navigate.
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !v.picking {
+		t.Fatal("enter must open the device picker")
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if v.pickIdx != 1 {
+		t.Fatalf("down must advance the cursor, got %d", v.pickIdx)
+	}
+
+	// Filter to "line" → only Line In remains.
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !v.filtering {
+		t.Fatal("'/' must start filtering")
+	}
+	for _, r := range "line" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if got := v.pickerDevices(); len(got) != 1 || got[0].id != "hw:cap" {
+		t.Fatalf("filter must narrow to Line In, got %+v", got)
+	}
+
+	// Enter applies the filter (leaves typing), enter again chooses.
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.filtering {
+		t.Fatal("enter must leave filter typing")
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.rxID != "hw:cap" {
+		t.Fatalf("enter must choose the highlighted filtered device, got %q", v.rxID)
+	}
+	if v.picking {
+		t.Fatal("choosing must close the picker")
+	}
+}
+
+// The redesigned form composes titled cards; each section's header is present.
+func TestConfigRendersSectionCards(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	out := v.Render(100, 30)
+	for _, title := range []string{"STATION", "MODE", "AUDIO", "RSID"} {
+		if !strings.Contains(out, title) {
+			t.Fatalf("config screen must show the %q card:\n%s", title, out)
+		}
+	}
+	if !strings.Contains(out, "╭") {
+		t.Fatalf("config screen must use rounded card borders:\n%s", out)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -14,12 +13,11 @@ import (
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
-// devEntry is a list.Item (and list.DefaultItem) for a device.
-type devEntry struct{ id, label string }
-
-func (d devEntry) Title() string       { return d.label }
-func (d devEntry) Description() string { return d.id }
-func (d devEntry) FilterValue() string { return d.label + " " + d.id }
+// devEntry is one enumerated audio device: its id, display label, and I/O caps.
+type devEntry struct {
+	id, label         string
+	capture, playback bool
+}
 
 // PTT methods offered in the picker.
 var pttMethods = []pb.PttMethod{
@@ -75,9 +73,10 @@ type configView struct {
 	familyIdx int              // index into `families`; the selected mode family
 	modeIdx   int              // index into `modes`; the specific submode within that family
 	settings  *ui.SettingsForm // the current mode's editable settings
-	rx        list.Model
-	tx        list.Model
-	ptt       list.Model
+	devs      []devEntry       // all enumerated devices (capability-flagged)
+	pickIdx   int              // highlighted row in the open device picker
+	filter    textinput.Model  // '/' substring filter over the picker
+	filtering bool             // the picker's filter input has focus
 	rxID      string
 	txID      string
 	pttID     string
@@ -131,27 +130,6 @@ func parseMs(s string) uint32 {
 	return uint32(n)
 }
 
-func newDevList(title string) list.Model {
-	// One line per device. Many devices report label == device_id (virtual
-	// loopbacks especially), so the default two-line delegate printed each name
-	// twice; the id is kept only as filter text, not a second visible row.
-	del := list.NewDefaultDelegate()
-	del.ShowDescription = false
-	del.SetSpacing(0)
-	// DOS dialog palette: white rows on the black panel, white-on-blue highlight.
-	del.Styles.NormalTitle = del.Styles.NormalTitle.Foreground(ui.ColorFg).Background(ui.ColorPanel)
-	del.Styles.DimmedTitle = del.Styles.DimmedTitle.Foreground(ui.ColorDim).Background(ui.ColorPanel)
-	del.Styles.SelectedTitle = del.Styles.SelectedTitle.
-		Foreground(ui.ColorFg).Background(ui.ColorSel).Bold(true).
-		BorderLeftForeground(ui.ColorSel)
-	l := list.New(nil, del, 0, 0)
-	l.Title = title
-	l.SetShowTitle(false) // the modal frame supplies the title
-	l.SetShowHelp(false)
-	l.SetShowStatusBar(false)
-	return l
-}
-
 func newConfigView(m *Model) *configView {
 	name := textinput.New()
 	name.Focus()
@@ -165,6 +143,9 @@ func newConfigView(m *Model) *configView {
 	grid.SetValue(m.myGrid)
 	txDelay := newMsInput("300")
 	txTail := newMsInput("50")
+	filter := textinput.New()
+	filter.Placeholder = "filter…"
+	filter.Prompt = ""
 	v := &configView{
 		m:       m,
 		name:    name,
@@ -172,9 +153,7 @@ func newConfigView(m *Model) *configView {
 		grid:    grid,
 		txDelay: txDelay,
 		txTail:  txTail,
-		rx:      newDevList("RX device (capture)"),
-		tx:      newDevList("TX device (playback)"),
-		ptt:     newDevList("PTT device"),
+		filter:  filter,
 	}
 	// Preload the channel's persisted config (surfaced in the snapshot) so
 	// reopening Configure shows what's already saved instead of blank defaults.
@@ -276,20 +255,61 @@ func (v *configView) method() pb.PttMethod {
 }
 
 func (v *configView) setDevices(devs []*pb.DeviceInfo) {
-	var capItems, playItems, allItems []list.Item
+	v.devs = v.devs[:0]
 	for _, d := range devs {
-		e := devEntry{id: d.GetDeviceId(), label: d.GetLabel()}
-		if d.GetHasCapture() {
-			capItems = append(capItems, e)
-		}
-		if d.GetHasPlayback() {
-			playItems = append(playItems, e)
-		}
-		allItems = append(allItems, e)
+		v.devs = append(v.devs, devEntry{
+			id: d.GetDeviceId(), label: d.GetLabel(),
+			capture: d.GetHasCapture(), playback: d.GetHasPlayback(),
+		})
 	}
-	v.rx.SetItems(capItems)
-	v.tx.SetItems(playItems)
-	v.ptt.SetItems(allItems)
+}
+
+// pickerDevices is the device list shown for the field being picked: filtered by
+// the field's required capability (RX→capture, TX→playback, PTT→any) and by the
+// active '/' filter text (matched against label and id).
+func (v *configView) pickerDevices() []devEntry {
+	q := strings.ToLower(strings.TrimSpace(v.filter.Value()))
+	out := make([]devEntry, 0, len(v.devs))
+	for _, d := range v.devs {
+		switch v.focus {
+		case fRx:
+			if !d.capture {
+				continue
+			}
+		case fTx:
+			if !d.playback {
+				continue
+			}
+		}
+		if q != "" && !strings.Contains(strings.ToLower(d.label+" "+d.id), q) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// pickerLabel titles the open device-picker modal for the focused field.
+func (v *configView) pickerLabel() string {
+	switch v.focus {
+	case fTx:
+		return "TX device (playback)"
+	case fPtt:
+		return "PTT device"
+	default:
+		return "RX device (capture)"
+	}
+}
+
+// clampPick keeps the picker cursor within the current (possibly filtered) row
+// set, e.g. after typing narrows the list under the cursor.
+func (v *configView) clampPick() {
+	if n := len(v.pickerDevices()); v.pickIdx >= n {
+		v.pickIdx = n - 1
+	}
+	if v.pickIdx < 0 {
+		v.pickIdx = 0
+	}
 }
 
 func (v *configView) canApply() bool { return v.rxID != "" }
@@ -496,28 +516,53 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, cmd
 		}
 		// A device-picker modal is open: it captures all keys. Enter records the
-		// highlighted device and closes the modal; esc cancels and closes. While
-		// the list's own filter is active, hand keys straight to it (so esc clears
-		// the filter and enter applies it, rather than closing the modal).
+		// highlighted device and closes; esc cancels; '/' opens a substring filter.
 		if v.picking {
-			lst, _ := v.activeList()
-			if lst.FilterState() == list.Filtering {
+			// While the filter input has focus, keys type into it. Esc clears and
+			// blurs it; enter applies it and returns to row navigation.
+			if v.filtering {
+				switch msg.String() {
+				case "esc":
+					v.filtering = false
+					v.filter.SetValue("")
+					v.filter.Blur()
+					v.clampPick()
+					return v, nil
+				case "enter":
+					v.filtering = false
+					v.filter.Blur()
+					v.clampPick()
+					return v, nil
+				}
 				var cmd tea.Cmd
-				*lst, cmd = lst.Update(msg)
+				v.filter, cmd = v.filter.Update(msg)
+				v.clampPick()
 				return v, cmd
 			}
 			switch msg.String() {
 			case "esc":
-				v.picking = false
+				v.closePicker()
+				return v, nil
+			case "/":
+				v.filtering = true
+				v.filter.Focus()
+				return v, nil
+			case "up", "k":
+				if v.pickIdx > 0 {
+					v.pickIdx--
+				}
+				return v, nil
+			case "down", "j":
+				if v.pickIdx < len(v.pickerDevices())-1 {
+					v.pickIdx++
+				}
 				return v, nil
 			case "enter", " ":
 				v.choose()
-				v.picking = false
+				v.closePicker()
 				return v, v.maybePersist() // auto-apply the device choice
 			}
-			var cmd tea.Cmd
-			*lst, cmd = lst.Update(msg)
-			return v, cmd
+			return v, nil
 		}
 		// Form navigation (no modal open).
 		switch msg.String() {
@@ -609,16 +654,40 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 	return v, nil
 }
 
-// activeList is the device list for the field being picked (the focused device
-// field). Returns a pointer so the modal can drive it in place.
-func (v *configView) activeList() (*list.Model, string) {
+// openPicker opens the device picker over the focused device field, resetting
+// the filter and homing the cursor on the currently-chosen device (if any).
+func (v *configView) openPicker() {
+	v.picking = true
+	v.filtering = false
+	v.filter.SetValue("")
+	v.filter.Blur()
+	cur := v.currentDeviceID()
+	v.pickIdx = 0
+	for i, d := range v.pickerDevices() {
+		if d.id == cur {
+			v.pickIdx = i
+			break
+		}
+	}
+}
+
+// closePicker dismisses the device picker and clears its transient filter state.
+func (v *configView) closePicker() {
+	v.picking = false
+	v.filtering = false
+	v.filter.SetValue("")
+	v.filter.Blur()
+}
+
+// currentDeviceID is the id already chosen for the focused device field.
+func (v *configView) currentDeviceID() string {
 	switch v.focus {
 	case fTx:
-		return &v.tx, "TX device (playback)"
+		return v.txID
 	case fPtt:
-		return &v.ptt, "PTT device"
+		return v.pttID
 	default:
-		return &v.rx, "RX device (capture)"
+		return v.rxID
 	}
 }
 
@@ -672,7 +741,7 @@ func (v *configView) cycle(d int) {
 func (v *configView) commit() (View, tea.Cmd) {
 	switch v.focus {
 	case fRx, fTx, fPtt:
-		v.picking = true
+		v.openPicker()
 	case fSettings:
 		// Open the mode-settings editor, unless the mode has nothing to tune.
 		if v.settings != nil && v.settings.HasFields() {
@@ -690,108 +759,235 @@ func (v *configView) commit() (View, tea.Cmd) {
 
 // choose records the highlighted device in the open picker into the chosen id.
 func (v *configView) choose() {
+	rows := v.pickerDevices()
+	if v.pickIdx < 0 || v.pickIdx >= len(rows) {
+		return
+	}
+	id := rows[v.pickIdx].id
 	switch v.focus {
 	case fRx:
-		if it, ok := v.rx.SelectedItem().(devEntry); ok {
-			v.rxID = it.id
-		}
+		v.rxID = id
 	case fTx:
-		if it, ok := v.tx.SelectedItem().(devEntry); ok {
-			v.txID = it.id
-		}
+		v.txID = id
 	case fPtt:
-		if it, ok := v.ptt.SelectedItem().(devEntry); ok {
-			v.pttID = it.id
-		}
+		v.pttID = id
 	}
 }
 
 func (v *configView) Render(w, h int) string {
-	chosen := func(id string) string {
-		if id == "" {
-			return ui.Dim.Render("(none)")
-		}
-		return ui.Accent.Render("✓ " + id)
+	// Two-column card layout: the left stack carries the station identity and the
+	// mode selection; the right stack carries the audio path and RSID. Each card's
+	// border lights up in the accent colour while it owns the focused field.
+	gap := 2
+	leftW := (w - gap) * 9 / 20 // ~45% to the left, the rest to the (device-heavy) right
+	leftW = clampInt(leftW, 32, 48)
+	rightW := w - gap - leftW
+	if rightW < 34 {
+		rightW = 34
 	}
-	field := func(f cfgFocus, label, val string) string {
-		row := fmt.Sprintf("%-10s %s", label, val)
-		if v.focus == f {
-			return ui.Accent.Render("▸ " + row)
-		}
-		return "  " + row
-	}
-	cyc := "  " + ui.Dim.Render("(←/→)")
 
-	var b strings.Builder
-	b.WriteString(ui.Title.Render("STATION") + "\n")
-	b.WriteString(field(fName, "Name", v.name.View()) + "\n")
-	b.WriteString(field(fCall, "Call", v.call.View()) + "\n")
-	b.WriteString(field(fGrid, "Grid", v.grid.View()) + "\n\n")
+	station := ui.Card("STATION", v.stationBody(leftW), v.focusBetween(fName, fGrid), leftW)
+	mode := ui.Card("MODE", v.modeBody(leftW), v.focusBetween(fFamily, fSettings), leftW)
+	audio := ui.Card("AUDIO", v.audioBody(rightW), v.focusBetween(fRx, fTxTail), rightW)
+	rsid := ui.Card("RSID", v.rsidBody(rightW), v.focusBetween(fRsidTx, fRsidRx), rightW)
 
-	b.WriteString(ui.Title.Render("MODE") + "\n")
-	b.WriteString(field(fFamily, "Family", "‹ "+v.familyName()+" ›"+cyc) + "\n")
-	b.WriteString(field(fMode, "Mode", v.modeSelector()) + "\n")
-	b.WriteString(field(fSettings, "Settings", v.settingsSummary()) + "\n\n")
+	left := lipgloss.JoinVertical(lipgloss.Left, station, mode)
+	right := lipgloss.JoinVertical(lipgloss.Left, audio, rsid)
+	cols := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
 
-	b.WriteString(ui.Title.Render("AUDIO") + "\n")
-	b.WriteString(field(fRx, "RX Device", chosen(v.rxID)) + "\n")
-	b.WriteString(field(fTx, "TX Device", txDeviceLabel(v.txID, v.rxID)) + "\n")
-	b.WriteString(field(fPtt, "PTT Device", chosen(v.pttID)) + "\n")
-	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n")
-	b.WriteString(field(fTxDelay, "TX Delay", v.txDelay.View()+ui.Dim.Render(" ms")) + "\n")
-	b.WriteString(field(fTxTail, "TX Tail", v.txTail.View()+ui.Dim.Render(" ms")) + "\n\n")
-
-	onOff := func(b bool) string {
-		if b {
-			return ui.Accent.Render("on")
-		}
-		return ui.Dim.Render("off")
-	}
-	b.WriteString(ui.Title.Render("RSID") + "\n")
-	b.WriteString(field(fRsidTx, "TX ident", onOff(v.rsidTx)+"  "+ui.Dim.Render("(space)")) + "\n")
-	b.WriteString(field(fRsidRx, "RX detect", onOff(v.rsidRx)+"  "+ui.Dim.Render("(space)")) + "\n\n")
-
-	b.WriteString(v.saveHint() + "\n")
+	body := cols + "\n" + v.saveHint()
 
 	// The mode-settings editor is a modal over the form: it surfaces every knob
 	// the selected mode exposes, drawn by the reusable ui.SettingsForm.
 	if v.editing {
-		modalW := w
-		if modalW > 72 {
-			modalW = 72
-		}
+		modalW := clampInt(w, 32, 72)
 		// Title is just "<mode> settings"; the hotkeys live on their own dim line
 		// along the bottom of the dialog so the header stays clean and unwrapped.
-		body := v.settings.View(modalW-4) + "\n\n" +
+		inner := v.settings.View(modalW-4) + "\n\n" +
 			ui.Dim.Render("↑/↓ field · ←/→ change · space toggle · esc done")
-		box := ui.Modal(v.modeLabel()+" settings", body, modalW)
-		b.WriteString("\n" + centerModal(box, w))
-		return b.String()
+		box := ui.Modal(v.modeLabel()+" settings", inner, modalW)
+		return body + "\n" + centerModal(box, w)
 	}
 	// The device picker is a modal: it appears only while a device field is being
 	// chosen, and disappears once a device is selected (or the pick is cancelled).
-	if !v.picking {
-		b.WriteString("\n" + ui.Dim.Render("‹↑/↓› field · ‹←/→› cycle · ‹enter› pick device · ‹esc› done"))
-		return b.String()
+	if v.picking {
+		return body + "\n" + centerModal(v.pickerModal(w, h), w)
 	}
-	lst, label := v.activeList()
-	modalW := w
-	if modalW > 64 {
-		modalW = 64
+	return body
+}
+
+// pickerModal renders the device picker as a focused Card: a borderless table of
+// the candidate devices with the cursor row highlighted, an optional filter line,
+// and a hint footer. Using a Card (not a second bordered box around the table)
+// keeps the dialog to a single rounded frame, consistent with the form's cards.
+func (v *configView) pickerModal(w, h int) string {
+	rows := v.pickerDevices()
+	// Column budget: the label takes the largest share, the id the rest, a slim
+	// I/O flag column — sized to a modal a bit narrower than the screen.
+	ioW := 5
+	avail := clampInt(w-14, 24, 56) // combined name+id content budget
+	nameW := clampInt(avail*3/5, 12, 40)
+	idW := clampInt(avail-nameW, 10, 30)
+	cols := []ui.Column{{Title: "DEVICE", Width: nameW}, {Title: "ID", Width: idW}, {Title: "I/O", Width: ioW}}
+
+	var body string
+	if len(rows) == 0 {
+		body = ui.Dim.Render("(no matching devices)")
+	} else {
+		// Window the rows around the cursor so a long device list can't grow the
+		// dialog past the screen; a dim counter shows there's more off-window.
+		maxRows := clampInt(h-16, 4, 12)
+		start, end := pickWindow(v.pickIdx, len(rows), maxRows)
+		data := make([][]string, 0, end-start)
+		for _, d := range rows[start:end] {
+			data = append(data, []string{d.label, d.id, ioFlags(d)})
+		}
+		body = ui.TableInset(cols, data, v.pickIdx-start)
+		if start > 0 || end < len(rows) {
+			body += "\n" + ui.Dim.Render(fmt.Sprintf("  %d–%d of %d", start+1, end, len(rows)))
+		}
 	}
-	// Hug the device count so the box doesn't sprawl with empty rows, but cap to
-	// the space available below the form.
-	listH := len(lst.Items())
-	if listH < 3 {
-		listH = 3
+	if v.filtering || v.filter.Value() != "" {
+		body += "\n" + ui.Accent.Render("/") + " " + v.filter.View()
 	}
-	if max := h - 9; max >= 3 && listH > max {
-		listH = max
+	body += "\n" + ui.Dim.Render("↑/↓ move · enter choose · / filter · esc cancel")
+	// A borderless inset table is TableWidth-2 wide; a Card adds border+padding (4),
+	// so Card(width=TableWidth+2) makes the inner area hug the table exactly.
+	return ui.Card(v.pickerLabel(), body, true, ui.TableWidth(cols)+2)
+}
+
+// pickWindow returns the [start,end) slice of n rows to show for a viewport of
+// max rows, scrolled to keep the cursor idx visible (roughly centered).
+func pickWindow(idx, n, max int) (int, int) {
+	if n <= max {
+		return 0, n
 	}
-	lst.SetSize(modalW-4, listH)
-	box := ui.Modal(label+"  ‹enter› choose · ‹esc› cancel · ‹/› filter", lst.View(), modalW)
-	b.WriteString("\n" + centerModal(box, w))
-	return b.String()
+	start := idx - max/2
+	if start < 0 {
+		start = 0
+	}
+	if start > n-max {
+		start = n - max
+	}
+	return start, start + max
+}
+
+// ioFlags is the compact capability badge shown in the device table.
+func ioFlags(d devEntry) string {
+	switch {
+	case d.capture && d.playback:
+		return "RX·TX"
+	case d.capture:
+		return "RX"
+	case d.playback:
+		return "TX"
+	default:
+		return "—"
+	}
+}
+
+// focusBetween reports whether the focused field lies in [lo, hi] — i.e. the card
+// spanning those fields currently holds focus and should render highlighted.
+func (v *configView) focusBetween(lo, hi cfgFocus) bool {
+	return v.focus >= lo && v.focus <= hi && !v.picking && !v.editing
+}
+
+// fieldRow renders one labeled row inside a card: a focus cursor, the padded
+// label, then the value (built to fit the card by the body helpers).
+func (v *configView) fieldRow(f cfgFocus, label, val string) string {
+	cursor := "  "
+	if v.focus == f && !v.picking && !v.editing {
+		cursor = ui.Accent.Render("▸ ")
+	}
+	return cursor + fmt.Sprintf("%-10s ", label) + val
+}
+
+// valueWidth is the space left for a row's value inside a card of width cardW,
+// after the focus cursor (2) and the padded label ("%-10s " = 11).
+func valueWidth(cardW int) int {
+	return ui.CardInnerWidth(cardW) - 13
+}
+
+func (v *configView) stationBody(cardW int) string {
+	vw := valueWidth(cardW)
+	v.name.Width, v.call.Width, v.grid.Width = vw, vw, vw
+	return strings.Join([]string{
+		v.fieldRow(fName, "Name", v.name.View()),
+		v.fieldRow(fCall, "Call", v.call.View()),
+		v.fieldRow(fGrid, "Grid", v.grid.View()),
+	}, "\n")
+}
+
+func (v *configView) modeBody(cardW int) string {
+	vw := valueWidth(cardW)
+	family := ui.Accent.Render("‹ " + clip(v.familyName(), vw-4) + " ›")
+	return strings.Join([]string{
+		v.fieldRow(fFamily, "Family", family),
+		v.fieldRow(fMode, "Mode", v.modeSelector()),
+		v.fieldRow(fSettings, "Settings", v.settingsSummary()),
+	}, "\n")
+}
+
+func (v *configView) audioBody(cardW int) string {
+	vw := valueWidth(cardW)
+	v.txDelay.Width, v.txTail.Width = 6, 6
+	method := ui.Accent.Render("‹ " + methodLabel(v.method()) + " ›")
+	return strings.Join([]string{
+		v.fieldRow(fRx, "RX Device", deviceValue(v.rxID, vw)),
+		v.fieldRow(fTx, "TX Device", txDeviceValue(v.txID, v.rxID, vw)),
+		v.fieldRow(fPtt, "PTT Device", deviceValue(v.pttID, vw)),
+		v.fieldRow(fMethod, "PTT Method", method),
+		v.fieldRow(fTxDelay, "TX Delay", v.txDelay.View()+ui.Dim.Render(" ms")),
+		v.fieldRow(fTxTail, "TX Tail", v.txTail.View()+ui.Dim.Render(" ms")),
+	}, "\n")
+}
+
+func (v *configView) rsidBody(cardW int) string {
+	onOff := func(on bool) string {
+		if on {
+			return ui.Accent.Render("● on")
+		}
+		return ui.Dim.Render("○ off")
+	}
+	return strings.Join([]string{
+		v.fieldRow(fRsidTx, "TX ident", onOff(v.rsidTx)),
+		v.fieldRow(fRsidRx, "RX detect", onOff(v.rsidRx)),
+	}, "\n")
+}
+
+// deviceValue renders a chosen device id (or "(none)"), clipped to fit width w.
+func deviceValue(id string, w int) string {
+	if id == "" {
+		return ui.Dim.Render("(none)")
+	}
+	return ui.Accent.Render("✓ " + clip(id, w-2))
+}
+
+// clip shortens a plain-text string to w display columns, marking a cut with an
+// ellipsis. The caller must pass unstyled text (the value builders style after).
+func clip(s string, w int) string {
+	if w < 1 {
+		w = 1
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
+}
+
+// clampInt bounds v to [lo, hi].
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // centerModal horizontally centers a modal box within width w, painting the
@@ -804,17 +1000,18 @@ func centerModal(box string, w int) string {
 		lipgloss.WithWhitespaceBackground(ui.ColorPanel))
 }
 
-// txDeviceLabel renders the TX device field. An empty txID means "TX follows the
-// RX device" (single-rig default, and how the daemon reports TX when it mirrors
-// RX). Show the effective device — the RX id — with a "(same as RX)" note rather
-// than a bare "(same as RX)", which reads as "my TX choice wasn't saved" when the
-// operator deliberately picked the same device (e.g. one BlackHole for both).
-func txDeviceLabel(txID, rxID string) string {
+// txDeviceValue renders the TX device field, clipped to width w. An empty txID
+// means "TX follows the RX device" (single-rig default, and how the daemon
+// reports TX when it mirrors RX). Show the effective device — the RX id — with a
+// "(same as RX)" note rather than a bare "(same as RX)", which reads as "my TX
+// choice wasn't saved" when the operator deliberately picked the same device
+// (e.g. one BlackHole for both).
+func txDeviceValue(txID, rxID string, w int) string {
 	if txID != "" {
-		return ui.Accent.Render("✓ " + txID)
+		return ui.Accent.Render("✓ " + clip(txID, w-2))
 	}
 	if rxID != "" {
-		return ui.Accent.Render("✓ "+rxID) + ui.Dim.Render("  (same as RX)")
+		return ui.Accent.Render("✓ "+clip(rxID, w-16)) + ui.Dim.Render("  (same as RX)")
 	}
 	return ui.Dim.Render("(same as RX)")
 }
@@ -831,7 +1028,7 @@ func (v *configView) modeSelector() string {
 	}
 	pos := familyModePos(fam, v.modeIdx) + 1
 	return ui.Accent.Render("‹ "+label+" ›") +
-		ui.Dim.Render(fmt.Sprintf("  %d/%d (←/→)", pos, len(fam.modes)))
+		ui.Dim.Render(fmt.Sprintf("  %d/%d", pos, len(fam.modes)))
 }
 
 // settingsSummary renders the Settings row's value. It deliberately shows only a
@@ -847,7 +1044,7 @@ func (v *configView) settingsSummary() string {
 	if n == 1 {
 		noun = "setting"
 	}
-	return ui.Dim.Render(fmt.Sprintf("%d %s", n, noun)) + "  " + ui.Accent.Render("‹enter to edit›")
+	return ui.Dim.Render(fmt.Sprintf("%d %s", n, noun)) + "  " + ui.Accent.Render("✎ edit")
 }
 
 func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }
@@ -865,10 +1062,16 @@ func (v *configView) Hints() []ui.Hint {
 			{Key: "/", Action: "filter"}, {Key: "esc", Action: "cancel"},
 		}
 	}
-	return []ui.Hint{
-		{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "cycle"}, {Key: "enter", Action: "pick"},
-		{Key: "esc", Action: "done"},
+	// The enter action depends on the focused field: device fields open the
+	// picker, the Settings row opens the editor, everything else has no enter.
+	hints := []ui.Hint{{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "cycle"}}
+	switch v.focus {
+	case fRx, fTx, fPtt:
+		hints = append(hints, ui.Hint{Key: "enter", Action: "pick device"})
+	case fSettings:
+		hints = append(hints, ui.Hint{Key: "enter", Action: "edit"})
 	}
+	return append(hints, ui.Hint{Key: "esc", Action: "done"})
 }
 
 // saveHint replaces the old Apply button: fields auto-apply on change, so this
