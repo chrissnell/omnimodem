@@ -4,15 +4,17 @@
 //! SSTV is a self-contained analog modem: a VIS header identifies the submode, then
 //! each picture line is an FM-subcarrier scan where pixel luminance maps linearly to
 //! frequency (black 1500 Hz → white 2300 Hz, `ColorToFreq`, ref: ComLib.cpp:3491) with
-//! 1200 Hz sync and 1500 Hz porch/separator pulses. RX output is a raster
-//! (`FramePayload::Image`), never text.
+//! 1200 Hz sync and 1500 Hz porch/separator pulses. RX output is a colour raster
+//! (`FramePayload::Image` with `channels == 3`), never text.
 //!
-//! This module is the *foundation layer* (plan `docs/plans/2026-07-06-omnimodem-sstv.md`,
-//! task groups F1.2 + per-family T2): submode identity, picture geometry, colour model,
-//! and the VIS codec. The modulator (T4), demodulator (T5), sync (F1.3) and colour
-//! reconstruction (F1.4) build on these and are gated against the golden vectors under
-//! `crates/dsp/tests/vectors/sstv_*` produced by the isolated MMSSTV harness
-//! (`scratch/refvectors/build_sstv_{tx,rx}.sh`, which links the *unmodified* reference).
+//! All 43 `SSTVModeList` submodes are ported (plan `docs/plans/2026-07-06-omnimodem-sstv.md`):
+//! submode identity + geometry + colour model + VIS codec, the [`modulator`] (RGB image →
+//! symbol stream) and [`demod`] (FM discriminate → sync/anchor → channel sample → RGB) with
+//! the audio renderer + discriminator in [`audio`], and the `rgb` mode traits. The Scottie
+//! TX symbol stream is gated **bit-exact** against the golden vector under
+//! `crates/dsp/tests/vectors/sstv_*`, produced by the isolated MMSSTV harness
+//! (`scratch/refvectors/build_sstv_{tx,rx}.sh`, which links the *unmodified* reference);
+//! every family additionally closes on an end-to-end audio-loopback test.
 //!
 //! Native sample rate is 11025 Hz (ref: Main.cpp:212); all reference timing is `ms`.
 //!
@@ -630,11 +632,14 @@ pub mod modulator {
         let (ts, tw) = mono_params(mode)?;
         let mut out = header(mode);
         let mut i = 0;
-        while i + 1 < rows.len() {
+        while i < rows.len() {
+            // Each on-air line averages two source rows; a trailing odd row pairs with itself
+            // rather than being dropped (SSTV heights are even, but stay robust to any input).
+            let partner = if i + 1 < rows.len() { i + 1 } else { i };
             let mut y_avg = vec![0u8; rows[i].len()];
             for (x, ya) in y_avg.iter_mut().enumerate() {
                 let y0 = get_ry(rows[i][x]).0 as u16;
-                let y1 = get_ry(rows[i + 1][x]).0 as u16;
+                let y1 = get_ry(rows[partner][x]).0 as u16;
                 *ya = ((y0 + y1) / 2) as u8;
             }
             mono_line(&mut out, &y_avg, ts, tw);
@@ -690,8 +695,10 @@ pub mod modulator {
         let (sync, porch, tw) = pd_params(mode)?;
         let mut out = header(mode);
         let mut i = 0;
-        while i + 1 < rows.len() {
-            pd_line(&mut out, &rows[i], &rows[i + 1], sync, porch, tw);
+        while i < rows.len() {
+            // A scan carries an odd + even row; a trailing odd row pairs with itself.
+            let even = if i + 1 < rows.len() { &rows[i + 1] } else { &rows[i] };
+            pd_line(&mut out, &rows[i], even, sync, porch, tw);
             i += 2;
         }
         Some(out)
@@ -800,8 +807,9 @@ pub mod modulator {
         let mut out = header(mode);
         if is_mn {
             let mut i = 0;
-            while i + 1 < rows.len() {
-                mn_line(&mut out, &rows[i], &rows[i + 1], sync, porch, tw);
+            while i < rows.len() {
+                let even = if i + 1 < rows.len() { &rows[i + 1] } else { &rows[i] };
+                mn_line(&mut out, &rows[i], even, sync, porch, tw);
                 i += 2;
             }
         } else {
@@ -1764,6 +1772,145 @@ mod tests {
                     mode.label()
                 );
             }
+        }
+    }
+
+    // A row of uniform grey at `level` (R=G=B). Grey keeps chroma neutral, so it decodes the
+    // same through the RGB-sequential, colour-difference, and mono paths — letting one test
+    // exercise vertical row ordering across every family.
+    fn gray_row(width: usize, level: u8) -> Vec<Rgb> {
+        vec![Rgb { r: level, g: level, b: level }; width]
+    }
+
+    // Mean of a decoded row's centre pixels (R channel; grey ⇒ R=G=B).
+    fn decoded_row_luma(out: &[u8], width: usize, row: usize) -> f64 {
+        let mut s = 0u32;
+        let n = 8;
+        for k in 0..n {
+            let x = width / 2 - n / 2 + k;
+            s += out[(row * width + x) * 3] as u32;
+        }
+        s as f64 / n as f64
+    }
+
+    /// Vertical-ordering gate: feed a dark→bright grey gradient and confirm the decoded rows
+    /// come out in the same order (non-decreasing luma). Colour bars are row-constant, so they
+    /// can't catch a row swap/reversal in the two-rows-per-scan (PD/MP/MN), row-doubling
+    /// (Robot 24 / B/W), or alternating-chroma (Robot 36) reconstruction — this can.
+    fn assert_row_ordering(mode: SstvMode, n_src: usize) {
+        let width = mode.geometry().width as usize;
+        // A steep step so even row-doubled modes (Robot 24 / B/W), which repeat each source
+        // row's luma across the checked window, still show a clear spread.
+        let rows: Vec<Vec<Rgb>> =
+            (0..n_src).map(|r| gray_row(width, (12 + r * 30).min(240) as u8)).collect();
+        let syms = line_symbols(mode, &rows).unwrap();
+        let pcm = render(&syms, 16000.0);
+        let (w, out) = super::demod::decode_frame(&pcm, mode).unwrap();
+        assert_eq!(w as usize, width);
+
+        // Check the first `check` decoded rows are monotonically non-decreasing. `check` stays
+        // within the real (captured) region for every family's source→display mapping.
+        let check = n_src / 2;
+        let mut prev = -1.0f64;
+        for row in 0..check {
+            let luma = decoded_row_luma(&out, width, row);
+            assert!(
+                luma >= prev - 20.0,
+                "{}: row {row} luma {luma:.0} < prev {prev:.0} — rows out of order",
+                mode.label()
+            );
+            prev = luma;
+        }
+        // And the gradient is actually resolved: last checked row is clearly brighter than the first.
+        let first = decoded_row_luma(&out, width, 0);
+        let last = decoded_row_luma(&out, width, check - 1);
+        assert!(last > first + 40.0, "{}: gradient not resolved ({first:.0}→{last:.0})", mode.label());
+    }
+
+    #[test]
+    fn row_ordering_holds_across_families() {
+        // One representative per structural class: 1-row/scan RGB, Robot Y/C, row-doubled,
+        // alternating-chroma, two-rows-per-scan, narrow, and the sync-less AVT.
+        for &m in &[
+            SstvMode::Scottie1,
+            SstvMode::Robot72,
+            SstvMode::Robot24, // row-doubled
+            SstvMode::Robot36, // alternating chroma
+            SstvMode::Pd90,    // two rows per scan
+            SstvMode::Mr73,
+            SstvMode::Bw12, // mono, averaged pairs
+            SstvMode::Mn73, // narrow PD
+            SstvMode::Mc110,
+            SstvMode::Avt90,
+        ] {
+            assert_row_ordering(m, 12);
+        }
+    }
+
+    #[test]
+    fn odd_row_input_is_not_dropped() {
+        // Pairing modes (PD/MP/MN, B/W) consume rows two at a time; a trailing odd row must
+        // pair with itself, not vanish. The emitted scan count is ceil(n/2), not floor.
+        let width = SstvMode::Pd90.geometry().width as usize;
+        let vis = super::vis::header(SstvMode::Pd90).len();
+        let per_scan = 2 + 4 * width; // sync + porch + Y(odd)/R-Y/B-Y/Y(even)
+        for n in [4usize, 5] {
+            let rows = vec![colorbar_row(width); n];
+            let syms = line_symbols(SstvMode::Pd90, &rows).unwrap();
+            let scans = (syms.len() - vis) / per_scan;
+            assert_eq!(scans, n.div_ceil(2), "Pd90 with {n} rows should emit {} scans", n.div_ceil(2));
+        }
+    }
+
+    #[test]
+    fn nonsaturated_color_roundtrips() {
+        // The colour-bar tests only use saturated primaries; check a muted colour survives the
+        // full render→decode with real (non-binary) accuracy through both the RGB-sequential
+        // and colour-difference (GetRY/YCtoRGB) paths.
+        let target = Rgb { r: 96, g: 150, b: 205 };
+        for &m in &[SstvMode::Scottie1, SstvMode::Robot72, SstvMode::Pd90] {
+            let width = m.geometry().width as usize;
+            let rows = vec![vec![target; width]; 8];
+            let syms = line_symbols(m, &rows).unwrap();
+            let pcm = render(&syms, 16000.0);
+            let (_, out) = super::demod::decode_frame(&pcm, m).unwrap();
+            // Sample a mid-line, mid-column pixel (rows 2+ so PD/R36 chroma is settled).
+            let x = width / 2;
+            let i = (3 * width + x) * 3;
+            let (gr, gg, gb) = (out[i] as i32, out[i + 1] as i32, out[i + 2] as i32);
+            let close = |g: i32, e: i32| (g - e).abs() <= 20;
+            assert!(
+                close(gr, 96) && close(gg, 150) && close(gb, 205),
+                "{}: muted colour got ({gr},{gg},{gb}) want ~(96,150,205)",
+                m.label()
+            );
+        }
+    }
+
+    #[test]
+    fn every_submode_decodes_a_plausible_raster() {
+        // Stronger than the wired()-table check: render a few colour-bar rows through EVERY one
+        // of the 43 modes and confirm the demod produces a correctly-sized raster that is not
+        // uniformly blank — i.e. the full modulator→demodulator pipeline runs end-to-end.
+        for &m in SstvMode::all() {
+            let g = m.geometry();
+            let width = g.width as usize;
+            let rows = vec![colorbar_row(width); 8];
+            let syms = line_symbols(m, &rows).unwrap_or_else(|| panic!("{}: no line_symbols", m.label()));
+            let pcm = render(&syms, 16000.0);
+            let (w, out) = super::demod::decode_frame(&pcm, m)
+                .unwrap_or_else(|| panic!("{}: decode_frame returned None", m.label()));
+            assert_eq!(w, g.width, "{}: width", m.label());
+            assert_eq!(out.len(), width * g.rows as usize * 3, "{}: raster size", m.label());
+            // The captured rows must carry real picture (colour bars span black..white), not a
+            // flat/blank field — so the reconstructed spread proves it decoded content.
+            let (mut lo, mut hi) = (255u8, 0u8);
+            for x in 0..width {
+                let v = out[x * 3]; // first decoded row, R channel
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            assert!(hi as i32 - lo as i32 > 100, "{}: first row is flat ({lo}..{hi})", m.label());
         }
     }
 
