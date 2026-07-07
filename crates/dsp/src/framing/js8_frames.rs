@@ -216,9 +216,115 @@ pub fn unpack_directed_frame(payload: &FramePayload72) -> Option<DirectedFrame> 
     })
 }
 
+// ---------------------------------------------------------------------------
+// TX text parsing: "TO CMD [NUM]" → a directed frame
+// ---------------------------------------------------------------------------
+//
+// The reference parses operator text with `directed_re`; here the structured
+// `TO CMD [NUM]` grammar is hand-parsed (no regex dependency). This covers the
+// well-formed forms operators type (`W1AW SNR -5`, `W1AW QSL?`, `@ALLCALL
+// HEARING?`); exact regex-edge parity is a cross-decode concern. ref:
+// varicode.cpp:137-147 (`directed_re`), packNum.
+
+/// Encode a signed number into the 6-bit `inum` field: `clamp(n,-30,31)+31`
+/// (so `0` is a present-but-zero value, distinct from "no number" = 0-length).
+/// ref: varicode.cpp packNum.
+pub fn pack_num(n: i32) -> u8 {
+    (n.clamp(-30, 31) + 31) as u8
+}
+
+/// A parsed directed message: the `to` callsign, the command code, and the
+/// `inum` field (0 = no number).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDirected {
+    pub to: String,
+    pub cmd: u8,
+    pub inum: u8,
+}
+
+/// Command names (trimmed) with their codes, longest-first so multi-word and
+/// `?`-suffixed commands match before their prefixes.
+fn commands_by_len() -> Vec<(&'static str, u8)> {
+    let mut v: Vec<(&'static str, u8)> = DIRECTED_CMDS
+        .iter()
+        .filter(|(_, c)| *c >= 0)
+        .map(|(n, c)| (n.trim(), *c as u8))
+        .filter(|(n, _)| !n.is_empty())
+        .collect();
+    v.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    v
+}
+
+/// Parse `text` as a directed message `TO CMD [NUM]`. Returns `None` if it
+/// doesn't start with a callsign followed by a recognised command.
+pub fn parse_directed(text: &str) -> Option<ParsedDirected> {
+    let text = text.trim_start();
+    // callsign: [@]?[A-Z0-9/]+
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    if bytes.first() == Some(&b'@') {
+        i = 1;
+    }
+    let start = if i == 1 { 1 } else { 0 };
+    while i < bytes.len() && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit() || bytes[i] == b'/') {
+        i += 1;
+    }
+    if i == start {
+        return None; // no callsign body
+    }
+    let to = text[..i].to_string();
+    let rest = &text[i..];
+
+    // Optional single leading space before the command.
+    let r = rest.strip_prefix(' ').unwrap_or(rest);
+
+    for (name, code) in commands_by_len() {
+        if let Some(after) = r.strip_prefix(name) {
+            // A word-command must be followed by space/end; punctuation-suffixed
+            // commands (`?`, `:`, `>`) match directly.
+            let last = name.bytes().last().unwrap();
+            let word_boundary_ok = !last.is_ascii_alphanumeric()
+                || after.is_empty()
+                || after.starts_with(' ');
+            if !word_boundary_ok {
+                continue;
+            }
+            // Optional number (used by SNR): trailing signed integer.
+            let num_str = after.trim();
+            let inum = if is_snr_command(code) && !num_str.is_empty() {
+                match num_str.parse::<i32>() {
+                    Ok(n) => pack_num(n),
+                    Err(_) => 0,
+                }
+            } else {
+                0
+            };
+            return Some(ParsedDirected { to, cmd: code, inum });
+        }
+    }
+    None
+}
+
+/// Build a directed frame + `i3bit` from operator text and the station's own
+/// call, or `None` if the text isn't a directed message. `first`/`last` mark the
+/// transmission boundaries (both true for a single window).
+pub fn build_directed(mycall: &str, text: &str, first: bool, last: bool) -> Option<(FramePayload72, u8)> {
+    let p = parse_directed(text)?;
+    let payload = pack_directed_frame(mycall, &p.to, p.cmd, p.inum)?;
+    let mut i3 = 0u8;
+    if first {
+        i3 |= super::js8_message::JS8_FIRST;
+    }
+    if last {
+        i3 |= super::js8_message::JS8_LAST;
+    }
+    Some((payload, i3))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::js8_message::{decode_frame, pack_frame, Js8Frame};
 
     /// Compound frames round-trip: callsign, type, num, and bits3 all survive.
     #[test]
@@ -307,5 +413,50 @@ mod tests {
     fn directed_rejects_compound() {
         let payload = pack_compound_frame("K1ABC", FRAME_COMPOUND, 0, 0).unwrap();
         assert!(unpack_directed_frame(&payload).is_none());
+    }
+
+    /// `parse_directed` recognises the common TO CMD [NUM] forms.
+    #[test]
+    fn parse_directed_forms() {
+        let snr = directed_cmd_code(" SNR").unwrap();
+        let cases = [
+            ("W1AW SNR -5", "W1AW", snr, pack_num(-5)),
+            ("W1AW SNR?", "W1AW", directed_cmd_code(" SNR?").unwrap(), 0),
+            ("W1AW QSL?", "W1AW", directed_cmd_code(" QSL?").unwrap(), 0),
+            ("W1AW 73", "W1AW", directed_cmd_code(" 73").unwrap(), 0),
+            ("W1AW ACK", "W1AW", directed_cmd_code(" ACK").unwrap(), 0),
+            ("@ALLCALL HEARING?", "@ALLCALL", directed_cmd_code(" HEARING?").unwrap(), 0),
+            ("W1AW HW CPY?", "W1AW", directed_cmd_code(" HW CPY?").unwrap(), 0),
+        ];
+        for (text, to, cmd, inum) in cases {
+            let p = parse_directed(text).unwrap_or_else(|| panic!("failed to parse {text:?}"));
+            assert_eq!(p.to, to, "to for {text:?}");
+            assert_eq!(p.cmd, cmd, "cmd for {text:?}");
+            assert_eq!(p.inum, inum, "inum for {text:?}");
+        }
+    }
+
+    /// Plain free text (no command) does not parse as a directed message.
+    #[test]
+    fn parse_directed_rejects_freetext() {
+        assert!(parse_directed("HELLO WORLD").is_none());
+        assert!(parse_directed("CQ CQ DE K1ABC").is_none());
+    }
+
+    /// End-to-end: parse operator text → build a directed frame → decode it back
+    /// to the rendered directed message.
+    #[test]
+    fn build_directed_roundtrip_through_decode() {
+        let (payload, i3) = build_directed("K1ABC", "W1AW SNR -5", true, true).unwrap();
+        let bits = pack_frame(&payload, i3);
+        let (frame, _i3) = decode_frame(&bits).expect("crc ok");
+        assert_eq!(frame, Js8Frame::Directed(unpack_directed_frame(&payload).unwrap()));
+        assert_eq!(frame.display(), "K1ABC: W1AW SNR -05");
+    }
+
+    /// `build_directed` declines free text (so the caller falls back to a data frame).
+    #[test]
+    fn build_directed_declines_freetext() {
+        assert!(build_directed("K1ABC", "HELLO WORLD", true, true).is_none());
     }
 }

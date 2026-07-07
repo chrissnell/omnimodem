@@ -18,6 +18,7 @@
 use crate::fec::ldpc_js8::{encode174, extract_message, js8_174_87_code};
 use crate::fec::llr::demap_fsk_identity;
 use crate::fec::osd::osd_decode;
+use crate::framing::js8_frames::build_directed;
 use crate::framing::js8_message::{
     decode_frame, pack_fast_data, pack_frame, JS8_DATA, JS8_FIRST, JS8_LAST,
 };
@@ -130,14 +131,22 @@ pub fn js8_symbols(msgbits: &[u8; 87], submode: Js8Submode) -> [u8; JS8_NSYM] {
 pub struct Js8Mod {
     submode: Js8Submode,
     base_hz: f32,
+    /// The station's own callsign. When set, a `Text` payload that parses as a
+    /// directed message (`W1AW SNR?`) is sent as a directed frame; otherwise it
+    /// falls back to a JSC free-text data frame.
+    mycall: Option<String>,
 }
 
 impl Js8Mod {
     pub fn new(submode: Js8Submode) -> Self {
-        Js8Mod { submode, base_hz: JS8_BASE_HZ }
+        Js8Mod { submode, base_hz: JS8_BASE_HZ, mycall: None }
     }
     pub fn with_base(submode: Js8Submode, base_hz: f32) -> Self {
-        Js8Mod { submode, base_hz }
+        Js8Mod { submode, base_hz, mycall: None }
+    }
+    /// Set the station callsign so directed messages can be composed.
+    pub fn with_call(submode: Js8Submode, mycall: impl Into<String>) -> Self {
+        Js8Mod { submode, base_hz: JS8_BASE_HZ, mycall: Some(mycall.into()) }
     }
 }
 
@@ -162,9 +171,18 @@ impl Modulator for Js8Mod {
             FramePayload::Text(t) => t.clone(),
             _ => return Err(ModError::UnsupportedPayload("js8 needs text")),
         };
-        // One JSC fast-data frame (first = last for a single window).
-        let (payload, _chars) = pack_fast_data(&text);
-        let msgbits = pack_frame(&payload, JS8_DATA | JS8_FIRST | JS8_LAST);
+        // If we have a callsign and the text is a directed message, send a
+        // directed frame; otherwise one JSC fast-data frame (first = last for a
+        // single window).
+        let msgbits = self
+            .mycall
+            .as_deref()
+            .and_then(|call| build_directed(call, &text, true, true))
+            .map(|(payload, i3)| pack_frame(&payload, i3))
+            .unwrap_or_else(|| {
+                let (payload, _chars) = pack_fast_data(&text);
+                pack_frame(&payload, JS8_DATA | JS8_FIRST | JS8_LAST)
+            });
         let syms = js8_symbols(&msgbits, self.submode);
         let sym_u32: Vec<u32> = syms.iter().map(|&s| s as u32).collect();
         let p = self.submode.params();
@@ -510,6 +528,40 @@ mod tests {
             got.push_str(&frame_text);
         }
         assert_eq!(got, message, "reassembled multi-frame message mismatch");
+    }
+
+    /// `Js8Mod::with_call` composes a directed frame from operator text and it
+    /// decodes through audio to the rendered directed message.
+    #[test]
+    fn modulator_sends_directed_from_text() {
+        let sm = Js8Submode::Turbo;
+        let wave = Js8Mod::with_call(sm, "K1ABC")
+            .modulate(&Frame::text("W1AW SNR?"))
+            .unwrap();
+        let win_len = (JS8_RATE as f32 * sm.params().tx_seconds as f32) as usize;
+        let mut win = vec![0.0f32; win_len.max(wave.len())];
+        win[..wave.len()].copy_from_slice(&wave);
+        let decodes = Js8Demod::new(sm).decode_window(&win, 0);
+        assert!(
+            decodes
+                .iter()
+                .any(|f| matches!(&f.payload, FramePayload::Text(t) if t == "K1ABC: W1AW SNR?")),
+            "directed TX did not decode; got {:?}",
+            decodes.iter().filter_map(|f| match &f.payload { FramePayload::Text(t) => Some(t.clone()), _ => None }).collect::<Vec<_>>()
+        );
+    }
+
+    /// Without a callsign, the modulator falls back to a JSC free-text data frame
+    /// even when the text looks command-like.
+    #[test]
+    fn modulator_falls_back_to_data_without_call() {
+        let sm = Js8Submode::Turbo;
+        let wave = Js8Mod::new(sm).modulate(&Frame::text("HELLO WORLD")).unwrap();
+        let win_len = (JS8_RATE as f32 * sm.params().tx_seconds as f32) as usize;
+        let mut win = vec![0.0f32; win_len.max(wave.len())];
+        win[..wave.len()].copy_from_slice(&wave);
+        let decodes = Js8Demod::new(sm).decode_window(&win, 0);
+        assert!(decodes.iter().any(|f| matches!(&f.payload, FramePayload::Text(t) if t == "HELLO WORLD")));
     }
 
     /// A directed frame (non-data) survives the full audio channel and decodes
