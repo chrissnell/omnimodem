@@ -1,6 +1,10 @@
 package app
 
-import pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+import (
+	"strings"
+
+	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+)
 
 // modeParam describes one editable parameter for a mode (label + default).
 type modeParam struct {
@@ -83,6 +87,19 @@ var modes = []modeInfo{
 	{"thor50x1", "chat", 0, []modeParam{{"center", 1500}}},
 	{"thor50x2", "chat", 0, []modeParam{{"center", 1500}}},
 	{"thor100", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi IFKP family: 33-tone IFK with the self-framing IFKP Varicode.
+	{"ifkp", "chat", 0, []modeParam{{"center", 1500}}},
+	{"ifkp-slow", "chat", 0, []modeParam{{"center", 1500}}},
+	{"ifkp-fast", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi FSQ / FSQCALL family: 33-tone IFK with a CRC8-keyed directed
+	// protocol. `directed` (0/1) keys the selective-call header; the operator
+	// callsign is taken from the station identity. Directed traffic surfaces in
+	// the chat view.
+	{"fsq", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-1.5", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-2", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-4.5", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
+	{"fsq-6", "chat", 0, []modeParam{{"center", 1500}, {"directed", 0}}},
 	{"feldhell", "image", 0, []modeParam{{"center", 1500}}},
 	{"slowhell", "image", 0, []modeParam{{"center", 1500}}},
 	{"hellx5", "image", 0, []modeParam{{"center", 1500}}},
@@ -90,7 +107,7 @@ var modes = []modeInfo{
 	{"hell80", "image", 0, []modeParam{{"center", 1500}}},
 	// The MMSSTV SSTV colour line-scan family (RGB-sequential: Scottie/Martin/SC2
 	// wired). No tunable params — the VIS + scan frequencies are fixed by the SSTV
-	// standard. RX emits a colour raster (ImageRgb); TX paints an RGB picture.
+	// standard. RX emits a colour raster (Image, channels=3); TX paints an RGB picture.
 	{"scottie1", "image", 0, nil},
 	{"scottie2", "image", 0, nil},
 	{"scottiedx", "image", 0, nil},
@@ -173,6 +190,17 @@ var modes = []modeInfo{
 	{"mt63_1000l", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mt63_2000s", "chat", 0, []modeParam{{"center", 1500}}},
 	{"mt63_2000l", "chat", 0, []modeParam{{"center", 1500}}},
+	// The fldigi Throb family: dual-tone MFSK at 8 kHz (Throb / ThrobX).
+	{"throb1", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throb2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throb4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throbx1", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throbx2", "chat", 0, []modeParam{{"center", 1500}}},
+	{"throbx4", "chat", 0, []modeParam{{"center", 1500}}},
+	{"navtex", "chat", 0, []modeParam{{"center", 1000}}},
+	{"sitorb", "chat", 0, []modeParam{{"center", 1000}}},
+	{"wefax576", "image", 0, []modeParam{{"center", 1900}}},
+	{"wefax288", "image", 0, []modeParam{{"center", 1900}}},
 	{"rtty", "chat", 0, []modeParam{{"baud", 45.45}, {"shift", 170}}},
 	{"cw", "chat", 0, []modeParam{{"wpm", 20}, {"tone", 700}}},
 	{"afsk1200", "chat", 0, nil},
@@ -182,10 +210,32 @@ var modes = []modeInfo{
 	{"jt65", "sequencer", 60, nil},
 	{"jt9", "sequencer", 60, nil},
 	{"fst4", "sequencer", 15, nil}, // LF/MF weak-signal QSO; default 15 s T/R
+	// The WSJT-X JT4 family (legacy EME): submodes A–G differ only in 4-FSK tone
+	// spacing; 60 s on the minute, same auto-sequence ladder as JT65/JT9.
+	{"jt4a", "sequencer", 60, nil},
+	{"jt4b", "sequencer", 60, nil},
+	{"jt4c", "sequencer", 60, nil},
+	{"jt4d", "sequencer", 60, nil},
+	{"jt4e", "sequencer", 60, nil},
+	{"jt4f", "sequencer", 60, nil},
+	{"jt4g", "sequencer", 60, nil},
+	{"msk144", "sequencer", 0, nil}, // VHF meteor scatter; streaming short bursts (default 1500 Hz)
 	{"wspr", "beacon", 120, nil},
 }
 
+// baseModeLabel strips the daemon's parameter suffix from a live mode string.
+// The daemon reports a channel's mode as the descriptor it persists — e.g.
+// "feldhell:center=1500" or "rtty:baud=45,shift=170,center=915,reverse=false"
+// (mode/mod.rs to_mode_string) — while the modes table is keyed by the bare
+// label. Everything from the first ':' is params; labels without one (e.g.
+// "contestia8_500") pass through unchanged.
+func baseModeLabel(mode string) string {
+	base, _, _ := strings.Cut(mode, ":")
+	return base
+}
+
 func modeByLabel(label string) *modeInfo {
+	label = baseModeLabel(label)
 	for i := range modes {
 		if modes[i].label == label {
 			return &modes[i]
@@ -249,6 +299,18 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		return &pb.ModeParams{Params: &pb.ModeParams_Hell{Hell: &pb.HellParams{
 			Submode: label, CenterHz: float32(get("center", 1500)),
 		}}}
+	case "ifkp", "ifkp-slow", "ifkp-fast":
+		// The fldigi IFKP family: speed label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Ifkp{Ifkp: &pb.IfkpParams{
+			Speed: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "fsq", "fsq-1.5", "fsq-2", "fsq-4.5", "fsq-6":
+		// The fldigi FSQ / FSQCALL family: speed label + audio center + directed
+		// flag. `mycall` is injected from the station identity at the call site
+		// (persistAll), since it is not a numeric setting.
+		return &pb.ModeParams{Params: &pb.ModeParams_Fsq{Fsq: &pb.FsqParams{
+			Speed: label, CenterHz: float32(get("center", 1500)), Directed: get("directed", 0) != 0,
+		}}}
 	case "mfsk4", "mfsk8", "mfsk11", "mfsk16", "mfsk22", "mfsk31",
 		"mfsk32", "mfsk64", "mfsk128", "mfsk64l", "mfsk128l":
 		// The fldigi MFSK family: submode label + audio center (1500 Hz).
@@ -259,6 +321,21 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 		// The fldigi MT63 family: submode label + audio center (1500 Hz).
 		return &pb.ModeParams{Params: &pb.ModeParams_Mt63{Mt63: &pb.Mt63Params{
 			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4":
+		// The fldigi Throb / ThrobX family: submode label + audio center (1500 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Throb{Throb: &pb.ThrobParams{
+			Submode: label, CenterHz: float32(get("center", 1500)),
+		}}}
+	case "navtex", "sitorb":
+		// NAVTEX / SITOR-B: submode label + audio center (1000 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Navtex{Navtex: &pb.NavtexParams{
+			Submode: label, CenterHz: float32(get("center", 1000)),
+		}}}
+	case "wefax576", "wefax288":
+		// WEFAX facsimile: submode label + audio carrier (1900 Hz).
+		return &pb.ModeParams{Params: &pb.ModeParams_Wefax{Wefax: &pb.WefaxParams{
+			Submode: label, CenterHz: float32(get("center", 1900)),
 		}}}
 	case "contestia4_125", "contestia4_250", "contestia4_500", "contestia4_1000", "contestia4_2000",
 		"contestia8_125", "contestia8_250", "contestia8_500", "contestia8_1000", "contestia8_2000",

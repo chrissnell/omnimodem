@@ -1457,8 +1457,8 @@ pub mod demod {
 
 /// The RGB-sequential SSTV families (Scottie `smSCT1/2/DX`, Martin `smMRT1/2`, SC2
 /// `smSC2_180/120/60`) as omnimodem `Modulator` + `Demodulator`. TX takes a
-/// `FramePayload::ImageRgb` picture and renders it; RX buffers the capture and emits the
-/// reconstructed `ImageRgb` raster on flush (facsimile finalises at end-of-transmission,
+/// RGB `Image` (channels=3) picture and renders it; RX buffers the capture and emits the
+/// reconstructed RGB `Image` on flush (facsimile finalises at end-of-transmission,
 /// like Hell). The colour-difference families (Robot/PD/MP/MR) get their own decode later.
 pub mod rgb {
     use super::modulator::{line_symbols, wired, Rgb};
@@ -1499,7 +1499,8 @@ pub mod rgb {
         }
         fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
             let (width, rgb) = match &frame.payload {
-                FramePayload::ImageRgb { width, rgb } => (*width as usize, rgb),
+                // SSTV transmits a colour picture: the unified raster with 3 channels (R,G,B).
+                FramePayload::Image { width, channels: 3, pixels } => (*width as usize, pixels),
                 _ => return Err(ModError::UnsupportedPayload("sstv needs an rgb image")),
             };
             let geom = self.mode.geometry();
@@ -1527,7 +1528,7 @@ pub mod rgb {
         }
     }
 
-    /// Receiver: buffers the capture, emits the reconstructed `ImageRgb` on flush.
+    /// Receiver: buffers the capture, emits the reconstructed RGB `Image` on flush.
     pub struct RgbDemod {
         mode: SstvMode,
         buf: Vec<Sample>,
@@ -1550,7 +1551,7 @@ pub mod rgb {
         }
         fn flush(&mut self) -> Vec<Frame> {
             let out = demod::decode_frame(&self.buf, self.mode).map(|(width, rgb)| Frame {
-                payload: FramePayload::ImageRgb { width, rgb },
+                payload: FramePayload::Image { width, channels: 3, pixels: rgb },
                 meta: FrameMeta { decoder: Some("sstv".into()), crc_ok: true, ..Default::default() },
             });
             self.buf.clear();
@@ -1921,8 +1922,8 @@ mod tests {
         }
     }
 
-    /// Full trait round-trip (T5 emission + the new `ImageRgb` payload): build a colour-bar
-    /// `ImageRgb`, run it through the Scottie `Modulator` → `Demodulator`, and confirm the
+    /// Full trait round-trip (T5 emission + the unified RGB `Image` payload): build a colour-bar
+    /// an RGB `Image`, run it through the Scottie `Modulator` → `Demodulator`, and confirm the
     /// recovered raster is the right shape and its bar centres match. Exercises the colour
     /// payload both ways end-to-end.
     #[test]
@@ -1941,7 +1942,7 @@ mod tests {
             }
         }
         let frame = Frame {
-            payload: FramePayload::ImageRgb { width: 320, rgb },
+            payload: FramePayload::Image { width: 320, channels: 3, pixels: rgb },
             meta: FrameMeta::default(),
         };
 
@@ -1953,8 +1954,8 @@ mod tests {
         assert_eq!(frames.len(), 1);
 
         let (w, out) = match &frames[0].payload {
-            FramePayload::ImageRgb { width, rgb } => (*width, rgb),
-            other => panic!("expected ImageRgb, got {other:?}"),
+            FramePayload::Image { width, channels: 3, pixels } => (*width, pixels),
+            other => panic!("expected RGB Image, got {other:?}"),
         };
         assert_eq!(w, 320);
         // Scottie 1 is 320x256; rows past the 8 captured decode to black but the buffer is full-size.

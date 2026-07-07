@@ -245,13 +245,15 @@ fn handle_command(
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
     match cmd {
-        Command::ConfigureChannel { id, name, mode, reply } => {
+        Command::ConfigureChannel { id, name, mode, rsid_tx, rsid_rx, reply } => {
             // Validate the mode string against the parametric registry before
             // persisting, so a typo can't silently configure nothing. The
             // string remains the persisted form (gRPC proto unchanged); it is
             // resolved to a `ModeConfig` at use.
             let res = match crate::mode::ModeConfig::parse(&mode) {
-                Some(_) => supervisor.configure_channel(id, name, mode).map_err(Into::into),
+                Some(_) => supervisor
+                    .configure_channel(id, name, mode, rsid_tx, rsid_rx)
+                    .map_err(Into::into),
                 None => Err(CoreError::UnknownMode(mode)),
             };
             if res.is_ok() {
@@ -293,6 +295,17 @@ fn handle_command(
             let tx_id = TransmitId(*next_tx_id);
             *next_tx_id += 1;
             let res = transmit(supervisor, interlock, live, telemetry, channel, payload, tx_id);
+            let _ = reply.send(res);
+        }
+
+        Command::TransmitImage { channel, send, reply } => {
+            if !supervisor.has_channel(channel) {
+                let _ = reply.send(Err(CoreError::UnknownChannel(channel)));
+                return;
+            }
+            let tx_id = TransmitId(*next_tx_id);
+            *next_tx_id += 1;
+            let res = transmit_image(supervisor, live, channel, send, tx_id);
             let _ = reply.send(res);
         }
 
@@ -543,6 +556,8 @@ fn try_spawn_workers(
     let gain = live.gains.entry(channel).or_default().clone();
     // Shared spectrum control (cloned into the RX worker; default OFF).
     let spectrum = live.spectra.entry(channel).or_default().clone();
+    // Per-channel RSID enables: (tx = prepend our burst, rx = detect inbound).
+    let (rsid_tx, rsid_rx) = supervisor.channel_rsid(channel);
 
     // RX worker: needs a capture and a real demod. Consume the held capture.
     if !live.rx_workers.contains_key(&channel) {
@@ -556,7 +571,7 @@ fn try_spawn_workers(
                 DemodKind::Streaming(demod) => {
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(),
+                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(), rsid_rx,
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -564,6 +579,7 @@ fn try_spawn_workers(
                     let w = RxWorker::spawn_windowed(
                         channel, rig, capture, bd, interlock.clone(), frames.clone(),
                         telemetry.clone(), metrics, window_s, gain.clone(), spectrum.clone(),
+                        rsid_rx,
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -588,6 +604,11 @@ fn try_spawn_workers(
             let sink = live.sinks.remove(&channel).unwrap();
             let driver = live.drivers.remove(&channel).unwrap();
             let slot_s = registry::tx_slot_s(&mode);
+            // Resolve the mode's RSID burst once at spawn (key + audio offset).
+            let rsid = (rsid_tx)
+                .then(|| mode.rsid_key().map(|k| (k, mode.rsid_center_hz())))
+                .flatten();
+            let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
             let w = tx_worker::spawn(TxWorkerCfg {
                 channel,
                 rig,
@@ -601,6 +622,9 @@ fn try_spawn_workers(
                 slot_s,
                 gain: gain.clone(),
                 spectrum: spectrum.clone(),
+                rsid,
+                tx_delay: Duration::from_millis(tx_delay_ms as u64),
+                tx_tail: Duration::from_millis(tx_tail_ms as u64),
             });
             live.tx_workers.insert(channel, w);
         }
@@ -681,7 +705,7 @@ fn transmit(
         let mode = supervisor.channel_mode(channel);
         let frame = tx_worker::payload_to_frame(&mode, payload);
         let worker = live.tx_workers.get(&channel).unwrap();
-        return match worker.enqueue(TxJob { frame, transmit_id: tx_id }) {
+        return match worker.enqueue(TxJob::frame(frame, tx_id)) {
             Ok(()) => Ok(tx_id),
             Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
         };
@@ -706,12 +730,14 @@ fn transmit(
         let sink = live.sinks.get(&channel).unwrap();
         let driver = live.drivers.get_mut(&channel).unwrap();
 
+        let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
         interlock.begin_tx(&rig);
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: true });
         // The legacy raw-PCM cycle runs inline on the core thread (no worker),
         // so there is no async cancel to honor — pass a never-set flag.
         let outcome = drive_tx_cycle(
             driver.as_mut(), sink, samples, rate, TX_POLL, &AtomicBool::new(false),
+            Duration::from_millis(tx_delay_ms as u64), Duration::from_millis(tx_tail_ms as u64),
         );
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: false });
         interlock.end_tx(&rig);
@@ -732,6 +758,31 @@ fn transmit(
             evict_on_gone(supervisor, live, channel, &e);
             Err(CoreError::Ptt(e))
         }
+    }
+}
+
+/// Transmit an image on a moded channel: build the header + pixel-FSK audio for
+/// the channel's configured picture mode and enqueue it on the channel worker
+/// (accepted onto the queue, not when it leaves the air — the worker emits
+/// TransmitStarted/Complete + keys the rig). Errors if the channel has no live TX
+/// worker or the mode/size can't carry the image.
+fn transmit_image(
+    supervisor: &Supervisor,
+    live: &LiveBindings,
+    channel: ChannelId,
+    send: crate::mode::picture_tx::PictureSend,
+    tx_id: TransmitId,
+) -> Result<TransmitId, CoreError> {
+    let worker = live
+        .tx_workers
+        .get(&channel)
+        .ok_or_else(|| CoreError::Picture("channel has no active transmit worker".into()))?;
+    let mode = supervisor.channel_mode(channel);
+    let (audio, native_rate) =
+        crate::mode::picture_tx::build(&mode, &send).map_err(|e| CoreError::Picture(e.to_string()))?;
+    match worker.enqueue(TxJob::prebuilt(audio, native_rate, tx_id)) {
+        Ok(()) => Ok(tx_id),
+        Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
     }
 }
 
@@ -852,6 +903,8 @@ mod tests {
                     id: ChannelId(0),
                     name: "vfo-a".into(),
                     mode: "none".into(),
+                    rsid_tx: false,
+                    rsid_rx: false,
                     reply: tx,
                 })
                 .unwrap();
@@ -925,7 +978,7 @@ mod tests {
             core.commands
                 .send(Command::ConfigurePtt {
                     id: ChannelId(0),
-                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false },
+                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                     reply: t,
                 })
                 .unwrap();
@@ -974,7 +1027,7 @@ mod tests {
             core.commands
                 .send(Command::ConfigurePtt {
                     id: ChannelId(0),
-                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false },
+                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                     reply: t,
                 })
                 .unwrap();
@@ -1018,7 +1071,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: bh_id.clone(),
                         method: PttMethod::SerialRts { node: String::new() },
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: t,
                 })
@@ -1050,6 +1103,29 @@ mod tests {
     }
 
     #[test]
+    fn transmit_image_on_unknown_channel_errors() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (core, join) = fresh_core();
+        rt.block_on(async {
+            let (tx, rx) = oneshot::channel();
+            let send = crate::mode::picture_tx::PictureSend {
+                rgb: vec![0; 12],
+                width: 2,
+                height: 2,
+                color: false,
+                txspp: 8,
+            };
+            core.commands
+                .send(Command::TransmitImage { channel: ChannelId(9), send, reply: tx })
+                .unwrap();
+            let err = rx.await.unwrap().unwrap_err();
+            assert!(matches!(err, CoreError::UnknownChannel(ChannelId(9))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
     fn configured_audio_ptt_transmit_runs_real_cycle() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dev = DeviceDescriptor {
@@ -1072,6 +1148,8 @@ mod tests {
                     id: ChannelId(0),
                     name: "vfo-a".into(),
                     mode: "none".into(),
+                    rsid_tx: false,
+                    rsid_rx: false,
                     reply: tx,
                 })
                 .unwrap();
@@ -1098,7 +1176,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: dev_id.clone(),
                         method: PttMethod::None,
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: tx,
                 })
@@ -1133,7 +1211,14 @@ mod tests {
     async fn configure_channel(core: &CoreHandle, id: ChannelId, mode: &str) {
         let (tx, rx) = oneshot::channel();
         core.commands
-            .send(Command::ConfigureChannel { id, name: "ch".into(), mode: mode.into(), reply: tx })
+            .send(Command::ConfigureChannel {
+                id,
+                name: "ch".into(),
+                mode: mode.into(),
+                rsid_tx: false,
+                rsid_rx: false,
+                reply: tx,
+            })
             .unwrap();
         rx.await.unwrap().unwrap();
     }
@@ -1373,7 +1458,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: dev_id.clone(),
                         method: PttMethod::None,
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: tx,
                 })
@@ -1417,7 +1502,7 @@ mod tests {
         core.commands
             .send(Command::ConfigurePtt {
                 id,
-                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false },
+                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                 reply: tx,
             })
             .unwrap();
@@ -1577,8 +1662,10 @@ mod tests {
                 ptt: Some(PttConfig {
                     device_id: dev_id.clone(),
                     method: PttMethod::None,
-                    invert: false,
+                    invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                 }),
+                rsid_tx: false,
+                rsid_rx: false,
             })
             .unwrap();
         let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();

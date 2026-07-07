@@ -3,14 +3,15 @@ package app
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
-	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 // devEntry is a list.Item (and list.DefaultItem) for a device.
@@ -42,7 +43,11 @@ const (
 	fTx
 	fPtt
 	fMethod
-	fLast = fMethod
+	fTxDelay
+	fTxTail
+	fRsidTx
+	fRsidRx
+	fLast = fRsidRx
 )
 
 // cfgSig is the persistable slice of the form. It drives change detection so
@@ -55,6 +60,10 @@ type cfgSig struct {
 	txID      string
 	pttID     string
 	methodIdx int
+	rsidTx    bool
+	rsidRx    bool
+	txDelayMs string
+	txTailMs  string
 }
 
 type configView struct {
@@ -71,6 +80,10 @@ type configView struct {
 	txID      string
 	pttID     string
 	methodIdx int
+	rsidTx    bool // prepend the mode's RSID burst before each TX
+	rsidRx    bool // run the RSID detector over received audio
+	txDelay   textinput.Model
+	txTail    textinput.Model
 	focus     cfgFocus
 	picking   bool   // a device-picker modal is open over the form
 	editing   bool   // the mode-settings modal is open over the form
@@ -82,6 +95,38 @@ type configView struct {
 	inflightModeLabel string
 	inflightModeVals  map[string]float64
 	closing           bool // esc pressed; pop once the save fully drains
+}
+
+// newMsInput builds a small numeric text input for a millisecond timing value.
+// The validator rejects any non-digit so the field only ever holds a parseable
+// unsigned integer (empty is allowed mid-edit and treated as 0 on save).
+func newMsInput(def string) textinput.Model {
+	ti := textinput.New()
+	ti.CharLimit = 5 // up to 65535 ms is plenty of lead-in/tail
+	ti.Placeholder = def
+	ti.SetValue(def)
+	ti.Validate = func(s string) error {
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("digits only")
+			}
+		}
+		return nil
+	}
+	return ti
+}
+
+// parseMs turns a millisecond text field into a uint32, treating empty or
+// out-of-range input as 0 (the field validator already blocks non-digits).
+func parseMs(s string) uint32 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
 }
 
 func newDevList(title string) list.Model {
@@ -99,7 +144,7 @@ func newDevList(title string) list.Model {
 		BorderLeftForeground(ui.ColorSel)
 	l := list.New(nil, del, 0, 0)
 	l.Title = title
-	l.SetShowTitle(false)  // the modal frame supplies the title
+	l.SetShowTitle(false) // the modal frame supplies the title
 	l.SetShowHelp(false)
 	l.SetShowStatusBar(false)
 	return l
@@ -116,14 +161,18 @@ func newConfigView(m *Model) *configView {
 	grid.Placeholder = "AA00"
 	grid.CharLimit = 8
 	grid.SetValue(m.myGrid)
+	txDelay := newMsInput("300")
+	txTail := newMsInput("50")
 	v := &configView{
-		m:    m,
-		name: name,
-		call: call,
-		grid: grid,
-		rx:   newDevList("RX device (capture)"),
-		tx:   newDevList("TX device (playback)"),
-		ptt:  newDevList("PTT device"),
+		m:       m,
+		name:    name,
+		call:    call,
+		grid:    grid,
+		txDelay: txDelay,
+		txTail:  txTail,
+		rx:      newDevList("RX device (capture)"),
+		tx:      newDevList("TX device (playback)"),
+		ptt:     newDevList("PTT device"),
 	}
 	// Preload the channel's persisted config (surfaced in the snapshot) so
 	// reopening Configure shows what's already saved instead of blank defaults.
@@ -134,6 +183,10 @@ func newConfigView(m *Model) *configView {
 		v.txID = cl.txDeviceID
 		v.pttID = cl.pttDeviceID
 		v.methodIdx = methodIdxOf(cl.pttMethod)
+		v.rsidTx = cl.rsidTx
+		v.rsidRx = cl.rsidRx
+		v.txDelay.SetValue(strconv.FormatUint(uint64(cl.pttTxDelayMs), 10))
+		v.txTail.SetValue(strconv.FormatUint(uint64(cl.pttTxTailMs), 10))
 	} else {
 		v.name.SetValue(defaultChannelName(m))
 	}
@@ -191,6 +244,7 @@ func defaultChannelName(m *Model) string {
 // modeIdxByLabel returns the index of a mode label in `modes`, or 0 when the
 // label is unknown/empty (a fresh channel falls back to the first mode).
 func modeIdxByLabel(label string) int {
+	label = baseModeLabel(label)
 	for i := range modes {
 		if modes[i].label == label {
 			return i
@@ -244,6 +298,10 @@ func (v *configView) sig() cfgSig {
 		txID:      v.txID,
 		pttID:     v.pttID,
 		methodIdx: v.methodIdx,
+		rsidTx:    v.rsidTx,
+		rsidRx:    v.rsidRx,
+		txDelayMs: v.txDelay.Value(),
+		txTailMs:  v.txTail.Value(),
 	}
 }
 
@@ -316,16 +374,30 @@ func (v *configView) maybePersist() tea.Cmd {
 func (v *configView) persistAll() tea.Cmd {
 	ch := v.m.sel
 	c := v.m.c
+	mp := modeParamsFor(v.modeLabel(), modeValsFrom(v.settings))
+	// FSQ's directed header carries the operator callsign, which isn't a numeric
+	// setting; inject it from the station identity.
+	if f := mp.GetFsq(); f != nil {
+		f.Mycall = v.m.myCall
+	}
 	chReq := &pb.ConfigureChannelRequest{
 		Channel:    ch,
 		Name:       v.name.Value(),
 		Mode:       v.modeLabel(),
-		ModeParams: modeParamsFor(v.modeLabel(), modeValsFrom(v.settings)),
+		ModeParams: mp,
+		RsidTx:     v.rsidTx,
+		RsidRx:     v.rsidRx,
 	}
 	audioReq := &pb.ConfigureAudioRequest{
 		Channel: ch, DeviceId: v.rxID, SampleRate: 48000, TxDeviceId: v.txID,
 	}
-	pttReq := &pb.ConfigurePttRequest{Channel: ch, DeviceId: v.pttID, Method: v.method()}
+	pttReq := &pb.ConfigurePttRequest{
+		Channel:   ch,
+		DeviceId:  v.pttID,
+		Method:    v.method(),
+		TxDelayMs: parseMs(v.txDelay.Value()),
+		TxTailMs:  parseMs(v.txTail.Value()),
+	}
 	return func() tea.Msg {
 		ctx, cancel := rpcCtx()
 		defer cancel()
@@ -495,6 +567,21 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			v.grid, cmd = v.grid.Update(msg)
 			v.m.myGrid = strings.ToUpper(strings.TrimSpace(v.grid.Value()))
 			return v, cmd
+		case fTxDelay:
+			var cmd tea.Cmd
+			v.txDelay, cmd = v.txDelay.Update(msg)
+			// A digit edit changes the PTT timing — auto-apply like any field.
+			if pc := v.maybePersist(); pc != nil {
+				return v, tea.Batch(cmd, pc)
+			}
+			return v, cmd
+		case fTxTail:
+			var cmd tea.Cmd
+			v.txTail, cmd = v.txTail.Update(msg)
+			if pc := v.maybePersist(); pc != nil {
+				return v, tea.Batch(cmd, pc)
+			}
+			return v, cmd
 		}
 		// Selector/device fields: cycle a selector or open the device picker.
 		// Changes auto-apply — there is no explicit Apply key.
@@ -531,6 +618,8 @@ func (v *configView) syncFocus() {
 	v.name.Blur()
 	v.call.Blur()
 	v.grid.Blur()
+	v.txDelay.Blur()
+	v.txTail.Blur()
 	switch v.focus {
 	case fName:
 		v.name.Focus()
@@ -538,6 +627,10 @@ func (v *configView) syncFocus() {
 		v.call.Focus()
 	case fGrid:
 		v.grid.Focus()
+	case fTxDelay:
+		v.txDelay.Focus()
+	case fTxTail:
+		v.txTail.Focus()
 	}
 }
 
@@ -549,6 +642,10 @@ func (v *configView) cycle(d int) {
 		v.rebuildSettings() // the new mode exposes a different set of settings
 	case fMethod:
 		v.methodIdx = (v.methodIdx + d + len(pttMethods)) % len(pttMethods)
+	case fRsidTx:
+		v.rsidTx = !v.rsidTx // boolean toggle; direction is irrelevant
+	case fRsidRx:
+		v.rsidRx = !v.rsidRx
 	}
 }
 
@@ -563,6 +660,12 @@ func (v *configView) commit() (View, tea.Cmd) {
 		if v.settings != nil && v.settings.HasFields() {
 			v.editing = true
 		}
+	case fRsidTx:
+		v.rsidTx = !v.rsidTx
+		return v, v.maybePersist()
+	case fRsidRx:
+		v.rsidRx = !v.rsidRx
+		return v, v.maybePersist()
 	}
 	return v, nil
 }
@@ -615,7 +718,19 @@ func (v *configView) Render(w, h int) string {
 	b.WriteString(field(fRx, "RX Device", chosen(v.rxID)) + "\n")
 	b.WriteString(field(fTx, "TX Device", txDeviceLabel(v.txID, v.rxID)) + "\n")
 	b.WriteString(field(fPtt, "PTT Device", chosen(v.pttID)) + "\n")
-	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n\n")
+	b.WriteString(field(fMethod, "PTT Method", "‹ "+methodLabel(v.method())+" ›"+cyc) + "\n")
+	b.WriteString(field(fTxDelay, "TX Delay", v.txDelay.View()+ui.Dim.Render(" ms")) + "\n")
+	b.WriteString(field(fTxTail, "TX Tail", v.txTail.View()+ui.Dim.Render(" ms")) + "\n\n")
+
+	onOff := func(b bool) string {
+		if b {
+			return ui.Accent.Render("on")
+		}
+		return ui.Dim.Render("off")
+	}
+	b.WriteString(ui.Title.Render("RSID") + "\n")
+	b.WriteString(field(fRsidTx, "TX ident", onOff(v.rsidTx)+"  "+ui.Dim.Render("(space)")) + "\n")
+	b.WriteString(field(fRsidRx, "RX detect", onOff(v.rsidRx)+"  "+ui.Dim.Render("(space)")) + "\n\n")
 
 	b.WriteString(v.saveHint() + "\n")
 

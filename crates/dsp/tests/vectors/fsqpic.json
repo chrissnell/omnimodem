@@ -1,0 +1,26 @@
+{"_meta":{"upstream":"w1hkj/fldigi 4.1.23 @ 61b97f413","files":["src/fsq/fsq-pic.cxx:369-378","src/fsq/fsq.cxx:876-902 (parse_pcnt),1206,1210,1444-1450"],"driver":"scratch/refvectors/build_fsqpic.sh","note":"bit-exact: TX header tokens, RX parse table, B->G->R plane order, integer quantiser (TX/RX affines are NOT inverse - fldigi lands ~6 counts low). Grey luma continuous (tolerance)."}}
+{"kind":"header","sel":0,"w":160,"h":120,"grey":false,"s":"% S"}
+{"kind":"header","sel":1,"w":320,"h":240,"grey":false,"s":"% L"}
+{"kind":"header","sel":2,"w":640,"h":480,"grey":true,"s":"% F"}
+{"kind":"header","sel":3,"w":640,"h":480,"grey":false,"s":"% V"}
+{"kind":"header","sel":4,"w":240,"h":300,"grey":false,"s":"% P"}
+{"kind":"header","sel":5,"w":240,"h":300,"grey":true,"s":"% p"}
+{"kind":"header","sel":6,"w":120,"h":150,"grey":false,"s":"% M"}
+{"kind":"header","sel":7,"w":120,"h":150,"grey":true,"s":"% m"}
+{"kind":"parse","c":"L","ok":true,"w":320,"h":240,"mode":0,"color":true}
+{"kind":"parse","c":"S","ok":true,"w":160,"h":120,"mode":1,"color":true}
+{"kind":"parse","c":"F","ok":true,"w":640,"h":480,"mode":2,"color":false}
+{"kind":"parse","c":"V","ok":true,"w":640,"h":480,"mode":3,"color":true}
+{"kind":"parse","c":"P","ok":true,"w":240,"h":300,"mode":4,"color":true}
+{"kind":"parse","c":"p","ok":true,"w":240,"h":300,"mode":5,"color":false}
+{"kind":"parse","c":"M","ok":true,"w":120,"h":150,"mode":6,"color":true}
+{"kind":"parse","c":"m","ok":true,"w":120,"h":150,"mode":7,"color":false}
+{"kind":"parse","c":"Z","ok":false,"w":0,"h":0,"mode":-1,"color":false}
+{"kind":"quant","px":0,"dev":-200.000000,"byte":0}
+{"kind":"quant","px":1,"dev":-198.500000,"byte":0}
+{"kind":"quant","px":64,"dev":-104.000000,"byte":58}
+{"kind":"quant","px":127,"dev":-9.500000,"byte":121}
+{"kind":"quant","px":128,"dev":-8.000000,"byte":122}
+{"kind":"quant","px":192,"dev":88.000000,"byte":186}
+{"kind":"quant","px":255,"dev":182.500000,"byte":249}
+{"kind":"color_raster","w":3,"h":2,"in":[10,11,12,20,21,22,30,31,32,40,41,42,50,51,52,60,61,62],"out":[12,22,32,11,21,31,10,20,30,42,52,62,41,51,61,40,50,60]}

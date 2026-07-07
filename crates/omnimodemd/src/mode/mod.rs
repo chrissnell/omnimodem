@@ -2,6 +2,7 @@
 //! turns a config into a boxed demodulator/modulator. Phase 3 implements only
 //! `NullMode`; Phase-4 variants are present as data so the enum is stable.
 
+pub mod picture_tx;
 pub mod registry;
 
 use omnimodem_dsp::mode::ModeCaps;
@@ -26,15 +27,29 @@ pub enum ModeConfig {
     /// (`thor4`/…/`thor100`/`thormicro`), `center_hz` the audio carrier. DominoEX's
     /// IFK+ core with convolutional FEC + interleave + soft decode.
     Thor { submode: String, center_hz: f32 },
+    /// IFKP family (fldigi parity): `speed` is an `ifkp::IfkpSpeed` label (`ifkp`
+    /// / `ifkp-slow` / `ifkp-fast`), `center_hz` the audio carrier. 33-tone IFK
+    /// with the self-framing IFKP Varicode.
+    Ifkp { speed: String, center_hz: f32 },
+    /// FSQ / FSQCALL (fldigi parity): `speed` is an `fsq::FsqSpeed` label
+    /// (`fsq-1.5`/`fsq-2`/`fsq`/`fsq-4.5`/`fsq-6`), `center_hz` the audio carrier,
+    /// `mycall` the operator callsign in the directed header, `directed` whether
+    /// to append the CRC8 directed header + selective-call framing.
+    Fsq { speed: String, center_hz: f32, mycall: String, directed: bool },
     /// Hellschreiber family (fldigi parity): `submode` is a `hell::HellVariant`
     /// label (`feldhell`/`slowhell`/`hellx5`/`hellx9`/`hell80`), `center_hz` the
     /// audio carrier. A facsimile mode — RX emits an image raster, not text.
     Hell { submode: String, center_hz: f32 },
     /// SSTV (MMSSTV parity): analog line-scan picture modes. `submode` is an
-    /// `sstv::SstvMode` label (the wired RGB-sequential families: `scottie1/2/dx`,
-    /// `martin1/2`, `sc2-180/120/60`). A colour facsimile mode — RX emits an
-    /// `ImageRgb` raster; the on-air frequencies are fixed by the SSTV standard.
+    /// `sstv::SstvMode` label (all 43 SSTVModeList submodes: Scottie/Martin/SC2/
+    /// Robot/BW/Pasokon/PD/MP/MR/ML/narrow MN/MC/AVT). A colour facsimile mode — RX
+    /// emits an RGB `Image` (channels=3); the on-air frequencies are fixed by the
+    /// SSTV standard, so it carries no tunable params.
     Sstv { submode: String },
+    /// Throb family (fldigi parity): `submode` is a `throb::ThrobVariant` label
+    /// (`throb1`/`throb2`/`throb4`/`throbx1`/`throbx2`/`throbx4`), `center_hz` the
+    /// audio carrier. Dual-tone MFSK at 8 kHz.
+    Throb { submode: String, center_hz: f32 },
     // Phase 5 WSJT-X breadth modes.
     Ft4,
     Jt65,
@@ -51,10 +66,24 @@ pub enum ModeConfig {
     /// (`mt63_500s`/…/`mt63_2000l`), `center_hz` the audio carrier. 64-carrier
     /// overlapping-Walsh OFDM with deep interleave.
     Mt63 { submode: String, center_hz: f32 },
+    /// NAVTEX / SITOR-B (fldigi parity): `submode` is a `navtex::NavtexVariant`
+    /// label (`navtex`/`sitorb`), `center_hz` the audio center. 100-baud FSK with
+    /// CCIR-476 FEC-B.
+    Navtex { submode: String, center_hz: f32 },
+    /// WEFAX HF weather fax (fldigi parity): `submode` is a `wefax::WefaxVariant`
+    /// label (`wefax576`/`wefax288`), `center_hz` the audio carrier. A facsimile
+    /// mode — RX emits an image raster, not text.
+    Wefax { submode: String, center_hz: f32 },
     // Phase 5 fldigi breadth modes.
     Olivia { tones: u16, bandwidth_hz: u16 },
     // W1 WSJT-X breadth: FST4/FST4W, parametric over the T/R period (seconds).
     Fst4 { tr_s: u16 },
+    /// JT4 (WSJT-X legacy EME): `submode` is a `jt4::Jt4Submode` label
+    /// (`jt4a`…`jt4g`), differing only in 4-FSK tone spacing. 60 s on the minute.
+    Jt4 { submode: String },
+    /// W2 WSJT-X: MSK144 meteor scatter. `freq_hz` is the audio centre frequency
+    /// (default 1500). A streaming, ping-buffered short-burst offset-MSK mode.
+    Msk144 { freq_hz: f32 },
 }
 
 impl ModeConfig {
@@ -99,6 +128,20 @@ impl ModeConfig {
                     center_hz: f("center", 1500.0),
                 })
             }
+            m if omnimodem_dsp::modes::ifkp::IfkpSpeed::from_label(m).is_some() => {
+                Some(ModeConfig::Ifkp {
+                    speed: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
+            }
+            m if omnimodem_dsp::modes::fsq::FsqSpeed::from_label(m).is_some() => {
+                Some(ModeConfig::Fsq {
+                    speed: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                    mycall: kv.get("mycall").map(|s| s.to_string()).unwrap_or_default(),
+                    directed: b("directed"),
+                })
+            }
             m if omnimodem_dsp::modes::hell::HellVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Hell {
                     submode: m.to_string(),
@@ -107,6 +150,12 @@ impl ModeConfig {
             }
             m if omnimodem_dsp::modes::sstv::rgb::from_label(m).is_some() => {
                 Some(ModeConfig::Sstv { submode: m.to_string() })
+            }
+            m if omnimodem_dsp::modes::throb::ThrobVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Throb {
+                    submode: m.to_string(),
+                    center_hz: f("center", 1500.0),
+                })
             }
             m if omnimodem_dsp::modes::mfsk::MfskVariant::from_label(m).is_some() => {
                 Some(ModeConfig::Mfsk {
@@ -118,6 +167,18 @@ impl ModeConfig {
                 Some(ModeConfig::Mt63 {
                     submode: m.to_string(),
                     center_hz: f("center", 1500.0),
+                })
+            }
+            m if omnimodem_dsp::modes::navtex::NavtexVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Navtex {
+                    submode: m.to_string(),
+                    center_hz: f("center", omnimodem_dsp::modes::navtex::CENTER_HZ),
+                })
+            }
+            m if omnimodem_dsp::modes::wefax::WefaxVariant::from_label(m).is_some() => {
+                Some(ModeConfig::Wefax {
+                    submode: m.to_string(),
+                    center_hz: f("center", omnimodem_dsp::modes::wefax::CARRIER_HZ),
                 })
             }
             m if omnimodem_dsp::modes::contestia::ContestiaVariant::from_label(m).is_some() => {
@@ -138,6 +199,10 @@ impl ModeConfig {
             "jt9" => Some(ModeConfig::Jt9),
             "wspr" => Some(ModeConfig::Wspr),
             "fst4" => Some(ModeConfig::Fst4 { tr_s: u("tr", 15) }),
+            m if omnimodem_dsp::modes::jt4::Jt4Submode::from_label(m).is_some() => {
+                Some(ModeConfig::Jt4 { submode: m.to_string() })
+            }
+            "msk144" => Some(ModeConfig::Msk144 { freq_hz: f("freq", 1500.0) }),
             "olivia" => {
                 Some(ModeConfig::Olivia { tones: u("tones", 32), bandwidth_hz: u("bw", 1000) })
             }
@@ -157,19 +222,80 @@ impl ModeConfig {
             ModeConfig::Psk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::DominoEx { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Thor { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Ifkp { speed, center_hz } => format!("{speed}:center={center_hz}"),
+            ModeConfig::Fsq { speed, center_hz, mycall, directed } => {
+                format!("{speed}:center={center_hz},mycall={mycall},directed={directed}")
+            }
             ModeConfig::Hell { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Sstv { submode } => submode.clone(),
+            ModeConfig::Throb { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mfsk { submode, center_hz } => format!("{submode}:center={center_hz}"),
             ModeConfig::Mt63 { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Navtex { submode, center_hz } => format!("{submode}:center={center_hz}"),
+            ModeConfig::Wefax { submode, center_hz } => format!("{submode}:center={center_hz}"),
             // The tones/bw live in the Contestia label itself (contestia8_500).
             ModeConfig::Contestia { tones, bandwidth_hz } => format!("contestia{tones}_{bandwidth_hz}"),
             ModeConfig::Fst4 { tr_s } => format!("fst4:tr={tr_s}"),
+            // The submode lives in the JT4 label itself (jt4a…jt4g).
+            ModeConfig::Jt4 { submode } => submode.clone(),
+            ModeConfig::Msk144 { freq_hz } => format!("msk144:freq={freq_hz}"),
             ModeConfig::Olivia { tones, bandwidth_hz } => {
                 format!("olivia:tones={tones},bw={bandwidth_hz}")
             }
             other => other.label().to_string(),
         }
     }
+    /// The RSID table key for this mode — the exact `mode` string an
+    /// `omnimodem_dsp::frontend::rsid` table entry carries — or `None` when the
+    /// mode has no assigned RSID. Used to pick the burst to prepend on TX.
+    pub fn rsid_key(&self) -> Option<String> {
+        match self {
+            ModeConfig::Psk { submode, .. }
+            | ModeConfig::DominoEx { submode, .. }
+            | ModeConfig::Thor { submode, .. }
+            | ModeConfig::Hell { submode, .. }
+            | ModeConfig::Mfsk { submode, .. }
+            | ModeConfig::Mt63 { submode, .. } => Some(submode.clone()),
+            ModeConfig::Cw { .. } => Some("cw".to_string()),
+            ModeConfig::Jt65 => Some("jt65".to_string()),
+            ModeConfig::Contestia { tones, bandwidth_hz } => {
+                Some(format!("contestia{tones}_{bandwidth_hz}"))
+            }
+            ModeConfig::Olivia { tones, bandwidth_hz } => {
+                Some(format!("olivia:tones={tones},bw={bandwidth_hz}"))
+            }
+            ModeConfig::Rtty { baud, .. } => {
+                // Only the three Baudot RTTY shifts fldigi assigns an RSID.
+                if (*baud - 50.0).abs() < 0.5 {
+                    Some("rtty:baud=50,shift=170".to_string())
+                } else if (*baud - 75.0).abs() < 0.5 {
+                    Some("rtty:baud=75,shift=850".to_string())
+                } else if (*baud - 45.45).abs() < 1.0 {
+                    Some("rtty".to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The audio offset (Hz) at which this mode's RSID burst is transmitted —
+    /// the mode's carrier where it has one, else a sensible default.
+    pub fn rsid_center_hz(&self) -> f32 {
+        match self {
+            ModeConfig::Psk { center_hz, .. }
+            | ModeConfig::DominoEx { center_hz, .. }
+            | ModeConfig::Thor { center_hz, .. }
+            | ModeConfig::Hell { center_hz, .. }
+            | ModeConfig::Mfsk { center_hz, .. }
+            | ModeConfig::Mt63 { center_hz, .. }
+            | ModeConfig::Rtty { center_hz, .. } => *center_hz,
+            ModeConfig::Cw { tone_hz, .. } => *tone_hz,
+            _ => 1500.0,
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             ModeConfig::None => "none",
@@ -190,6 +316,16 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("thor")
             }
+            ModeConfig::Ifkp { speed, .. } => {
+                omnimodem_dsp::modes::ifkp::IfkpSpeed::from_label(speed)
+                    .map(|v| v.label())
+                    .unwrap_or("ifkp")
+            }
+            ModeConfig::Fsq { speed, .. } => {
+                omnimodem_dsp::modes::fsq::FsqSpeed::from_label(speed)
+                    .map(|v| v.label())
+                    .unwrap_or("fsq")
+            }
             ModeConfig::Hell { submode, .. } => {
                 omnimodem_dsp::modes::hell::HellVariant::from_label(submode)
                     .map(|v| v.label())
@@ -198,6 +334,11 @@ impl ModeConfig {
             ModeConfig::Sstv { submode } => omnimodem_dsp::modes::sstv::rgb::from_label(submode)
                 .map(|v| v.label())
                 .unwrap_or("sstv"),
+            ModeConfig::Throb { submode, .. } => {
+                omnimodem_dsp::modes::throb::ThrobVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("throb")
+            }
             ModeConfig::Mfsk { submode, .. } => {
                 omnimodem_dsp::modes::mfsk::MfskVariant::from_label(submode)
                     .map(|v| v.label())
@@ -208,12 +349,26 @@ impl ModeConfig {
                     .map(|v| v.label())
                     .unwrap_or("mt63")
             }
+            ModeConfig::Navtex { submode, .. } => {
+                omnimodem_dsp::modes::navtex::NavtexVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("navtex")
+            }
+            ModeConfig::Wefax { submode, .. } => {
+                omnimodem_dsp::modes::wefax::WefaxVariant::from_label(submode)
+                    .map(|v| v.label())
+                    .unwrap_or("wefax")
+            }
             ModeConfig::Contestia { .. } => "contestia",
             ModeConfig::Ft4 => "ft4",
             ModeConfig::Jt65 => "jt65",
             ModeConfig::Jt9 => "jt9",
             ModeConfig::Wspr => "wspr",
             ModeConfig::Fst4 { .. } => "fst4",
+            ModeConfig::Jt4 { submode } => omnimodem_dsp::modes::jt4::Jt4Submode::from_label(submode)
+                .map(|v| v.label())
+                .unwrap_or("jt4a"),
+            ModeConfig::Msk144 { .. } => "msk144",
             ModeConfig::Olivia { .. } => "olivia",
         }
     }
@@ -266,6 +421,34 @@ impl omnimodem_dsp::mode::Modulator for NullMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_rsid_mode_string_parses_and_round_trips() {
+        use omnimodem_dsp::frontend::rsid::{TABLE1, TABLE2};
+        // Each RSID ID that maps to an omnimodem mode must resolve via
+        // ModeConfig::parse, and that config's rsid_key must point back at the
+        // same RSID entry — so a detected burst names a mode we can actually run,
+        // and an active mode announces the right RSID on TX.
+        for e in TABLE1.iter().chain(TABLE2.iter()) {
+            let Some(mode) = e.mode else { continue };
+            let cfg = ModeConfig::parse(mode)
+                .unwrap_or_else(|| panic!("RSID {} maps to unparseable mode {mode:?}", e.tag));
+            let key = cfg
+                .rsid_key()
+                .unwrap_or_else(|| panic!("{} ({mode}) has no rsid_key", e.tag));
+            assert_eq!(
+                omnimodem_dsp::frontend::rsid::tx_for_mode(&key)
+                    .map(|tx| match tx {
+                        omnimodem_dsp::frontend::rsid::RsidTx::Primary(c)
+                        | omnimodem_dsp::frontend::rsid::RsidTx::Extended(c) => c,
+                    }),
+                Some(e.code),
+                "rsid_key {key:?} for {} does not round-trip to code {}",
+                e.tag,
+                e.code
+            );
+        }
+    }
 
     #[test]
     fn parse_resolves_phase4_modes_with_defaults() {
@@ -441,6 +624,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolves_throb_family() {
+        // Every fldigi Throb / ThrobX submode resolves, defaulting to 1500 Hz.
+        for label in ["throb1", "throb2", "throb4", "throbx1", "throbx2", "throbx4"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Throb { submode: label.into(), center_hz: 1500.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("throb2:center=1200"),
+            Some(ModeConfig::Throb { submode: "throb2".into(), center_hz: 1200.0 })
+        );
+        // Round-trips through the canonical mode string.
+        let c = ModeConfig::Throb { submode: "throbx4".into(), center_hz: 1500.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("throb9"), None);
+    }
+
+    #[test]
     fn parse_resolves_mfsk_family() {
         // Every fldigi MFSK submode resolves, defaulting to a 1500 Hz carrier.
         for label in [
@@ -482,6 +684,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_resolves_navtex_family() {
+        // Both submodes resolve, defaulting to the 1000 Hz NAVTEX center.
+        for label in ["navtex", "sitorb"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Navtex { submode: label.into(), center_hz: 1000.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("sitorb:center=1500"),
+            Some(ModeConfig::Navtex { submode: "sitorb".into(), center_hz: 1500.0 })
+        );
+        let c = ModeConfig::Navtex { submode: "navtex".into(), center_hz: 1000.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("navtex99"), None);
+    }
+
+    #[test]
+    fn parse_resolves_wefax_family() {
+        // Both WEFAX submodes resolve, defaulting to the 1900 Hz carrier.
+        for label in ["wefax576", "wefax288"] {
+            assert_eq!(
+                ModeConfig::parse(label),
+                Some(ModeConfig::Wefax { submode: label.into(), center_hz: 1900.0 })
+            );
+        }
+        assert_eq!(
+            ModeConfig::parse("wefax576:center=1800"),
+            Some(ModeConfig::Wefax { submode: "wefax576".into(), center_hz: 1800.0 })
+        );
+        let c = ModeConfig::Wefax { submode: "wefax288".into(), center_hz: 1900.0 };
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
+        assert_eq!(ModeConfig::parse("wefax999"), None);
+    }
+
+    #[test]
     fn parse_resolves_contestia_grid() {
         // Every submode in the fldigi Contestia grid resolves; its tones/bw are
         // carried in the label and round-trip through the canonical mode string.
@@ -507,6 +745,26 @@ mod tests {
         assert_eq!(ModeConfig::parse("jt65"), Some(ModeConfig::Jt65));
         assert_eq!(ModeConfig::parse("jt9"), Some(ModeConfig::Jt9));
         assert_eq!(ModeConfig::parse("wspr"), Some(ModeConfig::Wspr));
+        assert_eq!(ModeConfig::parse("fst4"), Some(ModeConfig::Fst4 { tr_s: 15 }));
+        assert_eq!(ModeConfig::parse("msk144"), Some(ModeConfig::Msk144 { freq_hz: 1500.0 }));
+        assert_eq!(
+            ModeConfig::parse("msk144:freq=1200"),
+            Some(ModeConfig::Msk144 { freq_hz: 1200.0 })
+        );
+    }
+
+    #[test]
+    fn parse_resolves_jt4_submodes() {
+        for label in ["jt4a", "jt4b", "jt4c", "jt4d", "jt4e", "jt4f", "jt4g"] {
+            let cfg = ModeConfig::parse(label);
+            assert_eq!(cfg, Some(ModeConfig::Jt4 { submode: label.into() }));
+            // Round-trips through the canonical string and reports its own label.
+            let cfg = cfg.unwrap();
+            assert_eq!(cfg.to_mode_string(), label);
+            assert_eq!(cfg.label(), label);
+        }
+        assert_eq!(ModeConfig::parse("jt4"), None);
+        assert_eq!(ModeConfig::parse("jt4h"), None);
     }
 
     #[test]
@@ -569,6 +827,15 @@ mod tests {
             ModeConfig::Psk { submode: "psk31".into(), center_hz: 1500.0 },
             ModeConfig::Olivia { tones: 16, bandwidth_hz: 500 },
             ModeConfig::Wspr,
+            ModeConfig::Ifkp { speed: "ifkp-slow".into(), center_hz: 1500.0 },
+            ModeConfig::Fsq {
+                speed: "fsq".into(),
+                center_hz: 1500.0,
+                mycall: "k1abc".into(),
+                directed: true,
+            },
+            ModeConfig::Fst4 { tr_s: 60 },
+            ModeConfig::Msk144 { freq_hz: 1500.0 },
         ];
         for c in cases {
             assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c.clone()), "round-trip {c:?}");

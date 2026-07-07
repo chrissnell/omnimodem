@@ -2,29 +2,35 @@ package app
 
 import (
 	"context"
+	"fmt"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/config"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // chanLive is the per-channel live state, fed by the event stream.
 type chanLive struct {
-	name        string
-	mode        string
-	deviceID    string // RX (capture) device
-	txDeviceID  string // TX (playback) device; "" == same as RX
-	pttDeviceID string // PTT device; "" when deviceless or unset
-	pttMethod   pb.PttMethod
-	running     bool
-	rxDbfs      float32
-	txDbfs      float32
-	pttKeyed    bool
-	clockSync   bool
-	clockOff    float64
+	name         string
+	mode         string
+	deviceID     string // RX (capture) device
+	txDeviceID   string // TX (playback) device; "" == same as RX
+	pttDeviceID  string // PTT device; "" when deviceless or unset
+	pttMethod    pb.PttMethod
+	pttTxDelayMs uint32 // per-channel PTT keying lead-in
+	pttTxTailMs  uint32 // per-channel PTT keying tail/hold
+	running      bool
+	rxDbfs       float32
+	txDbfs       float32
+	pttKeyed     bool
+	clockSync    bool
+	clockOff     float64
+	rsidTx       bool   // prepend the mode's RSID burst before each TX
+	rsidRx       bool   // run the RSID detector over received audio
+	lastRsid     string // most recently identified RSID (tag @ freq), "" if none
 }
 
 // Model is the root window manager: it owns the client, the event stream, shared
@@ -111,7 +117,11 @@ func (m *Model) applyEvent(ev *pb.Event) {
 				name: ci.GetName(), mode: ci.GetMode(),
 				deviceID: ci.GetDeviceId(), running: ci.GetRunning(),
 				txDeviceID: ci.GetTxDeviceId(), pttDeviceID: ci.GetPttDeviceId(),
-				pttMethod: ci.GetPttMethod(),
+				pttMethod:    ci.GetPttMethod(),
+				pttTxDelayMs: ci.GetPttTxDelayMs(),
+				pttTxTailMs:  ci.GetPttTxTailMs(),
+				rsidTx:       ci.GetRsidTx(),
+				rsidRx:       ci.GetRsidRx(),
 			}
 		}
 	case *pb.Event_AudioLevel:
@@ -125,6 +135,15 @@ func (m *Model) applyEvent(ev *pb.Event) {
 		}
 	case *pb.Event_ChannelConfigured:
 		ensure(k.ChannelConfigured.GetChannel())
+	case *pb.Event_RsidDetected:
+		d := k.RsidDetected
+		label := d.GetTag()
+		if d.GetMode() != "" {
+			label = d.GetMode()
+		}
+		summary := fmt.Sprintf("%s @ %.0f Hz", label, d.GetFreqHz())
+		ensure(d.GetChannel()).lastRsid = summary
+		m.toast = ui.NewToast("RSID: "+summary, ui.SeverityInfo)
 	}
 }
 
@@ -199,14 +218,24 @@ func (m *Model) View() string {
 	v := m.top()
 	header := ui.Header(m.connected, m.addr, m.version, m.width)
 	footer := ui.Footer(v.Hints(), m.width)
-	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	// The toast is drawn as an extra line below the footer, so it eats into the
+	// body's height budget — otherwise a full-height view (e.g. the picture
+	// picker) plus a live toast renders taller than the terminal and scrolls the
+	// top off. Reserve its rows (the line plus the "\n" separator) up front.
+	var toastLine string
+	toastH := 0
+	if m.toast != nil {
+		toastLine = m.toast.Line()
+		toastH = lipgloss.Height(toastLine) + 1
+	}
+	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - toastH
 	if bodyH < 3 {
 		bodyH = 3
 	}
 	body := ui.Frame(v.Title(), v.Render(m.width-4, bodyH-2), true, m.width, bodyH)
 	out := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
-	if m.toast != nil {
-		out += "\n" + m.toast.Line()
+	if toastH > 0 {
+		out += "\n" + toastLine
 	}
 	return out
 }

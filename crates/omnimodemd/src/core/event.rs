@@ -7,15 +7,14 @@
 
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 
-/// A decoded raster payload. Mono modes (Hell, WEFAX) set `gray` (row-major 8-bit
-/// luminance, `gray.len() == width * rows`); colour modes (SSTV) set `rgb`
-/// (row-major 3 bytes/pixel R,G,B, `rgb.len() == width * rows * 3`). Exactly one
-/// is non-empty.
-#[derive(Debug, Clone, Default)]
+/// A decoded raster payload (Hell, WEFAX, picture sub-protocols): `pixels` is
+/// row-major 8-bit samples, `channels` interleaved values per pixel (1 =
+/// grayscale, 3 = RGB). `pixels.len() == width * rows * channels`.
+#[derive(Debug, Clone)]
 pub struct RxImage {
     pub width: u16,
-    pub gray: Vec<u8>,
-    pub rgb: Vec<u8>,
+    pub channels: u8,
+    pub pixels: Vec<u8>,
 }
 
 /// LOSSLESS class. Carried on a dedicated broadcast; a subscriber that lags is
@@ -56,6 +55,16 @@ pub enum TelemetryEvent {
         afc_offset_hz: f32,
         dcd: bool,
         last_decoder: Option<String>,
+    },
+    /// A received RSID burst was identified (lossy: advisory annotation). `tag`
+    /// is the fldigi RSID tag (always known); `mode` is the omnimodem mode string
+    /// (empty if unported); `freq_hz` is the detected audio offset.
+    RsidDetected {
+        channel: ChannelId,
+        tag: String,
+        mode: String,
+        freq_hz: f32,
+        extended: bool,
     },
     /// One waterfall line (lossy: a dropped line is invisible). `bins` is uint8
     /// dBFS over `[db_floor, db_ceiling]`, low→high frequency.

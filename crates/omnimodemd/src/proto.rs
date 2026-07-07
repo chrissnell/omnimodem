@@ -19,6 +19,8 @@ mod tests {
             name: "test".into(),
             mode: "none".into(),
             mode_params: None,
+            rsid_tx: false,
+            rsid_rx: false,
         };
         assert_eq!(req.name, "test");
 

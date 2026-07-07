@@ -9,10 +9,12 @@
 //! data modes.
 pub mod osc;
 pub mod fir;
+pub mod msk;
 pub mod multicarrier;
 pub mod ofdm;
 pub mod nco;
 pub mod resample;
+pub mod rsid;
 pub mod spectrum;
 pub mod stft;
 pub mod agc;

@@ -50,6 +50,8 @@ impl ModemControl for ControlService {
             id: ChannelId(req.channel),
             name: req.name,
             mode,
+            rsid_tx: req.rsid_tx,
+            rsid_rx: req.rsid_rx,
             reply: tx,
         })?;
         rx.await
@@ -79,6 +81,27 @@ impl ModemControl for ControlService {
             payload: req.payload,
             reply: tx,
         })?;
+        let transmit_id = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::TransmitResponse { transmit_id: transmit_id.0 }))
+    }
+
+    async fn transmit_image(
+        &self,
+        request: Request<proto::TransmitImageRequest>,
+    ) -> Result<Response<proto::TransmitResponse>, Status> {
+        let req = request.into_inner();
+        let send = crate::mode::picture_tx::PictureSend {
+            rgb: req.rgb,
+            width: req.width,
+            height: req.height,
+            color: req.color,
+            txspp: req.txspp as u8,
+        };
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::TransmitImage { channel: ChannelId(req.channel), send, reply: tx })?;
         let transmit_id = rx
             .await
             .map_err(|_| Status::unavailable("core dropped reply"))?
@@ -406,6 +429,22 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
                 None => mode,
             }
         }
+        Params::Navtex(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Wefax(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
         Params::Contestia(c) => {
             ModeConfig::Contestia { tones: c.tones as u16, bandwidth_hz: c.bandwidth_hz as u16 }
                 .to_mode_string()
@@ -418,9 +457,34 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
                 None => mode,
             }
         }
+        Params::Throb(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
         Params::Olivia(o) => {
             ModeConfig::Olivia { tones: o.tones as u16, bandwidth_hz: o.bandwidth_hz as u16 }
                 .to_mode_string()
+        }
+        Params::Ifkp(p) => {
+            // A known speed encodes canonically; an unknown one falls back to the
+            // bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.speed, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Fsq(p) => {
+            match ModeConfig::parse(&format!(
+                "{}:center={},mycall={},directed={}",
+                p.speed, p.center_hz, p.mycall, p.directed
+            )) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
         }
         Params::Afsk1200(a) => ModeConfig::Afsk1200 { tx: a.tx }.to_mode_string(),
     }
@@ -488,5 +552,32 @@ mod tests {
             })),
         };
         assert_eq!(effective_mode("ignored".into(), Some(mp)), "thor16:center=1500");
+    }
+
+    #[test]
+    fn effective_mode_encodes_ifkp_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Ifkp(proto::IfkpParams {
+                speed: "ifkp-slow".into(),
+                center_hz: 1500.0,
+            })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "ifkp-slow:center=1500");
+    }
+
+    #[test]
+    fn effective_mode_encodes_fsq_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Fsq(proto::FsqParams {
+                speed: "fsq".into(),
+                center_hz: 1500.0,
+                mycall: "k1abc".into(),
+                directed: true,
+            })),
+        };
+        assert_eq!(
+            effective_mode("ignored".into(), Some(mp)),
+            "fsq:center=1500,mycall=k1abc,directed=true"
+        );
     }
 }

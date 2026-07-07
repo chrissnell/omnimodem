@@ -8,6 +8,8 @@ pub enum CoreError {
     UnknownChannel(ChannelId),
     #[error("unknown or unsupported mode: {0:?}")]
     UnknownMode(String),
+    #[error("picture transmit not possible: {0}")]
+    Picture(String),
     #[error("persistence error: {0}")]
     Persist(String),
     #[error("audio error: {0}")]

@@ -70,12 +70,16 @@ impl Supervisor {
         id: ChannelId,
         name: String,
         mode: String,
+        rsid_tx: bool,
+        rsid_rx: bool,
     ) -> Result<(), crate::persist::StoreError> {
         let cfg = match self.channels.get(&id) {
             Some(state) => {
                 let mut cfg = state.config.clone();
                 cfg.name = name;
                 cfg.mode = mode;
+                cfg.rsid_tx = rsid_tx;
+                cfg.rsid_rx = rsid_rx;
                 cfg
             }
             None => ChannelConfig {
@@ -88,6 +92,8 @@ impl Supervisor {
                 tx_device_id: DeviceId::placeholder(),
                 tx_sample_rate: 0,
                 ptt: None,
+                rsid_tx,
+                rsid_rx,
             },
         };
         self.store.upsert_channel(&cfg)?;
@@ -148,6 +154,25 @@ impl Supervisor {
             .unwrap_or(crate::mode::ModeConfig::None)
     }
 
+    /// A channel's RSID enable flags `(tx, rx)`. Unknown channels ⇒ `(false, false)`.
+    pub fn channel_rsid(&self, id: ChannelId) -> (bool, bool) {
+        self.channels
+            .get(&id)
+            .map(|s| (s.config.rsid_tx, s.config.rsid_rx))
+            .unwrap_or((false, false))
+    }
+
+    /// Per-channel PTT keying timing `(tx_delay_ms, tx_tail_ms)`. Channels with
+    /// no PTT binding report `(0, 0)` — they never key a hardware line, so the
+    /// values are inert.
+    pub fn channel_ptt_timing(&self, id: ChannelId) -> (u32, u32) {
+        self.channels
+            .get(&id)
+            .and_then(|s| s.config.ptt.as_ref())
+            .map(|p| (p.tx_delay_ms, p.tx_tail_ms))
+            .unwrap_or((0, 0))
+    }
+
     /// A cloneable handle to the per-rig RX/TX interlock.
     pub fn interlock(&self) -> RxTxInterlock {
         self.interlock.clone()
@@ -186,7 +211,7 @@ mod tests {
     #[test]
     fn configure_then_snapshot_reflects_channel() {
         let mut sup = supervisor();
-        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into())
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into(), false, false)
             .unwrap();
 
         let snap = sup.snapshot();
@@ -199,9 +224,9 @@ mod tests {
     #[test]
     fn reconfigure_updates_in_place() {
         let mut sup = supervisor();
-        sup.configure_channel(ChannelId(0), "first".into(), "none".into())
+        sup.configure_channel(ChannelId(0), "first".into(), "none".into(), false, false)
             .unwrap();
-        sup.configure_channel(ChannelId(0), "second".into(), "none".into())
+        sup.configure_channel(ChannelId(0), "second".into(), "none".into(), false, false)
             .unwrap();
 
         let snap = sup.snapshot();
@@ -214,7 +239,7 @@ mod tests {
         // A mode/name change must not drop the operator's RX/TX/PTT device
         // choices — only identity and mode may change.
         let mut sup = supervisor();
-        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into())
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into(), false, false)
             .unwrap();
         sup.configure_audio(
             ChannelId(0),
@@ -230,13 +255,13 @@ mod tests {
             PttConfig {
                 device_id: DeviceId::AlsaCard { card_name: "Rig".into() },
                 method: crate::ptt::registry::PttMethod::None,
-                invert: false,
+                invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
             },
         )
         .unwrap();
 
         // Reconfigure name + mode; bindings must survive.
-        sup.configure_channel(ChannelId(0), "vfo-a".into(), "rtty".into())
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "rtty".into(), false, false)
             .unwrap();
 
         let snap = sup.snapshot();
@@ -251,7 +276,7 @@ mod tests {
     #[test]
     fn configure_audio_then_ptt_binds() {
         let mut sup = supervisor();
-        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into())
+        sup.configure_channel(ChannelId(0), "vfo-a".into(), "none".into(), false, false)
             .unwrap();
         sup.configure_audio(
             ChannelId(0),
@@ -267,7 +292,7 @@ mod tests {
             PttConfig {
                 device_id: DeviceId::AlsaCard { card_name: "Device".into() },
                 method: crate::ptt::registry::PttMethod::None,
-                invert: false,
+                invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
             },
         )
         .unwrap();
@@ -291,6 +316,8 @@ mod tests {
                 tx_device_id: crate::ids::DeviceId::placeholder(),
                 tx_sample_rate: 0,
                 ptt: None,
+                rsid_tx: false,
+                rsid_rx: false,
             })
             .unwrap();
         let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();

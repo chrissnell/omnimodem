@@ -64,6 +64,24 @@ func TestConfigArrowsTraverseFields(t *testing.T) {
 	}
 }
 
+// Focus/Tab order must follow the on-screen top-to-bottom layout: the AUDIO
+// block ends with PTT Method -> TX Delay -> TX Tail, then the RSID section.
+// Guards against the enum drifting out of render order (a zig-zagging cursor).
+func TestConfigFocusOrderMatchesLayout(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	v.focus = fMethod
+	for _, want := range []cfgFocus{fTxDelay, fTxTail, fRsidTx, fRsidRx} {
+		v.Update(tea.KeyMsg{Type: tea.KeyDown})
+		if v.focus != want {
+			t.Fatalf("focus order broke: got %d, want %d", v.focus, want)
+		}
+	}
+	if fLast != fRsidRx {
+		t.Fatalf("fLast should be the last rendered field (fRsidRx), got %d", fLast)
+	}
+}
+
 // The Grid field exists and edits the operator's station locator (uppercased).
 func TestConfigGridFieldSetsStationGrid(t *testing.T) {
 	// Editing identity can trigger persistIdentity; keep the write off the real
@@ -149,6 +167,7 @@ func TestConfigPreloadsPersistedConfig(t *testing.T) {
 		name: "20m-rtty", mode: "rtty",
 		deviceID: "alsa:Mic", txDeviceID: "alsa:Speakers",
 		pttDeviceID: "serial:rig", pttMethod: pb.PttMethod_PTT_METHOD_SERIAL_RTS,
+		pttTxDelayMs: 275, pttTxTailMs: 35,
 	}
 	v := newConfigView(m)
 	if v.name.Value() != "20m-rtty" {
@@ -162,6 +181,40 @@ func TestConfigPreloadsPersistedConfig(t *testing.T) {
 	}
 	if v.method() != pb.PttMethod_PTT_METHOD_SERIAL_RTS {
 		t.Fatalf("ptt method not preloaded: %v", v.method())
+	}
+	if v.txDelay.Value() != "275" || v.txTail.Value() != "35" {
+		t.Fatalf("ptt timing not preloaded: delay=%q tail=%q", v.txDelay.Value(), v.txTail.Value())
+	}
+}
+
+// The per-channel TX delay / TX tail entered in the form must reach the
+// ConfigurePtt RPC so the daemon persists and applies them.
+func TestConfigPttTimingReachesConfigurePtt(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.txDelay.SetValue("420")
+	v.txTail.SetValue("15")
+	v.persistAll()()
+	if len(f.PttCalls) != 1 {
+		t.Fatalf("want one ConfigurePtt, got %d", len(f.PttCalls))
+	}
+	if got := f.PttCalls[0]; got.GetTxDelayMs() != 420 || got.GetTxTailMs() != 15 {
+		t.Fatalf("ptt timing must reach the RPC: delay=%d tail=%d", got.GetTxDelayMs(), got.GetTxTailMs())
+	}
+}
+
+// A fresh channel (no saved state) opens with the sensible default timing so an
+// operator who never touches the fields still gets a working lead-in.
+func TestConfigDefaultPttTiming(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	if v.txDelay.Value() != "300" || v.txTail.Value() != "50" {
+		t.Fatalf("default timing wrong: delay=%q tail=%q", v.txDelay.Value(), v.txTail.Value())
 	}
 }
 

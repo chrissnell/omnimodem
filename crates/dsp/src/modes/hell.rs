@@ -359,7 +359,7 @@ impl HellDemod {
             gray[i] = if on { 255 } else { 0 };
         }
         Some(Frame {
-            payload: FramePayload::Image { width: COLUMN_ROWS as u16, gray },
+            payload: FramePayload::Image { width: COLUMN_ROWS as u16, channels: 1, pixels: gray },
             meta: FrameMeta { crc_ok: true, decoder: Some("hell".into()), ..Default::default() },
         })
     }
@@ -460,7 +460,7 @@ mod tests {
         let frames = rx.flush();
         assert_eq!(frames.len(), 1, "{} should emit one raster", v.label());
         match &frames[0].payload {
-            FramePayload::Image { width, gray } => image_columns(*width, gray),
+            FramePayload::Image { width, pixels, .. } => image_columns(*width, pixels),
             _ => panic!("expected Image payload"),
         }
     }

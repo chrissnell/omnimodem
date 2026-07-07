@@ -22,6 +22,12 @@ service ModemControl {
   // accepted onto the channel's TX queue, not when it leaves the air.
   rpc Transmit(TransmitRequest) returns (TransmitResponse);
 
+  // Transmit an image on a channel using the channel's configured picture-capable
+  // mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+  // and keys the rig. Returns once accepted onto the TX queue (same contract as
+  // Transmit). The symmetric partner of the typed RxFrame.image on receive.
+  rpc TransmitImage(TransmitImageRequest) returns (TransmitResponse);
+
   // Subscribe to the event stream. The first message is always a snapshot
   // (Event.snapshot) reflecting state at subscription time; live events follow.
   rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
@@ -79,6 +85,13 @@ message ConfigureChannelRequest {
   // When present, its oneof variant selects the mode and its values; `mode` is
   // then ignored. Absent ⇒ the `mode` string is used as-is (backward compatible).
   ModeParams mode_params = 4;
+  // RSID (Reed-Solomon Identifier). When set, the daemon prepends the active
+  // mode's RSID burst ahead of each transmission (`rsid_tx`) and/or runs an RSID
+  // detector over the received audio, surfacing matches as RsidDetected events
+  // (`rsid_rx`). Both default off; proto3 scalars have no presence, so a client
+  // that reconfigures a channel should resend the current values.
+  bool rsid_tx = 5;
+  bool rsid_rx = 6;
 }
 
 // Typed per-mode parameters. The set oneof variant selects the mode.
@@ -96,6 +109,11 @@ message ModeParams {
     ContestiaParams contestia = 10;
     ThorParams thor = 11;
     Mt63Params mt63 = 12;
+    IfkpParams ifkp = 13;
+    FsqParams fsq = 14;
+    NavtexParams navtex = 15;
+    WefaxParams wefax = 16;
+    ThrobParams throb = 17;
   }
 }
 
@@ -174,8 +192,49 @@ message Mt63Params {
   float  center_hz = 2; // audio center frequency
 }
 
+// The fldigi IFKP family (ifkp / ifkp-slow / ifkp-fast). 33-tone IFK MFSK with
+// the self-framing IFKP Varicode. `speed` is the mode label; `center_hz` the
+// audio carrier.
+message IfkpParams {
+  string speed = 1;     // ifkp::IfkpSpeed label, e.g. "ifkp-slow"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi FSQ / FSQCALL family (fsq-1.5 / fsq-2 / fsq / fsq-4.5 / fsq-6).
+// 33-tone IFK with a CRC8-keyed directed protocol. `speed` is the mode label;
+// `center_hz` the audio carrier; `mycall` the operator callsign in the directed
+// header; `directed` whether to send the CRC8 directed header + selective-call
+// framing (off ⇒ raw keyboard mode).
+message FsqParams {
+  string speed = 1;     // fsq::FsqSpeed label, e.g. "fsq" (= fsq-3)
+  float  center_hz = 2; // audio center frequency
+  string mycall = 3;    // operator callsign for the directed header
+  bool   directed = 4;  // append the CRC8 directed header + FSQEOT framing
+}
+
+// NAVTEX / SITOR-B: 100-baud FSK maritime broadcast text with CCIR-476 FEC-B.
+message NavtexParams {
+  string submode = 1;   // navtex::NavtexVariant label ("navtex" | "sitorb")
+  float  center_hz = 2; // audio center frequency (default 1000 Hz)
+}
+
+// WEFAX: HF weather facsimile at IOC 576/288. A raster mode — RX emits an
+// Image, not text (see the Image message on RxFrame).
+message WefaxParams {
+  string submode = 1;   // wefax::WefaxVariant label ("wefax576" | "wefax288")
+  float  center_hz = 2; // audio carrier frequency (default 1900 Hz)
+}
+
 message Afsk1200Params {
   bool tx = 1;          // enable the transmit modulator
+}
+
+// The fldigi Throb family (throb1/2/4, throbx1/2/4). Dual-tone MFSK at 8 kHz:
+// each character sounds a pair of tones under a pulse envelope. `submode` is the
+// mode label; `center_hz` the audio carrier.
+message ThrobParams {
+  string submode = 1;   // throb::ThrobVariant label, e.g. "throb2"
+  float  center_hz = 2; // audio center frequency
 }
 
 message ConfigureChannelResponse {
@@ -191,6 +250,19 @@ message TransmitRequest {
 
 message TransmitResponse {
   uint64 transmit_id = 1; // monotonically increasing per process
+}
+
+// Transmit a raster image over the channel's configured picture mode. `rgb` is
+// row-major interleaved RGB (`R,G,B,…`, `width*height*3` bytes). MFSK carries an
+// explicit W×H so any size is valid; THOR/IFKP/FSQ select from a fixed size
+// table, so (width,height[,colour for FSQ]) must match one of the mode's sizes.
+message TransmitImageRequest {
+  uint32 channel = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  bytes  rgb = 4;       // row-major interleaved RGB, width*height*3 bytes
+  bool   color = 5;     // send colour (3 planes) vs grayscale (luma)
+  uint32 txspp = 6;     // MFSK samples-per-pixel: 8 (default) / 4 / 2; 0 ⇒ 8
 }
 
 message SubscribeRequest {}
@@ -212,6 +284,10 @@ message ChannelInfo {
   string tx_device_id = 6;     // TX (playback) device; empty == same as RX
   string ptt_device_id = 7;    // PTT device; empty when deviceless (None/Vox) or unset
   PttMethod ptt_method = 8;    // configured PTT method (UNSPECIFIED if unset)
+  bool rsid_tx = 9;            // prepend the mode's RSID burst before each TX
+  bool rsid_rx = 10;           // run the RSID detector over received audio
+  uint32 ptt_tx_delay_ms = 11; // per-channel PTT keying lead-in (ms)
+  uint32 ptt_tx_tail_ms = 12;  // per-channel PTT keying tail/hold (ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +309,18 @@ message Event {
     ClockOffset clock_offset = 11;      // LOSSY
     ChannelMetrics channel_metrics = 12; // LOSSY
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
+    RsidDetected rsid_detected = 14;     // LOSSY class
   }
+}
+
+// A received RSID burst was identified. LOSSY class — advisory, the operator
+// (or a client auto-switch) acts on the identified mode + audio offset.
+message RsidDetected {
+  uint32 channel   = 1;
+  string tag       = 2;   // fldigi RSID tag, always known (e.g. "MFSK16")
+  string mode      = 3;   // omnimodem mode string, empty if the mode is unported
+  float  freq_hz   = 4;   // detected audio offset of the burst
+  bool   extended  = 5;   // true: from the extended (ESCAPE-prefixed) table
 }
 
 // One waterfall line: a magnitude spectrum over the channel's audio passband.
@@ -281,15 +368,18 @@ message RxFrame {
   Image image = 4;   // set for raster modes; `data` empty when this is present
 }
 
-// A decoded raster. `gray` is row-major 8-bit luminance, `gray.len() == width *
-// rows` (rows = gray.len() / width). Designed against Hell's continuous column
-// stream — each successive `width`-byte row is one on-air column (14 rows tall)
-// — and reused by WEFAX (Phase 12) and the picture sub-protocols (Phase 15),
-// which append rows/columns incrementally.
+// A decoded raster. `pixels` is row-major 8-bit samples, `channels` interleaved
+// values per pixel: 1 = grayscale luminance, 3 = RGB (`R,G,B,R,G,B,…`).
+// `pixels.len() == width * rows * channels` (rows = pixels.len()/(width*channels)).
+// Designed against Hell's continuous column stream — each successive
+// `width*channels`-byte row is one on-air column — and reused by WEFAX
+// (Phase 12) and the picture sub-protocols (Phase 15, which carry colour),
+// appended incrementally. `channels` defaults to 0 on the wire for older
+// grayscale producers; readers treat 0 as 1.
 message Image {
-  uint32 width = 1;  // pixels per row (Hell: 14, the column height)
-  bytes  gray = 2;   // row-major 8-bit luminance (mono modes: Hell, WEFAX)
-  bytes  rgb  = 3;   // row-major 3-bytes-per-pixel R,G,B (colour modes: SSTV). Exactly one of gray/rgb is set.
+  uint32 width = 1;     // pixels per row (Hell: 14, the column height)
+  bytes  pixels = 2;    // row-major 8-bit samples, `channels` per pixel
+  uint32 channels = 3;  // 1 = grayscale, 3 = RGB interleaved (0 ⇒ 1)
 }
 
 message AudioLevel {
@@ -352,6 +442,13 @@ message ConfigurePttRequest {
   string node = 4;            // resolved node / chip path (serial/cm108/gpio)
   uint32 pin_or_line = 5;     // cm108 GPIO pin (1-8) or gpiochip line offset
   bool invert = 6;
+  // Per-channel PTT keying timing. TX delay is a keyed-but-silent lead-in
+  // before audio starts (lets the rig's PTT close); TX tail holds the key
+  // asserted after audio drains before releasing. Both apply to every mode
+  // on this channel. A full ConfigurePtt replaces the binding, so clients
+  // should always send the current values (0 is a valid explicit setting).
+  uint32 tx_delay_ms = 7;
+  uint32 tx_tail_ms = 8;
 }
 
 message ConfigurePttResponse {}
