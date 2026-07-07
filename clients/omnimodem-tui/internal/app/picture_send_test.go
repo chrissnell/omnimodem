@@ -34,7 +34,7 @@ func TestBuildPictureSendWefax576(t *testing.T) {
 	}
 	// 2000x1500 (4:3) capped to 280 rows → ~373 wide; aspect within a pixel.
 	got := float64(ps.width) / float64(ps.height)
-	if want := 2000.0 / 1500.0; got < want-0.05 || got > want+0.05 {
+	if want := 2000.0 / 1500.0; got < want-0.01 || got > want+0.01 {
 		t.Fatalf("aspect %.3f, want ~%.3f", got, want)
 	}
 	if ps.txSecs <= 0 {

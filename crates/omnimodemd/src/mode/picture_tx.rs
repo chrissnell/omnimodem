@@ -87,7 +87,7 @@ pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<(Vec<f32>, u32), Pi
                 .ok_or_else(bad_size)?;
             Ok((fsq_pic::build_tx(s, *center_hz, mycall, mode, &send.rgb), fsq_pic::SAMPLE_RATE as u32))
         }
-        ModeConfig::Wefax { submode, .. } => {
+        ModeConfig::Wefax { submode, center_hz } => {
             use omnimodem_dsp::mode::Modulator;
             use omnimodem_dsp::modes::wefax;
             use omnimodem_dsp::types::{Frame, FramePayload};
@@ -109,7 +109,7 @@ pub fn build(cfg: &ModeConfig, send: &PictureSend) -> Result<(Vec<f32>, u32), Pi
                 },
                 meta: Default::default(),
             };
-            let audio = wefax::WefaxMod::new(v, wefax::CARRIER_HZ)
+            let audio = wefax::WefaxMod::new(v, *center_hz)
                 .modulate(&frame)
                 .map_err(|e| PictureError::Modulate(e.to_string()))?;
             Ok((audio, wefax::WEFAX_RATE))
@@ -201,6 +201,15 @@ mod tests {
             build(&cfg, &send(200, 8, false)),
             build(&cfg, &send(200, 8, true)),
             "wefax ignores the colour flag"
+        );
+        // The configured carrier must reach the modulator (not a hardcoded
+        // default), matching the streaming TX/RX path; a retuned centre shifts
+        // the whole facsimile, so the audio must differ.
+        let retuned = ModeConfig::Wefax { submode: "wefax576".into(), center_hz: 1500.0 };
+        assert_ne!(
+            build(&cfg, &send(64, 32, false)).unwrap().0,
+            build(&retuned, &send(64, 32, false)).unwrap().0,
+            "wefax picture must honour the channel's center_hz"
         );
     }
 
