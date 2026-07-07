@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
@@ -512,4 +513,47 @@ func modeParamsFor(label string, vals map[string]float64) *pb.ModeParams {
 	default:
 		return nil // ft8/ft4/jt65/jt9/wspr: no params
 	}
+}
+
+// modeStringFor builds the ConfigureChannel `mode` string for a mode. Most modes
+// carry their settings in a typed ModeParams message and just need the bare
+// label here; but FST4, JS8, and MSK144 have no typed proto message — the daemon
+// reads their extra parameters from the mode string's `:key=value` tail
+// (ModeConfig::parse), so this appends that tail from the settings-form values.
+// vals is the form's raw string values (SettingsForm.Values()).
+func modeStringFor(label string, vals map[string]string) string {
+	pick := func(k, d string) string {
+		if v, ok := vals[k]; ok && v != "" {
+			return v
+		}
+		return d
+	}
+	switch label {
+	case "fst4":
+		return "fst4:tr=" + pick("tr", "15")
+	case "js8":
+		return "js8:sub=" + pick("sub", "normal")
+	case "msk144":
+		return "msk144:freq=" + pick("freq", "1500")
+	default:
+		return label
+	}
+}
+
+// modeStringParam reads a numeric key from a mode string's `:key=value` tail
+// (e.g. modeStringParam("fst4:tr=300", "tr", 15) == 300), returning def when the
+// mode has no tail or the key is absent/unparseable.
+func modeStringParam(mode, key string, def float64) float64 {
+	_, tail, ok := strings.Cut(mode, ":")
+	if !ok {
+		return def
+	}
+	for _, kv := range strings.Split(tail, ",") {
+		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				return f
+			}
+		}
+	}
+	return def
 }

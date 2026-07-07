@@ -45,6 +45,31 @@ auto-apply pipeline all work off `modeFields`/`modeParamsFor` with no further
 wiring. Modes with no tunable settings return an empty slice and the Settings row
 reads "no settings".
 
+### Modes without a typed ModeParams message
+
+A few modes (FST4, JS8, MSK144) have no typed `ModeParams` oneof variant yet, but
+the daemon still accepts their extra parameters through the **mode string's
+`:key=value` tail** (`ModeConfig::parse` in `crates/omnimodemd/src/mode/mod.rs` —
+e.g. `fst4:tr=300`, `js8:sub=fast`, `msk144:freq=1200`). For these, declare their
+`modeFields` as usual and add a case to `modeStringFor` (`modes.go`) that appends
+the tail from the form values; `persistAll` sends that as `ConfigureChannel.mode`.
+`effective_mode` on the daemon ignores the mode string whenever typed
+`mode_params` is present, so this path is only used when `modeParamsFor` returns
+`nil`. If a mode's parameter also drives on-air timing (FST4's T/R period feeds
+the operate slot clock + TX watchdog), parse it back with `modeStringParam` where
+that timing is read — see `newOperateView`. Prefer a typed message for new modes;
+the tail is the lightweight path when the proto/daemon aren't being touched.
+
+### Coverage
+
+As of this writing the TUI exposes every parameter `ModeConfig::parse` accepts:
+submode (via the family/mode selector) + center for the fldigi families, CW
+wpm/tone, RTTY baud/shift/center/reverse, Olivia tones/bw, AFSK1200 tx, FSQ
+directed, FST4 T/R, JS8 speed, and MSK144 center. Anything beyond that (e.g.
+fldigi's RTTY bits/parity/stop-bits or CW Farnsworth/weight) is **not settable
+because the daemon's `ModeConfig` doesn't model it** — adding those is
+DSP+daemon+proto work, not a TUI-only change.
+
 ## Mode families (cascading selector)
 
 The Configure screen picks a mode with two cascading rows instead of one long

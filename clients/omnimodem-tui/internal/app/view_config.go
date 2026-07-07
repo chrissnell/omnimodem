@@ -387,9 +387,12 @@ func (v *configView) persistAll() tea.Cmd {
 		f.Mycall = v.m.myCall
 	}
 	chReq := &pb.ConfigureChannelRequest{
-		Channel:    ch,
-		Name:       v.name.Value(),
-		Mode:       v.modeLabel(),
+		Channel: ch,
+		Name:    v.name.Value(),
+		// Most modes carry their settings in the typed ModeParams; FST4/JS8/MSK144
+		// have no typed message, so their params ride the mode string's tail (the
+		// daemon ignores the string when ModeParams is set, so this is safe for all).
+		Mode:       modeStringFor(v.modeLabel(), v.settings.Values()),
 		ModeParams: mp,
 		RsidTx:     v.rsidTx,
 		RsidRx:     v.rsidRx,

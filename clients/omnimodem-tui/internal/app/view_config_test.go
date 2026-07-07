@@ -678,3 +678,123 @@ func TestConfigAutoAppliesOnFamilyChange(t *testing.T) {
 		t.Fatalf("family change must auto-apply ConfigureChannel, got %d", len(f.ChannelCalls))
 	}
 }
+
+// modeStringFor: the mode-string tail is only appended for the modes with no
+// typed ModeParams message (FST4/JS8/MSK144); everything else stays a bare label.
+func TestModeStringForTailModes(t *testing.T) {
+	cases := map[string]struct {
+		vals map[string]string
+		want string
+	}{
+		"fst4":   {map[string]string{"tr": "300"}, "fst4:tr=300"},
+		"js8":    {map[string]string{"sub": "fast"}, "js8:sub=fast"},
+		"msk144": {map[string]string{"freq": "1200"}, "msk144:freq=1200"},
+	}
+	for label, c := range cases {
+		if got := modeStringFor(label, c.vals); got != c.want {
+			t.Fatalf("modeStringFor(%q) = %q, want %q", label, got, c.want)
+		}
+	}
+	// A bare label with no tail params (default via empty vals) still round-trips.
+	if got := modeStringFor("fst4", nil); got != "fst4:tr=15" {
+		t.Fatalf("fst4 default tail = %q, want fst4:tr=15", got)
+	}
+	// Modes that use typed ModeParams keep the bare label.
+	for _, label := range []string{"psk31", "ft8", "cw", "fsq"} {
+		if got := modeStringFor(label, map[string]string{"center": "1500"}); got != label {
+			t.Fatalf("modeStringFor(%q) must stay bare, got %q", label, got)
+		}
+	}
+}
+
+// modeStringParam extracts a numeric tail key, falling back to the default.
+func TestModeStringParam(t *testing.T) {
+	if got := modeStringParam("fst4:tr=300", "tr", 15); got != 300 {
+		t.Fatalf("tr parse = %v, want 300", got)
+	}
+	if got := modeStringParam("fst4", "tr", 15); got != 15 {
+		t.Fatalf("missing tail must return default, got %v", got)
+	}
+	if got := modeStringParam("msk144:freq=1200,x=1", "freq", 1500); got != 1200 {
+		t.Fatalf("freq parse = %v, want 1200", got)
+	}
+}
+
+// Each daemon-tunable mode must expose an editable field for its extra param:
+// FSQ 'directed', JS8 speed, FST4 T/R, MSK144 center.
+func TestModeFieldsCoverDaemonParams(t *testing.T) {
+	hasKey := func(label, key string) bool {
+		for _, f := range modeFields(label) {
+			if f.Key == key {
+				return true
+			}
+		}
+		return false
+	}
+	for _, tc := range []struct{ label, key string }{
+		{"fsq", "directed"}, {"fsq", "center"},
+		{"js8", "sub"}, {"fst4", "tr"}, {"msk144", "freq"},
+	} {
+		if !hasKey(tc.label, tc.key) {
+			t.Fatalf("mode %q must expose a %q settings field", tc.label, tc.key)
+		}
+	}
+}
+
+// The FSQ directed toggle must reach ConfigureChannel as a typed FsqParams flag.
+func TestConfigFsqDirectedReachesRPC(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	// Seed the session cache so the settings form opens with directed on.
+	m.modeParams[0] = savedModeParams{label: "fsq", vals: map[string]float64{"center": 1500, "directed": 1}}
+	m.live[0] = &chanLive{name: "fsq-net", mode: "fsq", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	if v.modeLabel() != "fsq" {
+		t.Fatalf("expected fsq preloaded, got %q", v.modeLabel())
+	}
+	v.persistAll()()
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("want one ConfigureChannel, got %d", len(f.ChannelCalls))
+	}
+	fp := f.ChannelCalls[0].GetModeParams().GetFsq()
+	if fp == nil || !fp.GetDirected() {
+		t.Fatalf("FSQ directed flag must reach the RPC, got %+v", f.ChannelCalls[0].GetModeParams())
+	}
+}
+
+// MSK144's audio center must reach ConfigureChannel as a mode-string tail (it has
+// no typed ModeParams message).
+func TestConfigMsk144CenterReachesModeString(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	m.modeParams[0] = savedModeParams{label: "msk144", vals: map[string]float64{"freq": 1200}}
+	m.live[0] = &chanLive{name: "ms", mode: "msk144", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	v.persistAll()()
+	if len(f.ChannelCalls) != 1 || f.ChannelCalls[0].GetMode() != "msk144:freq=1200" {
+		t.Fatalf("MSK144 center must ride the mode string, got mode=%q", f.ChannelCalls[0].GetMode())
+	}
+}
+
+// FST4's T/R period must reach ConfigureChannel via the mode string AND drive the
+// operate view's slot clock, so the TX watchdog matches the chosen sequence.
+func TestFst4TrReachesModeStringAndSlotClock(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	m.modeParams[0] = savedModeParams{label: "fst4", vals: map[string]float64{"tr": 300}}
+	m.live[0] = &chanLive{name: "lf", mode: "fst4", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	v.persistAll()()
+	if f.ChannelCalls[0].GetMode() != "fst4:tr=300" {
+		t.Fatalf("FST4 T/R must ride the mode string, got %q", f.ChannelCalls[0].GetMode())
+	}
+	// The operate view, opened on the persisted mode string, must adopt the period.
+	m.live[0].mode = "fst4:tr=300"
+	ov := newOperateView(m)
+	if ov.slotSecs != 300 {
+		t.Fatalf("operate slot clock must reflect the FST4 T/R period, got %v", ov.slotSecs)
+	}
+}

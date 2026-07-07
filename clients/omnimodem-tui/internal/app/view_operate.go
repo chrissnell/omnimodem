@@ -70,6 +70,12 @@ func newOperateView(m *Model) *operateView {
 		v.modeLabel = baseModeLabel(cl.mode)
 		if mi := modeByLabel(cl.mode); mi != nil {
 			v.slotSecs = mi.slotSecs
+			// FST4's T/R period is operator-selectable and carried in the mode
+			// string's tail; honour it so the slot clock and TX watchdog match the
+			// configured sequence length rather than the table's 15 s default.
+			if mi.label == "fst4" {
+				v.slotSecs = modeStringParam(cl.mode, "tr", mi.slotSecs)
+			}
 			switch mi.shape {
 			case "sequencer":
 				v.seq = newFT8Seq(v.myCall, v.myGrid)
