@@ -3,7 +3,7 @@
     "upstream": "js8call/js8call @ a7ff1be",
     "files": ["jsc.cpp", "jsc_map.cpp", "jsc_list.cpp", "varicode.cpp"],
     "cmd": "g++ -O0 jsc_map.o jsc_list.o dumper.cpp -o dumper && ./dumper",
-    "note": "JSC codec golden vectors. 'compressed' is the concatenated bit stream (MSB-first per 4-bit group). 'decompressed' is decompress(compressed). Tables are verbatim from the reference; algorithm transcribed from jsc.cpp (Qt-free)."
+    "note": "JSC codec golden vectors. 'compressed' is the concatenated bit stream (MSB-first per 4-bit group). 'decompressed' is decompress(compressed). Confirmed bit-exact against the real Qt JSC::compress/decompress (scratch/refvectors/js8/jscqt/jsc_qt_dump.cpp); tables verbatim from the reference."
   },
   "vectors": [
     {"text": "HELLO WORLD", "nchars": 11, "nbits": 38, "compressed": "01111000101110000101101111011100101000", "decompressed": "HELLO WORLD"},
