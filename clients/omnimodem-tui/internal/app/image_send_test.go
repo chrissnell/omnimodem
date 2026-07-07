@@ -33,16 +33,21 @@ func writeTestPNG(t *testing.T, path string) {
 	}
 }
 
-func imageOperateView(t *testing.T, f client.ModemClient) *operateView {
+func imageOperateViewMode(t *testing.T, f client.ModemClient, mode string) *operateView {
 	t.Helper()
 	m := New(f, "x")
-	m.live[0] = &chanLive{mode: "feldhell"} // an image-shape (facsimile) mode
+	m.live[0] = &chanLive{mode: mode} // an image-shape (facsimile) mode
 	m.sel = 0
 	v := newOperateView(m)
 	if v.raster == nil {
-		t.Fatal("feldhell should build the image/raster surface")
+		t.Fatalf("%s should build the image/raster surface", mode)
 	}
 	return v
+}
+
+func imageOperateView(t *testing.T, f client.ModemClient) *operateView {
+	t.Helper()
+	return imageOperateViewMode(t, f, "feldhell")
 }
 
 // The daemon reports a channel's mode as its full descriptor
@@ -79,14 +84,15 @@ func TestImageModeOpensPicker(t *testing.T) {
 }
 
 // Selecting a file stages it (with a decoded preview) and closes the picker;
-// pressing enter then transmits the raw image bytes over the mode.
+// pressing enter on a WEFAX channel then sends it through TransmitImage as a
+// downsampled raster — NOT the text Transmit RPC that the modulator rejects.
 func TestImageStageAndTransmit(t *testing.T) {
 	dir := t.TempDir()
 	pngPath := filepath.Join(dir, "pic.png")
 	writeTestPNG(t, pngPath)
 
 	f := &client.Fake{}
-	v := imageOperateView(t, f)
+	v := imageOperateViewMode(t, f, "wefax576")
 
 	v.stageImage(pngPath)
 	if v.staged == nil {
@@ -95,17 +101,13 @@ func TestImageStageAndTransmit(t *testing.T) {
 	if v.staged.img == nil {
 		t.Fatal("staged image should decode for preview")
 	}
-	raw, _ := os.ReadFile(pngPath)
-	if len(v.staged.bytes) != len(raw) {
-		t.Fatalf("staged bytes = %d, want the file's %d", len(v.staged.bytes), len(raw))
-	}
 
 	// The operate surface previews the staged picture before TX.
 	if out := v.Render(100, 24); !strings.Contains(out, "Ready to send") || !strings.Contains(out, "pic.png") {
 		t.Fatalf("staged preview should show the picture name:\n%s", out)
 	}
 
-	// Enter transmits: lease → Transmit(image bytes).
+	// Enter transmits: lease → TransmitImage(raster).
 	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
 		cmd()
 	}
@@ -115,11 +117,73 @@ func TestImageStageAndTransmit(t *testing.T) {
 	if _, cmd := v.Update(leaseMsg{&pb.TxLeaseResponse{Granted: true}}); cmd != nil {
 		cmd()
 	}
-	if len(f.TransmitCalls) != 1 {
-		t.Fatalf("expected one Transmit call, got %d", len(f.TransmitCalls))
+	if len(f.TransmitCalls) != 0 {
+		t.Fatalf("a picture must not go through the text Transmit RPC, got %d calls", len(f.TransmitCalls))
 	}
-	if got := len(f.TransmitCalls[0].Payload); got != len(raw) {
-		t.Fatalf("transmitted %d bytes, want the image's %d", got, len(raw))
+	if len(f.TransmitImageCalls) != 1 {
+		t.Fatalf("expected one TransmitImage call, got %d", len(f.TransmitImageCalls))
+	}
+	req := f.TransmitImageCalls[0]
+	if req.Width == 0 || req.Height == 0 {
+		t.Fatalf("TransmitImage dims must be non-zero, got %dx%d", req.Width, req.Height)
+	}
+	if req.Color {
+		t.Fatal("wefax is grayscale; color flag should be false")
+	}
+	if want := int(req.Width) * int(req.Height) * 3; len(req.Rgb) != want {
+		t.Fatalf("rgb length = %d, want width*height*3 = %d", len(req.Rgb), want)
+	}
+}
+
+// An SSTV channel (e.g. MC180-N) transmits the staged picture through the colour
+// TransmitImage path, not the text Transmit RPC.
+func TestSstvImageStageAndTransmit(t *testing.T) {
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "pic.png")
+	writeTestPNG(t, pngPath)
+
+	f := &client.Fake{}
+	v := imageOperateViewMode(t, f, "mc180-n")
+
+	v.stageImage(pngPath)
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		cmd()
+	}
+	if _, cmd := v.Update(leaseMsg{&pb.TxLeaseResponse{Granted: true}}); cmd != nil {
+		cmd()
+	}
+	if len(f.TransmitCalls) != 0 {
+		t.Fatalf("SSTV picture must not use the text Transmit RPC, got %d calls", len(f.TransmitCalls))
+	}
+	if len(f.TransmitImageCalls) != 1 {
+		t.Fatalf("expected one TransmitImage call, got %d", len(f.TransmitImageCalls))
+	}
+	if !f.TransmitImageCalls[0].Color {
+		t.Fatal("SSTV is a colour mode; color flag should be true")
+	}
+}
+
+// On a mode the daemon can't carry a picture (the Hell text-raster modes), enter
+// surfaces a clear message instead of silently doing nothing (or sending garbage).
+func TestImageSendUnsupportedModeToasts(t *testing.T) {
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "pic.png")
+	writeTestPNG(t, pngPath)
+
+	f := &client.Fake{}
+	v := imageOperateViewMode(t, f, "feldhell")
+	v.stageImage(pngPath)
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		cmd()
+	}
+	if v.tx.active() {
+		t.Fatal("feldhell can't send a picture; TX should not start")
+	}
+	if len(f.TransmitImageCalls) != 0 || len(f.TransmitCalls) != 0 {
+		t.Fatal("no transmit RPC should fire for an unsupported picture mode")
+	}
+	if v.m.toast == nil {
+		t.Fatal("an unsupported picture mode should surface a toast")
 	}
 }
 
@@ -130,7 +194,7 @@ func TestImageStagedClearsAfterTransmit(t *testing.T) {
 	pngPath := filepath.Join(dir, "pic.png")
 	writeTestPNG(t, pngPath)
 
-	v := imageOperateView(t, &client.Fake{})
+	v := imageOperateViewMode(t, &client.Fake{}, "wefax576")
 	v.stageImage(pngPath)
 	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
 		cmd()
