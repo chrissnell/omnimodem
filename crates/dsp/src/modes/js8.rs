@@ -15,7 +15,18 @@
 //! ref: js8call/lib/js8/genjs8.f90 (tone assembly + Costas), JS8Submode.cpp +
 //! commons.h + lib/js8/js8{a,b,c,e,i}_params.f90 (submode grid).
 
-use crate::fec::ldpc_js8::encode174;
+use crate::fec::ldpc_js8::{encode174, extract_message, js8_174_87_code};
+use crate::fec::llr::demap_fsk_identity;
+use crate::fec::osd::osd_decode;
+use crate::framing::js8_message::{pack_msgbits, unpack_msgbits};
+use crate::frontend::modulate::Gfsk;
+use crate::mode::{BlockDemodulator, DemodShape, Duplex, ModError, ModeCaps, Modulator};
+use crate::types::{Frame, FrameMeta, FramePayload, Sample};
+
+/// Default audio sub-carrier (tone-0 frequency) for TX.
+pub const JS8_BASE_HZ: f32 = 1500.0;
+/// LDPC codeword length.
+const N174: usize = 174;
 
 /// Sample rate (all submodes). ref: commons.h `JS8_RX_SAMPLE_RATE`.
 pub const JS8_RATE: u32 = 12_000;
@@ -105,6 +116,247 @@ pub fn js8_symbols(msgbits: &[u8; 87], submode: Js8Submode) -> [u8; JS8_NSYM] {
     itone
 }
 
+// ---------------------------------------------------------------------------
+// Transmit
+// ---------------------------------------------------------------------------
+
+/// JS8 modulator for one submode. Accepts a `Text` payload (a ≤12-char message
+/// over the JS8 alphabet), packs it (base 87-bit frame), builds the 79 tones,
+/// and shapes them with GFSK at the submode's rate.
+pub struct Js8Mod {
+    submode: Js8Submode,
+    base_hz: f32,
+    /// Frame type carried in the message (`i3bit`). Defaults to `FrameData`.
+    i3bit: u8,
+}
+
+impl Js8Mod {
+    pub fn new(submode: Js8Submode) -> Self {
+        Js8Mod { submode, base_hz: JS8_BASE_HZ, i3bit: 4 }
+    }
+    pub fn with_base(submode: Js8Submode, base_hz: f32) -> Self {
+        Js8Mod { submode, base_hz, i3bit: 4 }
+    }
+}
+
+fn js8_caps(submode: Js8Submode, tx: bool) -> ModeCaps {
+    let p = submode.params();
+    ModeCaps {
+        native_rate: JS8_RATE,
+        bandwidth_hz: (8.0 * p.tone_spacing) as f32,
+        tx,
+        duplex: Duplex::Half,
+        shape: DemodShape::Windowed { window_s: p.tx_seconds as f32, period_s: p.tx_seconds as f32 },
+    }
+}
+
+impl Modulator for Js8Mod {
+    fn caps(&self) -> ModeCaps {
+        js8_caps(self.submode, true)
+    }
+
+    fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
+        let text = match &frame.payload {
+            FramePayload::Text(t) => t.clone(),
+            _ => return Err(ModError::UnsupportedPayload("js8 needs text")),
+        };
+        let msgbits = pack_msgbits(&text, self.i3bit);
+        let syms = js8_symbols(&msgbits, self.submode);
+        let sym_u32: Vec<u32> = syms.iter().map(|&s| s as u32).collect();
+        let p = self.submode.params();
+        let gfsk = Gfsk::new(JS8_RATE as f32, p.nsps, self.base_hz, p.tone_spacing as f32, 2.0);
+        Ok(gfsk.modulate(&sym_u32))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Receive
+// ---------------------------------------------------------------------------
+
+/// Single-bin power via Goertzel over `x` at frequency `f`. JS8 tones (spaced
+/// `12000/nsps` over an `nsps`-sample symbol at 12 kHz) are exactly orthogonal,
+/// so a rectangular window is optimal.
+fn goertzel(x: &[Sample], f: f32, rate: f32) -> f32 {
+    let w = std::f32::consts::TAU * f / rate;
+    let coeff = 2.0 * w.cos();
+    let (mut s1, mut s2) = (0.0f32, 0.0f32);
+    for &v in x {
+        let s0 = coeff * s1 - s2 + v;
+        s2 = s1;
+        s1 = s0;
+    }
+    (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(0.0)
+}
+
+#[inline]
+fn is_costas_symbol(s: usize) -> bool {
+    JS8_COSTAS_STARTS.iter().any(|&start| (start..start + 7).contains(&s))
+}
+
+/// Block (windowed) JS8 demodulator for one submode.
+pub struct Js8Demod {
+    submode: Js8Submode,
+    f_lo: f32,
+    f_hi: f32,
+    max_decodes: usize,
+}
+
+impl Js8Demod {
+    pub fn new(submode: Js8Submode) -> Self {
+        Js8Demod { submode, f_lo: 200.0, f_hi: 3000.0, max_decodes: 16 }
+    }
+    pub fn window_s(&self) -> f32 {
+        self.submode.params().tx_seconds as f32
+    }
+
+    fn slot_step(&self) -> usize {
+        self.submode.params().nsps / 2 // 2 slots/symbol
+    }
+
+    /// Tone-energy spectrogram `S[slot][bin]`: bin `b` = power at
+    /// `f_lo + b*spacing`; slot `j` covers a symbol starting at `j*slot_step`.
+    fn spectrogram(&self, window: &[Sample]) -> (Vec<Vec<f32>>, usize) {
+        let rate = JS8_RATE as f32;
+        let p = self.submode.params();
+        let spacing = p.tone_spacing as f32;
+        let nsps = p.nsps;
+        let nbins = (((self.f_hi - self.f_lo) / spacing).floor() as usize) + 1;
+        let step = nsps / 2;
+        let mut s = Vec::new();
+        let mut start = 0usize;
+        while start + nsps <= window.len() {
+            let seg = &window[start..start + nsps];
+            let row: Vec<f32> =
+                (0..nbins).map(|b| goertzel(seg, self.f_lo + b as f32 * spacing, rate)).collect();
+            s.push(row);
+            start += step;
+        }
+        (s, nbins)
+    }
+
+    /// The 79×8 tone-energy matrix at a given base bin / start slot.
+    fn energy_at(spec: &[Vec<f32>], f_bin: usize, t_slot: usize) -> Vec<[f32; 8]> {
+        let mut e = vec![[0.0f32; 8]; JS8_NSYM];
+        for (t, row) in e.iter_mut().enumerate() {
+            let slot = t_slot + 2 * t;
+            if slot < spec.len() {
+                for (k, cell) in row.iter_mut().enumerate() {
+                    *cell = spec[slot][f_bin + k];
+                }
+            }
+        }
+        e
+    }
+}
+
+/// Sync metric: summed energy at the three Costas groups' tones (per-group
+/// arrays support the symmetrical variant). `energy[t][k]`.
+fn sync_metric(energy: &[[f32; 8]], costas: &[[u8; 7]; 3]) -> f32 {
+    let mut sum = 0.0f32;
+    for (g, &start) in JS8_COSTAS_STARTS.iter().enumerate() {
+        for (i, &tone) in costas[g].iter().enumerate() {
+            sum += energy[start + i][tone as usize];
+        }
+    }
+    sum
+}
+
+impl BlockDemodulator for Js8Demod {
+    fn caps(&self) -> ModeCaps {
+        js8_caps(self.submode, false)
+    }
+
+    fn decode_window(&mut self, window: &[Sample], _window_start_ns: u64) -> Vec<Frame> {
+        let (spec, nbins) = self.spectrogram(window);
+        if spec.len() < 2 * (JS8_NSYM - 1) + 1 {
+            return Vec::new();
+        }
+        let code = js8_174_87_code();
+        let costas = self.submode.costas();
+        let spacing = self.submode.params().tone_spacing as f32;
+
+        // Score every (base bin, start slot) by the Costas sync metric.
+        let max_slot = spec.len().saturating_sub(2 * (JS8_NSYM - 1) + 1);
+        let max_bin = nbins.saturating_sub(8);
+        let mut peaks: Vec<(usize, usize, f32)> = Vec::with_capacity(max_bin.max(1) * (max_slot + 1));
+        for f_bin in 0..max_bin {
+            for t_slot in 0..=max_slot {
+                let e = Js8Demod::energy_at(&spec, f_bin, t_slot);
+                peaks.push((f_bin, t_slot, sync_metric(&e, &costas)));
+            }
+        }
+        peaks.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut tried: Vec<(isize, isize)> = Vec::new();
+        let mut attempts = 0usize;
+        for (f_bin, t_slot, _m) in peaks {
+            if out.len() >= self.max_decodes || attempts >= 200 {
+                break;
+            }
+            let key = (f_bin as isize, t_slot as isize);
+            if tried.iter().any(|&(fb, ts)| (fb - key.0).abs() <= 1 && (ts - key.1).abs() <= 1) {
+                continue;
+            }
+            tried.push(key);
+            attempts += 1;
+
+            let e = Js8Demod::energy_at(&spec, f_bin, t_slot);
+            let (mut sum, mut cnt) = (0.0f64, 0usize);
+            for row in &e {
+                for &v in row {
+                    sum += v as f64;
+                    cnt += 1;
+                }
+            }
+            let noise_var = ((sum / cnt.max(1) as f64) as f32).max(f32::MIN_POSITIVE);
+
+            // Demap the 58 data symbols (skip the 21 Costas symbols) → 174 LLRs,
+            // plain-binary (identity) tone→symbol map.
+            let mut llrs: Vec<f32> = Vec::with_capacity(N174);
+            for (s, tones) in e.iter().enumerate() {
+                if is_costas_symbol(s) {
+                    continue;
+                }
+                llrs.extend(demap_fsk_identity(tones, noise_var));
+            }
+            if llrs.len() != N174 {
+                continue;
+            }
+
+            let (mut cw, perr) = code.decode_minsum(&llrs, 30);
+            if perr != 0 {
+                match osd_decode(&code, &llrs, 2) {
+                    Some(better) => cw = better,
+                    None => continue,
+                }
+            }
+            let msgbits = extract_message(&cw);
+            let (text, _i3) = match unpack_msgbits(&msgbits) {
+                Some(v) => v,
+                None => continue,
+            };
+            if text.is_empty() || !seen.insert(text.clone()) {
+                continue;
+            }
+            let base_hz = self.f_lo + f_bin as f32 * spacing;
+            out.push(Frame {
+                payload: FramePayload::Text(text),
+                meta: FrameMeta {
+                    crc_ok: true,
+                    freq_offset_hz: Some(base_hz),
+                    time_offset_s: Some(t_slot as f32 * self.slot_step() as f32 / JS8_RATE as f32),
+                    decoder: Some("js8".into()),
+                    sample_offset: (t_slot * self.slot_step()) as u64,
+                    ..Default::default()
+                },
+            });
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +409,77 @@ mod tests {
         assert_eq!(&fast[0..7], &JS8_COSTAS_SYM_A);
         assert_eq!(&fast[36..43], &JS8_COSTAS_SYM_B);
         assert_eq!(&fast[72..79], &JS8_COSTAS_SYM_C);
+    }
+
+    /// End-to-end loopback: modulate a message to GFSK audio and recover it
+    /// through the full RX chain (spectrogram → JS8 Costas sync → plain-binary
+    /// soft demap → LDPC(174,87) BP+OSD → CRC-12 → unpack). Proves the waveform,
+    /// sync, demod, decode, and pack/unpack agree.
+    #[test]
+    fn loopback_normal() {
+        // 12-char message over the JS8 alphabet (no padding ambiguity).
+        let msg = "K1ABCFN42000";
+        let wave = Js8Mod::new(Js8Submode::Normal).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(wave.len(), JS8_NSYM * Js8Submode::Normal.params().nsps);
+        // Pad to a full window as the daemon would present it.
+        let win_len = (JS8_RATE as f32 * Js8Submode::Normal.params().tx_seconds as f32) as usize;
+        let mut win = vec![0.0f32; win_len.max(wave.len())];
+        win[..wave.len()].copy_from_slice(&wave);
+        let decodes = Js8Demod::new(Js8Submode::Normal).decode_window(&win, 0);
+        let texts: Vec<String> = decodes
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == msg), "JS8 loopback failed; got {texts:?}");
+    }
+
+    fn loopback_ok(submode: Js8Submode, msg: &str, noise: Option<f32>) -> bool {
+        let wave = Js8Mod::new(submode).modulate(&Frame::text(msg)).unwrap();
+        let win_len = (JS8_RATE as f32 * submode.params().tx_seconds as f32) as usize;
+        let mut win = vec![0.0f32; win_len.max(wave.len())];
+        win[..wave.len()].copy_from_slice(&wave);
+        if let Some(sigma) = noise {
+            use crate::testutil::{add_awgn, Rng};
+            let mut rng = Rng::new(20260707);
+            add_awgn(&mut win, sigma, &mut rng);
+        }
+        Js8Demod::new(submode)
+            .decode_window(&win, 0)
+            .iter()
+            .any(|f| matches!(&f.payload, FramePayload::Text(t) if t == msg))
+    }
+
+    /// Loopback through the **Fast** submode exercises the symmetrical Costas
+    /// arrays and the parametric spectrogram (nsps=1200, spacing=10 Hz).
+    #[test]
+    fn loopback_fast() {
+        assert!(loopback_ok(Js8Submode::Fast, "TESTFAST0000", None), "Fast loopback failed");
+    }
+
+    /// Loopback survives AWGN.
+    #[test]
+    fn loopback_under_awgn() {
+        assert!(loopback_ok(Js8Submode::Normal, "K1ABCFN42000", Some(0.1)), "AWGN loopback failed");
+    }
+
+    /// Loopback survives an audio subcarrier offset.
+    #[test]
+    fn loopback_offset_subcarrier() {
+        let msg = "CQCQCQ000000";
+        let wave = Js8Mod::with_base(Js8Submode::Normal, 1200.0)
+            .modulate(&Frame::text(msg))
+            .unwrap();
+        let win_len = (JS8_RATE as f32 * 15.0) as usize;
+        let mut win = vec![0.0f32; win_len];
+        win[..wave.len()].copy_from_slice(&wave);
+        let decodes = Js8Demod::new(Js8Submode::Normal).decode_window(&win, 0);
+        assert!(
+            decodes.iter().any(|f| matches!(&f.payload, FramePayload::Text(t) if t == msg)),
+            "offset loopback failed"
+        );
     }
 
     /// Submode grid matches the reference constants (`JS8Submode.cpp`).

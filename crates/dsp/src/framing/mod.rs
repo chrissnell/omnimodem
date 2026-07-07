@@ -13,6 +13,7 @@
 //! map honest.
 pub mod varicode;
 pub mod jsc;
+pub mod js8_message;
 pub mod dominoex_varicode;
 pub mod thor_varicode;
 pub mod ifkp_varicode;
