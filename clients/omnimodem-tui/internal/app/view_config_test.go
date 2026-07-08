@@ -121,7 +121,7 @@ func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {
 
 	// Enter opens the picker over the focused (TX) field.
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !v.picking {
+	if !v.pickerOpen() {
 		t.Fatal("enter on a device field must open the picker modal")
 	}
 	if out := v.Render(80, 20); !strings.Contains(out, "TX device") || !strings.Contains(out, "Speaker") {
@@ -130,7 +130,7 @@ func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {
 
 	// Enter again chooses the highlighted device and closes the modal.
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if v.picking {
+	if v.pickerOpen() {
 		t.Fatal("choosing a device must close the picker modal")
 	}
 	if v.txID != "usb:tx" {
@@ -148,8 +148,8 @@ func TestConfigDevicePickerEscCancels(t *testing.T) {
 	v := newConfigView(m)
 	v.setDevices([]*pb.DeviceInfo{devItem("usb:tx", "Speaker", false, true)})
 	v.focus = fTx
-	v.picking = true
-	if _, _ = v.Update(tea.KeyMsg{Type: tea.KeyEsc}); v.picking {
+	v.picker = pickDevice
+	if _, _ = v.Update(tea.KeyMsg{Type: tea.KeyEsc}); v.pickerOpen() {
 		t.Fatal("esc must close the picker modal")
 	}
 	if v.txID != "" {
@@ -815,18 +815,18 @@ func TestConfigDevicePickerNavFilterCapability(t *testing.T) {
 	v.focus = fRx
 
 	// RX picker must exclude the playback-only device.
-	for _, d := range v.pickerDevices() {
+	for _, d := range v.capabilityDevices() {
 		if d.id == "spk:only" {
 			t.Fatalf("RX picker must exclude playback-only devices")
 		}
 	}
-	if len(v.pickerDevices()) != 3 {
-		t.Fatalf("RX picker should show 3 capture devices, got %d", len(v.pickerDevices()))
+	if len(v.capabilityDevices()) != 3 {
+		t.Fatalf("RX picker should show 3 capture devices, got %d", len(v.capabilityDevices()))
 	}
 
 	// Open and navigate.
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !v.picking {
+	if !v.pickerOpen() || v.picker != pickDevice {
 		t.Fatal("enter must open the device picker")
 	}
 	v.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -834,7 +834,7 @@ func TestConfigDevicePickerNavFilterCapability(t *testing.T) {
 		t.Fatalf("down must advance the cursor, got %d", v.pickIdx)
 	}
 
-	// Filter to "line" → only Line In remains.
+	// Filter to "line" → only Line In remains (id column carries the device id).
 	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 	if !v.filtering {
 		t.Fatal("'/' must start filtering")
@@ -842,7 +842,7 @@ func TestConfigDevicePickerNavFilterCapability(t *testing.T) {
 	for _, r := range "line" {
 		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	if got := v.pickerDevices(); len(got) != 1 || got[0].id != "hw:cap" {
+	if got := v.pickerRows(); len(got) != 1 || got[0].cells[1] != "hw:cap" {
 		t.Fatalf("filter must narrow to Line In, got %+v", got)
 	}
 
@@ -855,7 +855,7 @@ func TestConfigDevicePickerNavFilterCapability(t *testing.T) {
 	if v.rxID != "hw:cap" {
 		t.Fatalf("enter must choose the highlighted filtered device, got %q", v.rxID)
 	}
-	if v.picking {
+	if v.pickerOpen() {
 		t.Fatal("choosing must close the picker")
 	}
 }
@@ -873,5 +873,85 @@ func TestConfigRendersSectionCards(t *testing.T) {
 	}
 	if !strings.Contains(out, "╭") {
 		t.Fatalf("config screen must use rounded card borders:\n%s", out)
+	}
+}
+
+// Enter on the Family field opens the family picker (homed on the current
+// family); choosing one switches family, homes the mode on the family's first
+// submode, and auto-applies.
+func TestConfigFamilyPickerModal(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+	v.focus = fFamily
+
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.picker != pickFamily {
+		t.Fatal("enter on Family must open the family picker")
+	}
+	if v.pickIdx != v.familyIdx {
+		t.Fatalf("family picker must home on the current family, idx=%d family=%d", v.pickIdx, v.familyIdx)
+	}
+
+	// Filter to Throb and choose it.
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "throb" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // leave filter typing
+	if rows := v.pickerRows(); len(rows) != 1 || rows[0].cells[0] != "Throb" {
+		t.Fatalf("filter should narrow to Throb, got %+v", rows)
+	}
+	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose
+	if v.pickerOpen() {
+		t.Fatal("choosing must close the picker")
+	}
+	if v.familyName() != "Throb" {
+		t.Fatalf("family must switch to Throb, got %q", v.familyName())
+	}
+	if v.modeIdx != families[v.familyIdx].modes[0] {
+		t.Fatal("mode must home on the first submode of the chosen family")
+	}
+	if cmd != nil {
+		cmd()
+	}
+	if len(f.ChannelCalls) == 0 {
+		t.Fatal("choosing a family must auto-apply the mode change")
+	}
+}
+
+// Enter on the Mode field opens the mode picker scoped to the current family;
+// choosing a submode selects it.
+func TestConfigModePickerModal(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.modeIdx = modeIdxByLabel("scottie1")
+	v.familyIdx = familyIdxOfMode(v.modeIdx)
+	v.focus = fMode
+
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.picker != pickMode {
+		t.Fatal("enter on Mode must open the mode picker")
+	}
+	// Every row must belong to the current (SSTV) family.
+	if v.familyName() != "SSTV" {
+		t.Fatalf("mode picker should be scoped to SSTV, got %q", v.familyName())
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "martin2" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // leave filter
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose
+	if v.modeLabel() != "martin2" {
+		t.Fatalf("mode must switch to martin2, got %q", v.modeLabel())
+	}
+	if v.pickerOpen() {
+		t.Fatal("choosing must close the mode picker")
 	}
 }

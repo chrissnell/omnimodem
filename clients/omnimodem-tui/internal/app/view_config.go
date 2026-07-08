@@ -19,6 +19,27 @@ type devEntry struct {
 	capture, playback bool
 }
 
+// pickerKind is which pop-up chooser is open over the Configure form. All three
+// share one scrolling, filterable table modal; they differ only in the rows they
+// list and what choosing one does.
+type pickerKind int
+
+const (
+	pickNone pickerKind = iota
+	pickDevice
+	pickFamily
+	pickMode
+)
+
+// pickerRow is one selectable line in a picker modal: the table cells to show,
+// the lowercased text the '/' filter matches against, and the action to run when
+// it's chosen.
+type pickerRow struct {
+	cells  []string
+	match  string
+	choose func(v *configView)
+}
+
 // PTT methods offered in the picker.
 var pttMethods = []pb.PttMethod{
 	pb.PttMethod_PTT_METHOD_VOX,
@@ -74,7 +95,8 @@ type configView struct {
 	modeIdx   int              // index into `modes`; the specific submode within that family
 	settings  *ui.SettingsForm // the current mode's editable settings
 	devs      []devEntry       // all enumerated devices (capability-flagged)
-	pickIdx   int              // highlighted row in the open device picker
+	picker    pickerKind       // which pop-up picker is open (pickNone = closed)
+	pickIdx   int              // highlighted row in the open picker
 	filter    textinput.Model  // '/' substring filter over the picker
 	filtering bool             // the picker's filter input has focus
 	rxID      string
@@ -86,7 +108,6 @@ type configView struct {
 	txDelay   textinput.Model
 	txTail    textinput.Model
 	focus     cfgFocus
-	picking   bool   // a device-picker modal is open over the form
 	editing   bool   // the mode-settings modal is open over the form
 	saved     cfgSig // last state CONFIRMED persisted to the daemon
 	applying  bool   // a save pipeline is in flight (serializes auto-apply)
@@ -264,11 +285,10 @@ func (v *configView) setDevices(devs []*pb.DeviceInfo) {
 	}
 }
 
-// pickerDevices is the device list shown for the field being picked: filtered by
-// the field's required capability (RX→capture, TX→playback, PTT→any) and by the
-// active '/' filter text (matched against label and id).
-func (v *configView) pickerDevices() []devEntry {
-	q := strings.ToLower(strings.TrimSpace(v.filter.Value()))
+// capabilityDevices is the device list for the focused field, filtered only by
+// the field's required capability (RX→capture, TX→playback, PTT→any). The '/'
+// text filter is applied generically on top by pickerRows.
+func (v *configView) capabilityDevices() []devEntry {
 	out := make([]devEntry, 0, len(v.devs))
 	for _, d := range v.devs {
 		switch v.focus {
@@ -281,30 +301,134 @@ func (v *configView) pickerDevices() []devEntry {
 				continue
 			}
 		}
-		if q != "" && !strings.Contains(strings.ToLower(d.label+" "+d.id), q) {
-			continue
-		}
 		out = append(out, d)
 	}
 	return out
 }
 
-// pickerLabel titles the open device-picker modal for the focused field.
-func (v *configView) pickerLabel() string {
+// pickerAllRows builds the full (text-unfiltered) row set for the open picker,
+// dispatching on its kind. Each row carries its display cells and the action that
+// applies it when chosen.
+func (v *configView) pickerAllRows() []pickerRow {
+	var rows []pickerRow
+	switch v.picker {
+	case pickDevice:
+		for _, d := range v.capabilityDevices() {
+			d := d
+			rows = append(rows, pickerRow{
+				cells:  []string{d.label, d.id, ioFlags(d)},
+				match:  strings.ToLower(d.label + " " + d.id),
+				choose: func(v *configView) { v.setDevice(d.id) },
+			})
+		}
+	case pickFamily:
+		for i := range families {
+			i := i
+			fam := families[i]
+			noun := "modes"
+			if len(fam.modes) == 1 {
+				noun = "mode"
+			}
+			rows = append(rows, pickerRow{
+				cells:  []string{fam.name, fmt.Sprintf("%d %s", len(fam.modes), noun)},
+				match:  strings.ToLower(fam.name),
+				choose: func(v *configView) { v.selectFamily(i) },
+			})
+		}
+	case pickMode:
+		for _, mi := range families[v.familyIdx].modes {
+			mi := mi
+			rows = append(rows, pickerRow{
+				cells:  []string{modes[mi].label},
+				match:  strings.ToLower(modes[mi].label),
+				choose: func(v *configView) { v.selectMode(mi) },
+			})
+		}
+	}
+	return rows
+}
+
+// pickerRows is the open picker's currently-visible rows: pickerAllRows narrowed
+// by the active '/' filter text (matched against each row's match string).
+func (v *configView) pickerRows() []pickerRow {
+	all := v.pickerAllRows()
+	q := strings.ToLower(strings.TrimSpace(v.filter.Value()))
+	if q == "" {
+		return all
+	}
+	out := make([]pickerRow, 0, len(all))
+	for _, r := range all {
+		if strings.Contains(r.match, q) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// setDevice records a chosen device id into the focused device field.
+func (v *configView) setDevice(id string) {
 	switch v.focus {
+	case fRx:
+		v.rxID = id
 	case fTx:
-		return "TX device (playback)"
+		v.txID = id
 	case fPtt:
-		return "PTT device"
+		v.pttID = id
+	}
+}
+
+// selectFamily switches to family i and homes the mode on its first submode.
+func (v *configView) selectFamily(i int) {
+	v.familyIdx = i
+	v.modeIdx = families[i].modes[0]
+	v.rebuildSettings()
+}
+
+// selectMode selects submode modeIdx within the current family.
+func (v *configView) selectMode(modeIdx int) {
+	v.modeIdx = modeIdx
+	v.rebuildSettings()
+}
+
+// pickerTitle titles the open picker modal.
+func (v *configView) pickerTitle() string {
+	switch v.picker {
+	case pickFamily:
+		return "Mode family"
+	case pickMode:
+		return "Mode — " + v.familyName()
 	default:
-		return "RX device (capture)"
+		switch v.focus {
+		case fTx:
+			return "TX device (playback)"
+		case fPtt:
+			return "PTT device"
+		default:
+			return "RX device (capture)"
+		}
+	}
+}
+
+// pickerColumns sizes the open picker's table columns to a target modal width w.
+func (v *configView) pickerColumns(w int) []ui.Column {
+	switch v.picker {
+	case pickFamily:
+		return []ui.Column{{Title: "FAMILY", Width: clampInt(w-16, 18, 22)}, {Title: "MODES", Width: 9}}
+	case pickMode:
+		return []ui.Column{{Title: "MODE", Width: clampInt(w-6, 22, 28)}}
+	default: // device
+		ioW := 5
+		avail := clampInt(w-14, 24, 56)
+		nameW := clampInt(avail*3/5, 12, 40)
+		idW := clampInt(avail-nameW, 10, 30)
+		return []ui.Column{{Title: "DEVICE", Width: nameW}, {Title: "ID", Width: idW}, {Title: "I/O", Width: ioW}}
 	}
 }
 
 // clampPick keeps the picker cursor within the current (possibly filtered) row
 // set, e.g. after typing narrows the list under the cursor.
 func (v *configView) clampPick() {
-	if n := len(v.pickerDevices()); v.pickIdx >= n {
+	if n := len(v.pickerRows()); v.pickIdx >= n {
 		v.pickIdx = n - 1
 	}
 	if v.pickIdx < 0 {
@@ -515,9 +639,10 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 			}
 			return v, cmd
 		}
-		// A device-picker modal is open: it captures all keys. Enter records the
-		// highlighted device and closes; esc cancels; '/' opens a substring filter.
-		if v.picking {
+		// A picker modal is open (device, family, or mode): it captures all keys.
+		// Enter records the highlighted row and closes; esc cancels; '/' opens a
+		// substring filter.
+		if v.picker != pickNone {
 			// While the filter input has focus, keys type into it. Esc clears and
 			// blurs it; enter applies it and returns to row navigation.
 			if v.filtering {
@@ -553,14 +678,14 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 				}
 				return v, nil
 			case "down", "j":
-				if v.pickIdx < len(v.pickerDevices())-1 {
+				if v.pickIdx < len(v.pickerRows())-1 {
 					v.pickIdx++
 				}
 				return v, nil
 			case "enter", " ":
 				v.choose()
 				v.closePicker()
-				return v, v.maybePersist() // auto-apply the device choice
+				return v, v.maybePersist() // auto-apply the choice (mode/device change)
 			}
 			return v, nil
 		}
@@ -654,30 +779,45 @@ func (v *configView) Update(msg tea.Msg) (View, tea.Cmd) {
 	return v, nil
 }
 
-// openPicker opens the device picker over the focused device field, resetting
-// the filter and homing the cursor on the currently-chosen device (if any).
-func (v *configView) openPicker() {
-	v.picking = true
+// openPicker opens a picker modal of the given kind, resetting the filter and
+// homing the cursor on the currently-selected row (device / family / mode).
+func (v *configView) openPicker(kind pickerKind) {
+	v.picker = kind
 	v.filtering = false
 	v.filter.SetValue("")
 	v.filter.Blur()
-	cur := v.currentDeviceID()
-	v.pickIdx = 0
-	for i, d := range v.pickerDevices() {
-		if d.id == cur {
-			v.pickIdx = i
-			break
-		}
-	}
+	v.pickIdx = v.pickerCurrentIndex()
 }
 
-// closePicker dismisses the device picker and clears its transient filter state.
+// pickerCurrentIndex is the row index of the value already selected for the open
+// picker, so the cursor opens on it rather than at the top.
+func (v *configView) pickerCurrentIndex() int {
+	switch v.picker {
+	case pickFamily:
+		return v.familyIdx
+	case pickMode:
+		return familyModePos(families[v.familyIdx], v.modeIdx)
+	default: // device
+		cur := v.currentDeviceID()
+		for i, d := range v.capabilityDevices() {
+			if d.id == cur {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+// closePicker dismisses the open picker and clears its transient filter state.
 func (v *configView) closePicker() {
-	v.picking = false
+	v.picker = pickNone
 	v.filtering = false
 	v.filter.SetValue("")
 	v.filter.Blur()
 }
+
+// pickerOpen reports whether any picker modal is currently open.
+func (v *configView) pickerOpen() bool { return v.picker != pickNone }
 
 // currentDeviceID is the id already chosen for the focused device field.
 func (v *configView) currentDeviceID() string {
@@ -736,12 +876,17 @@ func (v *configView) cycle(d int) {
 	}
 }
 
-// commit reacts to Enter on the focused field: open the device picker on a
-// device field. Mode/method use ←/→, not Enter; other fields ignore Enter.
+// commit reacts to Enter on the focused field: open the matching pop-up picker
+// (family, mode, or device), or the settings editor. Selectors also accept ←/→
+// as a quick in-place cycle; PTT method / RSID toggles have no modal.
 func (v *configView) commit() (View, tea.Cmd) {
 	switch v.focus {
+	case fFamily:
+		v.openPicker(pickFamily)
+	case fMode:
+		v.openPicker(pickMode)
 	case fRx, fTx, fPtt:
-		v.openPicker()
+		v.openPicker(pickDevice)
 	case fSettings:
 		// Open the mode-settings editor, unless the mode has nothing to tune.
 		if v.settings != nil && v.settings.HasFields() {
@@ -757,21 +902,14 @@ func (v *configView) commit() (View, tea.Cmd) {
 	return v, nil
 }
 
-// choose records the highlighted device in the open picker into the chosen id.
+// choose applies the highlighted row of the open picker (sets the device, or
+// switches family/mode) via that row's choose action.
 func (v *configView) choose() {
-	rows := v.pickerDevices()
+	rows := v.pickerRows()
 	if v.pickIdx < 0 || v.pickIdx >= len(rows) {
 		return
 	}
-	id := rows[v.pickIdx].id
-	switch v.focus {
-	case fRx:
-		v.rxID = id
-	case fTx:
-		v.txID = id
-	case fPtt:
-		v.pttID = id
-	}
+	rows[v.pickIdx].choose(v)
 }
 
 func (v *configView) Render(w, h int) string {
@@ -808,39 +946,35 @@ func (v *configView) Render(w, h int) string {
 		box := ui.Modal(v.modeLabel()+" settings", inner, modalW)
 		return body + "\n" + centerModal(box, w)
 	}
-	// The device picker is a modal: it appears only while a device field is being
-	// chosen, and disappears once a device is selected (or the pick is cancelled).
-	if v.picking {
+	// A picker modal (family, mode, or device) overlays the form while open, and
+	// disappears once a row is chosen or the pick is cancelled.
+	if v.pickerOpen() {
 		return body + "\n" + centerModal(v.pickerModal(w, h), w)
 	}
 	return body
 }
 
-// pickerModal renders the device picker as a focused Card: a borderless table of
-// the candidate devices with the cursor row highlighted, an optional filter line,
-// and a hint footer. Using a Card (not a second bordered box around the table)
-// keeps the dialog to a single rounded frame, consistent with the form's cards.
+// pickerModal renders the open picker as a focused Card: a borderless, scrolling
+// table of the candidate rows with the cursor highlighted, an optional filter
+// line, and a hint footer. Using a Card (not a second bordered box around the
+// table) keeps the dialog to a single rounded frame, consistent with the form's
+// cards. The same modal serves the family, mode, and device pickers.
 func (v *configView) pickerModal(w, h int) string {
-	rows := v.pickerDevices()
-	// Column budget: the label takes the largest share, the id the rest, a slim
-	// I/O flag column — sized to a modal a bit narrower than the screen.
-	ioW := 5
-	avail := clampInt(w-14, 24, 56) // combined name+id content budget
-	nameW := clampInt(avail*3/5, 12, 40)
-	idW := clampInt(avail-nameW, 10, 30)
-	cols := []ui.Column{{Title: "DEVICE", Width: nameW}, {Title: "ID", Width: idW}, {Title: "I/O", Width: ioW}}
+	cols := v.pickerColumns(w)
+	rows := v.pickerRows()
 
 	var body string
 	if len(rows) == 0 {
-		body = ui.Dim.Render("(no matching devices)")
+		body = ui.Dim.Render("(no matches)")
 	} else {
-		// Window the rows around the cursor so a long device list can't grow the
-		// dialog past the screen; a dim counter shows there's more off-window.
+		// Window the rows around the cursor so a long list (all modes, every
+		// family) can't grow the dialog past the screen; a dim counter shows
+		// there's more off-window.
 		maxRows := clampInt(h-16, 4, 12)
 		start, end := pickWindow(v.pickIdx, len(rows), maxRows)
 		data := make([][]string, 0, end-start)
-		for _, d := range rows[start:end] {
-			data = append(data, []string{d.label, d.id, ioFlags(d)})
+		for _, r := range rows[start:end] {
+			data = append(data, r.cells)
 		}
 		body = ui.TableInset(cols, data, v.pickIdx-start)
 		if start > 0 || end < len(rows) {
@@ -850,10 +984,10 @@ func (v *configView) pickerModal(w, h int) string {
 	if v.filtering || v.filter.Value() != "" {
 		body += "\n" + ui.Accent.Render("/") + " " + v.filter.View()
 	}
-	body += "\n" + ui.Dim.Render("↑/↓ move · enter choose · / filter · esc cancel")
+	body += "\n" + ui.Dim.Render("enter pick · / filter · esc")
 	// A borderless inset table is TableWidth-2 wide; a Card adds border+padding (4),
 	// so Card(width=TableWidth+2) makes the inner area hug the table exactly.
-	return ui.Card(v.pickerLabel(), body, true, ui.TableWidth(cols)+2)
+	return ui.Card(v.pickerTitle(), body, true, ui.TableWidth(cols)+2)
 }
 
 // pickWindow returns the [start,end) slice of n rows to show for a viewport of
@@ -889,14 +1023,14 @@ func ioFlags(d devEntry) string {
 // focusBetween reports whether the focused field lies in [lo, hi] — i.e. the card
 // spanning those fields currently holds focus and should render highlighted.
 func (v *configView) focusBetween(lo, hi cfgFocus) bool {
-	return v.focus >= lo && v.focus <= hi && !v.picking && !v.editing
+	return v.focus >= lo && v.focus <= hi && !v.pickerOpen() && !v.editing
 }
 
 // fieldRow renders one labeled row inside a card: a focus cursor, the padded
 // label, then the value (built to fit the card by the body helpers).
 func (v *configView) fieldRow(f cfgFocus, label, val string) string {
 	cursor := "  "
-	if v.focus == f && !v.picking && !v.editing {
+	if v.focus == f && !v.pickerOpen() && !v.editing {
 		cursor = ui.Accent.Render("▸ ")
 	}
 	return cursor + fmt.Sprintf("%-10s ", label) + val
@@ -920,7 +1054,9 @@ func (v *configView) stationBody(cardW int) string {
 
 func (v *configView) modeBody(cardW int) string {
 	vw := valueWidth(cardW)
-	family := ui.Accent.Render("‹ " + clip(v.familyName(), vw-4) + " ›")
+	// Family and Mode read as dropdowns (▾): enter pops a scrolling picker, and
+	// ←/→ still quick-cycles in place.
+	family := ui.Accent.Render(clip(v.familyName(), vw-3)) + ui.Dim.Render(" ▾")
 	return strings.Join([]string{
 		v.fieldRow(fFamily, "Family", family),
 		v.fieldRow(fMode, "Mode", v.modeSelector()),
@@ -1016,19 +1152,18 @@ func txDeviceValue(txID, rxID string, w int) string {
 	return ui.Dim.Render("(same as RX)")
 }
 
-// modeSelector renders the Mode row: the specific submode chosen within the
-// current family. A multi-member family gets the ‹ … › cycler plus an "n/total"
-// position; a single-member family (CW, FT8, …) has nothing to cycle, so it
-// shows the lone mode with a quiet "(only mode)" note instead of dead arrows.
+// modeSelector renders the Mode row: the chosen submode as a dropdown (▾, enter
+// opens the mode picker) plus its position within the family. A single-member
+// family (CW, FT8, …) shows a quiet "(only mode)" note instead of a position.
 func (v *configView) modeSelector() string {
 	fam := families[v.familyIdx]
 	label := modes[v.modeIdx].label
 	if len(fam.modes) <= 1 {
-		return ui.Accent.Render(label) + ui.Dim.Render("  (only mode)")
+		return ui.Accent.Render(label) + ui.Dim.Render(" ▾  (only mode)")
 	}
 	pos := familyModePos(fam, v.modeIdx) + 1
-	return ui.Accent.Render("‹ "+label+" ›") +
-		ui.Dim.Render(fmt.Sprintf("  %d/%d", pos, len(fam.modes)))
+	return ui.Accent.Render(label) +
+		ui.Dim.Render(fmt.Sprintf(" ▾  %d/%d", pos, len(fam.modes)))
 }
 
 // settingsSummary renders the Settings row's value. It deliberately shows only a
@@ -1056,16 +1191,18 @@ func (v *configView) Hints() []ui.Hint {
 			{Key: "space", Action: "toggle"}, {Key: "esc", Action: "done"},
 		}
 	}
-	if v.picking {
+	if v.pickerOpen() {
 		return []ui.Hint{
-			{Key: "↑/↓", Action: "device"}, {Key: "enter", Action: "choose"},
+			{Key: "↑/↓", Action: "move"}, {Key: "enter", Action: "choose"},
 			{Key: "/", Action: "filter"}, {Key: "esc", Action: "cancel"},
 		}
 	}
-	// The enter action depends on the focused field: device fields open the
-	// picker, the Settings row opens the editor, everything else has no enter.
+	// The enter action depends on the focused field: family/mode and device fields
+	// open their picker, the Settings row opens the editor, others have no enter.
 	hints := []ui.Hint{{Key: "↑/↓", Action: "field"}, {Key: "←/→", Action: "cycle"}}
 	switch v.focus {
+	case fFamily, fMode:
+		hints = append(hints, ui.Hint{Key: "enter", Action: "open picker"})
 	case fRx, fTx, fPtt:
 		hints = append(hints, ui.Hint{Key: "enter", Action: "pick device"})
 	case fSettings:
