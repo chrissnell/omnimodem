@@ -56,7 +56,32 @@ lipgloss/table drops the right border when an explicit width is combined with
 16-colour DOS/BBS theme (`theme.go`): black desktop (`ColorPanel`), bright-cyan
 accent/focus (`ColorAccent`), yellow titles (`ColorTitle`), grey hints
 (`ColorDim`), blue selection bar (`ColorSel`). Use `ui.Accent` / `ui.Dim` /
-`ui.Title` for text; cards default to a dim (unfocused) → accent (focused) border.
+`ui.Title` for styled text and `ui.Body` for plain labels/spacers; cards default
+to a dim (unfocused) → accent (focused) border.
+
+### The background-hole gotcha (important)
+
+lipgloss re-applies a container's background only at line starts and around the
+padding it adds itself — **not** after a styled run that a caller dropped
+mid-line. Every styled run ends in a full reset (`ESC[0m`), which clears the
+background to the terminal's own (often dark grey). So any bare text placed after
+a styled run — a literal `"  "` separator, a plain label, a `bubbles` text-input,
+or the filler rows lipgloss adds when joining columns of unequal height — renders
+on that grey and reads as a stray box.
+
+Rules to avoid it (all enforced by `TestConfigNoGreyBackgroundHoles`, which
+forces real SGR codes and scans for `ESC[0m` followed by a visible char):
+
+- `ui.Accent` / `ui.Dim` / `ui.Title` / `ui.Body` all pin `Background(ColorPanel)`
+  — always style body text through them, never with a bare `lipgloss` style.
+- Never leave a bare literal after a styled run: fold separators into the
+  neighbouring `Render(...)` (`Dim.Render("1 setting  ")`, not `Dim.Render(...) + "  "`),
+  and wrap plain labels/cursors in `ui.Body.Render(...)`.
+- Give `bubbles` inputs a panel background (`PromptStyle`/`TextStyle`/
+  `PlaceholderStyle`/`Cursor.Style`).
+- When joining columns of different heights, pad each column **and** the gap to a
+  shared height with a `Background(ColorPanel)` block — don't rely on
+  `JoinHorizontal`'s bare-space filler.
 
 ## Adding a screen
 

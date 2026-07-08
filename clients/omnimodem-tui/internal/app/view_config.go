@@ -167,6 +167,15 @@ func newConfigView(m *Model) *configView {
 	filter := textinput.New()
 	filter.Placeholder = "filter…"
 	filter.Prompt = ""
+	// Paint every text input on the panel background so the prompt/value/cursor
+	// don't flash the terminal's own (grey) background inside the black cards.
+	for _, ti := range []*textinput.Model{&name, &call, &grid, &txDelay, &txTail, &filter} {
+		ti.PromptStyle = ti.PromptStyle.Background(ui.ColorPanel)
+		ti.TextStyle = ti.TextStyle.Background(ui.ColorPanel)
+		ti.PlaceholderStyle = ti.PlaceholderStyle.Background(ui.ColorPanel)
+		ti.Cursor.Style = ti.Cursor.Style.Background(ui.ColorPanel)
+		ti.Cursor.TextStyle = ti.Cursor.TextStyle.Background(ui.ColorPanel)
+	}
 	v := &configView{
 		m:       m,
 		name:    name,
@@ -931,7 +940,16 @@ func (v *configView) Render(w, h int) string {
 
 	left := lipgloss.JoinVertical(lipgloss.Left, station, mode)
 	right := lipgloss.JoinVertical(lipgloss.Left, audio, rsid)
-	cols := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
+	// Pad both columns and the gap between them to one shared height on the panel
+	// background. Otherwise the shorter column's filler rows (and the bare-space
+	// gap) sit on the terminal's own background and read as grey blocks beside and
+	// below the cards.
+	colH := max(lipgloss.Height(left), lipgloss.Height(right))
+	panelBlock := func(w int, s string) string {
+		return lipgloss.NewStyle().Background(ui.ColorPanel).Width(w).Height(colH).Render(s)
+	}
+	cols := lipgloss.JoinHorizontal(lipgloss.Top,
+		panelBlock(leftW, left), panelBlock(gap, ""), panelBlock(rightW, right))
 
 	body := cols + "\n" + v.saveHint()
 
@@ -1027,13 +1045,15 @@ func (v *configView) focusBetween(lo, hi cfgFocus) bool {
 }
 
 // fieldRow renders one labeled row inside a card: a focus cursor, the padded
-// label, then the value (built to fit the card by the body helpers).
+// label, then the value (built to fit the card by the body helpers). The cursor
+// and label are drawn on the panel background so no bare literal follows the
+// value's styled runs and flashes the terminal's own background.
 func (v *configView) fieldRow(f cfgFocus, label, val string) string {
-	cursor := "  "
+	cursor := ui.Body.Render("  ")
 	if v.focus == f && !v.pickerOpen() && !v.editing {
 		cursor = ui.Accent.Render("▸ ")
 	}
-	return cursor + fmt.Sprintf("%-10s ", label) + val
+	return cursor + ui.Body.Render(fmt.Sprintf("%-10s ", label)) + val
 }
 
 // valueWidth is the space left for a row's value inside a card of width cardW,
@@ -1179,7 +1199,7 @@ func (v *configView) settingsSummary() string {
 	if n == 1 {
 		noun = "setting"
 	}
-	return ui.Dim.Render(fmt.Sprintf("%d %s", n, noun)) + "  " + ui.Accent.Render("✎ edit")
+	return ui.Dim.Render(fmt.Sprintf("%d %s  ", n, noun)) + ui.Accent.Render("✎ edit")
 }
 
 func (v *configView) Title() string { return fmt.Sprintf("Configure CH%d", v.m.sel) }
