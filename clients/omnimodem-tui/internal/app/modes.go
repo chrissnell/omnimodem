@@ -240,6 +240,81 @@ func baseModeLabel(mode string) string {
 	return base
 }
 
+// modeDisplayNames maps the irregular bare labels to the mixed-case names their
+// authors and operators actually use. Only labels whose conventional spelling
+// isn't produced by displayMode's family rules or its all-caps fallback live
+// here — plain acronyms (PSK31, MFSK16, FT8, RTTY, PD120, SC2-180 …) are handled
+// by uppercasing and are deliberately absent.
+var modeDisplayNames = map[string]string{
+	// fldigi Feld Hell facsimile family.
+	"feldhell": "Feld Hell",
+	"slowhell": "Slow Hell",
+	"hellx5":   "Hell X5",
+	"hellx9":   "Hell X9",
+	"hell80":   "Hell 80",
+	// fldigi IFKP speeds (bare "ifkp" uppercases fine).
+	"ifkp-slow": "IFKP Slow",
+	"ifkp-fast": "IFKP Fast",
+	// fldigi Throb / ThrobX.
+	"throb1":   "Throb1",
+	"throb2":   "Throb2",
+	"throb4":   "Throb4",
+	"throbx1":  "ThrobX1",
+	"throbx2":  "ThrobX2",
+	"throbx4":  "ThrobX4",
+	"olivia":   "Olivia",
+	"sitorb":   "SITOR-B",
+	"wefax576": "WEFAX-576",
+	"wefax288": "WEFAX-288",
+	// MMSSTV modes whose names carry a spelled-out word.
+	"scottie1":  "Scottie 1",
+	"scottie2":  "Scottie 2",
+	"scottiedx": "Scottie DX",
+	"martin1":   "Martin 1",
+	"martin2":   "Martin 2",
+	"robot72":   "Robot 72",
+	"robot36":   "Robot 36",
+	"robot24":   "Robot 24",
+}
+
+// displayMode returns the conventional operator-facing name for a mode string —
+// the casing each mode is known by (fldigi / WSJT-X / MMSSTV). It is display
+// only: the daemon wire label (baseModeLabel) is never altered. Irregular names
+// come from modeDisplayNames; the big prefix families follow their own rule; and
+// anything left (plain acronym + digits, e.g. FT8, MFSK16, PD120) uppercases.
+func displayMode(mode string) string {
+	label := baseModeLabel(mode)
+	if label == "" {
+		return ""
+	}
+	if d, ok := modeDisplayNames[label]; ok {
+		return d
+	}
+	switch {
+	case strings.HasPrefix(label, "psk"), strings.HasPrefix(label, "qpsk"),
+		strings.HasPrefix(label, "mfsk"), strings.HasPrefix(label, "fsq"):
+		return strings.ToUpper(label)
+	case strings.HasPrefix(label, "dominoex"):
+		return "DominoEX " + modeSizeSuffix(strings.TrimPrefix(label, "dominoex"))
+	case strings.HasPrefix(label, "thor"):
+		return "THOR " + modeSizeSuffix(strings.TrimPrefix(label, "thor"))
+	case strings.HasPrefix(label, "contestia"):
+		return "Contestia " + strings.Replace(strings.TrimPrefix(label, "contestia"), "_", "/", 1)
+	case strings.HasPrefix(label, "mt63_"):
+		return "MT63-" + strings.ToUpper(strings.TrimPrefix(label, "mt63_"))
+	}
+	return strings.ToUpper(label)
+}
+
+// modeSizeSuffix formats the DominoEX/THOR size suffix: the word "micro"
+// capitalizes, numeric speeds (4, 88, 25x4 …) pass through unchanged.
+func modeSizeSuffix(s string) string {
+	if s == "micro" {
+		return "Micro"
+	}
+	return s
+}
+
 func modeByLabel(label string) *modeInfo {
 	label = baseModeLabel(label)
 	for i := range modes {

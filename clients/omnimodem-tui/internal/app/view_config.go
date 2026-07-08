@@ -339,7 +339,7 @@ func (v *configView) pickerAllRows() []pickerRow {
 		for _, mi := range families[v.familyIdx].modes {
 			mi := mi
 			rows = append(rows, pickerRow{
-				cells:  []string{modes[mi].label},
+				cells:  []string{displayMode(modes[mi].label)},
 				match:  strings.ToLower(modes[mi].label),
 				choose: func(v *configView) { v.selectMode(mi) },
 			})
@@ -943,7 +943,7 @@ func (v *configView) Render(w, h int) string {
 		// along the bottom of the dialog so the header stays clean and unwrapped.
 		inner := v.settings.View(modalW-4) + "\n\n" +
 			ui.Dim.Render("↑/↓ field · ←/→ change · space toggle · esc done")
-		box := ui.Modal(v.modeLabel()+" settings", inner, modalW)
+		box := ui.Modal(displayMode(v.modeLabel())+" settings", inner, modalW)
 		return body + "\n" + centerModal(box, w)
 	}
 	// A picker modal (family, mode, or device) overlays the form while open, and
@@ -1157,7 +1157,7 @@ func txDeviceValue(txID, rxID string, w int) string {
 // family (CW, FT8, …) shows a quiet "(only mode)" note instead of a position.
 func (v *configView) modeSelector() string {
 	fam := families[v.familyIdx]
-	label := modes[v.modeIdx].label
+	label := displayMode(modes[v.modeIdx].label)
 	if len(fam.modes) <= 1 {
 		return ui.Accent.Render(label) + ui.Dim.Render(" ▾  (only mode)")
 	}
@@ -1182,7 +1182,7 @@ func (v *configView) settingsSummary() string {
 	return ui.Dim.Render(fmt.Sprintf("%d %s", n, noun)) + "  " + ui.Accent.Render("✎ edit")
 }
 
-func (v *configView) Title() string { return fmt.Sprintf("Configure ch%d", v.m.sel) }
+func (v *configView) Title() string { return fmt.Sprintf("Configure CH%d", v.m.sel) }
 
 func (v *configView) Hints() []ui.Hint {
 	if v.editing {

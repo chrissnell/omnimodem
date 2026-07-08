@@ -52,7 +52,7 @@ func (v *channelsView) refresh() {
 			ptt = "▣"
 		}
 		rows = append(rows, table.Row{
-			fmt.Sprintf("ch%d", ch), orNone(cl.name), orNone(baseModeLabel(cl.mode)),
+			fmt.Sprintf("CH%d", ch), orNone(cl.name), orNone(displayMode(cl.mode)),
 			orDash(cl.deviceID), ptt, fmt.Sprintf("%.0f", cl.rxDbfs),
 		})
 	}
@@ -102,7 +102,7 @@ func (v *channelsView) nextFreeChannel() uint32 {
 func (v *channelsView) selectedChannel() uint32 {
 	var ch uint32
 	if r := v.t.SelectedRow(); len(r) > 0 {
-		fmt.Sscanf(r[0], "ch%d", &ch)
+		fmt.Sscanf(r[0], "CH%d", &ch)
 	}
 	return ch
 }

@@ -654,7 +654,7 @@ func TestConfigRendersFamilyAndModeRows(t *testing.T) {
 	if !strings.Contains(out, "DominoEX") {
 		t.Fatalf("Render must show the selected family name:\n%s", out)
 	}
-	if !strings.Contains(out, "dominoex8") {
+	if !strings.Contains(out, "DominoEX 8") {
 		t.Fatalf("Render must show the selected mode:\n%s", out)
 	}
 }
