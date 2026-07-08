@@ -36,8 +36,8 @@ func TestSettingsModalHeaderAndHotkeys(t *testing.T) {
 	v.focus = fSettings
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open editor
 	out := v.Render(100, 30)
-	if !strings.Contains(out, "psk31 settings") {
-		t.Fatalf("modal header must read 'psk31 settings':\n%s", out)
+	if !strings.Contains(out, "PSK31 settings") {
+		t.Fatalf("modal header must read 'PSK31 settings':\n%s", out)
 	}
 	// The hotkeys must NOT be appended to the title (the old wrapping layout).
 	if strings.Contains(out, "settings  ‹↑") || strings.Contains(out, "settings  ↑") {
