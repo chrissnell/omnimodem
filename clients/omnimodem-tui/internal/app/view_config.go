@@ -1064,7 +1064,14 @@ func valueWidth(cardW int) int {
 
 func (v *configView) stationBody(cardW int) string {
 	vw := valueWidth(cardW)
-	v.name.Width, v.call.Width, v.grid.Width = vw, vw, vw
+	// textinput.View renders the prompt ("> ") and reserves a cursor cell on top of
+	// its text-area Width, so Width must be the value budget minus those or the row
+	// overflows the card and lipgloss wraps the value (e.g. "vfo-a" → "vfo-"/"a").
+	inputW := vw - lipgloss.Width(v.name.Prompt) - 1
+	if inputW < 1 {
+		inputW = 1
+	}
+	v.name.Width, v.call.Width, v.grid.Width = inputW, inputW, inputW
 	return strings.Join([]string{
 		v.fieldRow(fName, "Name", v.name.View()),
 		v.fieldRow(fCall, "Call", v.call.View()),
@@ -1076,11 +1083,11 @@ func (v *configView) modeBody(cardW int) string {
 	vw := valueWidth(cardW)
 	// Family and Mode read as dropdowns (▾): enter pops a scrolling picker, and
 	// ←/→ still quick-cycles in place.
-	family := ui.Accent.Render(clip(v.familyName(), vw-3)) + ui.Dim.Render(" ▾")
+	family := ui.Accent.Render(clip(v.familyName(), vw-2)) + ui.Dim.Render(" ▾")
 	return strings.Join([]string{
 		v.fieldRow(fFamily, "Family", family),
-		v.fieldRow(fMode, "Mode", v.modeSelector()),
-		v.fieldRow(fSettings, "Settings", v.settingsSummary()),
+		v.fieldRow(fMode, "Mode", v.modeSelector(vw)),
+		v.fieldRow(fSettings, "Settings", v.settingsSummary(vw)),
 	}, "\n")
 }
 
@@ -1172,34 +1179,38 @@ func txDeviceValue(txID, rxID string, w int) string {
 	return ui.Dim.Render("(same as RX)")
 }
 
-// modeSelector renders the Mode row: the chosen submode as a dropdown (▾, enter
-// opens the mode picker) plus its position within the family. A single-member
-// family (CW, FT8, …) shows a quiet "(only mode)" note instead of a position.
-func (v *configView) modeSelector() string {
+// modeSelector renders the Mode row inside width w: the chosen submode as a
+// dropdown (▾, enter opens the mode picker) plus its position within the family.
+// A single-member family (CW, FT8, …) shows a quiet "(only mode)" note. The label
+// is clipped so the row can never overflow the card and wrap.
+func (v *configView) modeSelector(w int) string {
 	fam := families[v.familyIdx]
 	label := displayMode(modes[v.modeIdx].label)
+	suffix := fmt.Sprintf(" ▾  %d/%d", familyModePos(fam, v.modeIdx)+1, len(fam.modes))
 	if len(fam.modes) <= 1 {
-		return ui.Accent.Render(label) + ui.Dim.Render(" ▾  (only mode)")
+		suffix = " ▾  (only mode)"
 	}
-	pos := familyModePos(fam, v.modeIdx) + 1
-	return ui.Accent.Render(label) +
-		ui.Dim.Render(fmt.Sprintf(" ▾  %d/%d", pos, len(fam.modes)))
+	return ui.Accent.Render(clip(label, w-lipgloss.Width(suffix))) + ui.Dim.Render(suffix)
 }
 
-// settingsSummary renders the Settings row's value. It deliberately shows only a
-// count and an ‹enter› cue, not the individual values: a lone value next to the
-// row (e.g. just the center freq) is confusing and meaningless once a mode has
-// more than one knob — the values belong in the editor, not the summary row.
-func (v *configView) settingsSummary() string {
+// settingsSummary renders the Settings row's value inside width w: an edit button
+// (leading, so it lines up under the Family/Mode values) plus a dim count. The
+// count is dropped before it would overflow the card, so the row never wraps.
+func (v *configView) settingsSummary(w int) string {
 	if v.settings == nil || !v.settings.HasFields() {
-		return ui.Dim.Render("no settings")
+		return ui.Dim.Render(clip("no settings", w))
 	}
 	n := v.settings.NumFields()
 	noun := "settings"
 	if n == 1 {
 		noun = "setting"
 	}
-	return ui.Dim.Render(fmt.Sprintf("%d %s  ", n, noun)) + ui.Accent.Render("✎ edit")
+	edit := ui.Accent.Render("✎ edit")
+	count := fmt.Sprintf("  %d %s", n, noun)
+	if lipgloss.Width("✎ edit")+lipgloss.Width(count) <= w {
+		return edit + ui.Dim.Render(count)
+	}
+	return edit
 }
 
 func (v *configView) Title() string { return fmt.Sprintf("Configure CH%d", v.m.sel) }

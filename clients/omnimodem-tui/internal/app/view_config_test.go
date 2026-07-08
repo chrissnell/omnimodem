@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 // drainCmd runs a command and feeds every resulting message back into the view,
@@ -953,5 +955,51 @@ func TestConfigModePickerModal(t *testing.T) {
 	}
 	if v.pickerOpen() {
 		t.Fatal("choosing must close the mode picker")
+	}
+}
+
+// Regression: the Name/Call/Grid inputs must fit the STATION card so the value
+// never wraps (the reported "vfo-a" → "vfo-"/"a" break). Checked across widths.
+func TestConfigStationFieldsDoNotWrap(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a"}
+	m.myCall, m.myGrid = "NW5W", "DN40CL"
+	v := newConfigView(m)
+	for _, lw := range []int{32, 39, 48} {
+		card := ui.Card("STATION", v.stationBody(lw), true, lw)
+		lines := strings.Split(card, "\n")
+		// top border + title + rule + 3 field rows + bottom border = 7 lines. A
+		// wrap would add an extra line.
+		if len(lines) != 7 {
+			t.Fatalf("width %d: STATION card must be 7 lines (no wrap), got %d:\n%s", lw, len(lines), card)
+		}
+		for _, ln := range lines {
+			if lipgloss.Width(ln) != lw {
+				t.Fatalf("width %d: line width %d != %d (overflow):\n%s", lw, lipgloss.Width(ln), lw, card)
+			}
+		}
+		if !strings.Contains(card, "vfo-a") {
+			t.Fatalf("width %d: name value must render intact:\n%s", lw, card)
+		}
+	}
+}
+
+// Regression: the Settings row leads with the edit button so it lines up under
+// the Family/Mode values, rather than being pushed far right by the count.
+func TestConfigSettingsEditLeadsValue(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a", mode: "psk125"}
+	v := newConfigView(m)
+	if s := v.settingsSummary(30); !strings.HasPrefix(s, "✎ edit") {
+		t.Fatalf("settings value must lead with the edit button, got %q", s)
+	}
+	// The MODE card must not wrap either, at any width.
+	for _, lw := range []int{32, 39, 48} {
+		card := ui.Card("MODE", v.modeBody(lw), true, lw)
+		if n := len(strings.Split(card, "\n")); n != 7 {
+			t.Fatalf("width %d: MODE card must be 7 lines (no wrap), got %d:\n%s", lw, n, card)
+		}
 	}
 }

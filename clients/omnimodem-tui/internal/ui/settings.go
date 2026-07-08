@@ -88,6 +88,12 @@ func NewSettingsForm(fields []Field, initial map[string]string) *SettingsForm {
 			ti.Placeholder = fld.Placeholder
 			ti.CharLimit = 16
 			ti.SetValue(val)
+			// Paint the box on the panel background so the value/cursor/padding
+			// don't flash the terminal's own (grey) background in the dialog.
+			ti.TextStyle = ti.TextStyle.Background(ColorPanel)
+			ti.PlaceholderStyle = ti.PlaceholderStyle.Background(ColorPanel)
+			ti.Cursor.Style = ti.Cursor.Style.Background(ColorPanel)
+			ti.Cursor.TextStyle = ti.Cursor.TextStyle.Background(ColorPanel)
 			f.inputs[i] = ti
 		}
 	}
@@ -294,7 +300,9 @@ func (f *SettingsForm) View(width int) string {
 			continue
 		}
 		fld := &f.fields[r]
-		label := fmt.Sprintf("%-*s", labelW, fld.Label)
+		// Body-render the label so it carries the panel background: after the
+		// accent focus marker's reset, a bare label would flash the terminal's bg.
+		label := Body.Render(fmt.Sprintf("%-*s", labelW, fld.Label))
 		widget := f.widget(r, width-labelW-4)
 		b.WriteString(marker + label + widget + "\n")
 		if focused && fld.Help != "" {
@@ -332,7 +340,7 @@ func (f *SettingsForm) widget(i, w int) string {
 		f.inputs[i].Width = width
 		out := f.inputs[i].View()
 		if fld.Unit != "" {
-			out += " " + Dim.Render(fld.Unit)
+			out += Dim.Render(" " + fld.Unit)
 		}
 		return out
 	}
