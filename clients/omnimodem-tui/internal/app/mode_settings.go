@@ -106,14 +106,12 @@ func modeFields(label string) []ui.Field {
 		}
 	}
 
-	// The submode families all share a single audio-center knob. Their bare-label
-	// default is 1500 Hz, except psk31 (1000 Hz).
+	// The submode families all share a single audio-center knob. Its default is
+	// the mode's own center param, so the form seeds the same value the daemon
+	// would use if Center were left untouched (psk31 1000, navtex 1000, wefax
+	// 1900, everything else 1500) instead of a hardcoded guess.
 	if fam := submodeFamily(label); fam != "" {
-		def := 1500.0
-		if label == "psk31" {
-			def = 1000
-		}
-		return []ui.Field{centerField(def)}
+		return []ui.Field{centerField(centerDefault(label))}
 	}
 
 	// Contestia's tones/bandwidth are fixed by the submode label, and the remaining
@@ -136,6 +134,21 @@ func submodeFamily(label string) string {
 		}
 	}
 	return ""
+}
+
+// centerDefault returns a submode-family mode's audio-center default, read from
+// its modeInfo center param so the settings form and the daemon agree on the
+// untouched value (navtex/sitorb 1000 Hz, wefax 1900 Hz, psk31 1000 Hz). Falls
+// back to 1500 Hz for a mode with no center param.
+func centerDefault(label string) float64 {
+	if mi := modeByLabel(label); mi != nil {
+		for _, p := range mi.params {
+			if p.key == "center" {
+				return p.def
+			}
+		}
+	}
+	return 1500
 }
 
 // newModeSettingsForm builds a settings form for a mode. initial overrides seed
