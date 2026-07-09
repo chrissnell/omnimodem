@@ -23,5 +23,6 @@ pub mod agc;
 pub mod limiter;
 pub mod detector;
 pub mod squelch;
+pub mod nbfm;
 pub mod noise;
 pub mod modulate;
