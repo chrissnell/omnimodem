@@ -26,9 +26,9 @@ convolutional FEC; require an accurate host clock (surfaced as `ClockOffset`).
 | FT4 | `ft4.rs` | 4-GFSK, 7.5 s slot, LDPC(174,91)+CRC-14 | — | Both | Text |
 | FST4 | `fst4.rs` | LF/MF 4-GFSK, LDPC(240,101) | (long T/R periods) | Both | Text |
 | JT4 | `jt4.rs` | 4-FSK, K=32 Fano, 72-bit legacy msg, 60 s | A–G (tone spacing) | Both | Text |
-| JT65 | `jt65.rs` | 65-FSK, RS(63,12) over GF(2⁶) soft-decode, 60 s | — | TX + RX | Text |
-| JT9 | `jt9.rs` | 9-FSK, K=32 Fano, 60 s | — | TX + RX | Text |
-| WSPR | `wspr.rs` | 4-FSK beacon, 162 symbols, K=32 Fano, ~110 s | — | TX + RX | Text |
+| JT65 | `jt65.rs` | 65-FSK, RS(63,12) over GF(2⁶) soft-decode, 60 s | — | Both | Text |
+| JT9 | `jt9.rs` | 9-FSK, K=32 Fano, 60 s | — | Both | Text |
+| WSPR | `wspr.rs` | 4-FSK beacon, 162 symbols, K=32 Fano, ~110 s | — | Both | Text |
 | JS8 | `js8.rs` | FT8-derived keyboard/ARQ mode, LDPC | Normal / Fast / Turbo / Slow | Both | Text |
 | MSK144 | `msk144.rs` | Meteor-scatter offset-MSK, LDPC(128,90) | — | Both | Text |
 

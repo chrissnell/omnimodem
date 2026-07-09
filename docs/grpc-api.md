@@ -236,8 +236,9 @@ Summary (see the `.proto` for exact fields and the
 | `wefax` | WEFAX (raster RX) | `submode`, `center_hz` |
 | `afsk1200` | AX.25 1200 AFSK packet | `tx` |
 
-Modes not listed here (FT8, FT4, JT65, JT9, WSPR, FST4, MSK144, JS8, SSTV) take no
-parameters beyond the bare mode label, or are selected by label alone. Typed params
+Modes not listed here (FT8, FT4, JT65, JT9, JT4, WSPR, FST4, MSK144, JS8, SSTV) take
+no parameters beyond the bare mode label, or are selected by label alone (e.g. JT4's
+submodes are `jt4a`…`jt4g`). Typed params
 are converted to the equivalent internal mode string in the daemon, then resolved
 by the mode registry — so `mode: "cw:wpm=25,tone=600"` and the `cw` `ModeParams`
 variant are equivalent.
@@ -284,7 +285,7 @@ ConfigureSpectrum { channel: 0, enable: true, bin_count: 256 }
 
 # 5. Transmit (FT8 aligns to the next slot internally)
 AcquireTxLease { channel: 0 }           → granted: true      (optional; exclusive)
-Transmit { channel: 0, payload: <77-bit message bytes> }
+Transmit { channel: 0, payload: <opaque frame bytes> }
                                         → TransmitResponse { transmit_id: N }
                                         → Event.transmit_started { transmit_id: N }
                                         → Event.transmit_complete { transmit_id: N }
