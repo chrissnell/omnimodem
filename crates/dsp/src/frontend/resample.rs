@@ -7,7 +7,7 @@
 //! Phase-2 linear interpolator left behind. Operates on `Sample` (`f32`).
 
 use crate::frontend::fir::design_lowpass;
-use crate::types::Sample;
+use crate::types::{Cplx, Sample};
 
 pub struct Resampler {
     /// Interpolation factor (numerator of the reduced ratio).
@@ -129,6 +129,38 @@ impl Resampler {
     }
 }
 
+/// Complex decimating/interpolating resampler: two real polyphase `Resampler`s,
+/// one per quadrature rail. Correct for a narrowband channel centered at DC
+/// (the output of an NCO channel-select), which is all the SDR RX path needs.
+pub struct ComplexResampler {
+    i: Resampler,
+    q: Resampler,
+}
+
+impl ComplexResampler {
+    pub fn new(in_rate: u32, out_rate: u32, taps_per_phase: usize) -> Self {
+        ComplexResampler {
+            i: Resampler::new(in_rate, out_rate, taps_per_phase),
+            q: Resampler::new(in_rate, out_rate, taps_per_phase),
+        }
+    }
+
+    /// Resample a block of complex samples. I and Q share the ratio, so both
+    /// rails emit the same count and zip cleanly.
+    pub fn process(&mut self, input: &[Cplx]) -> Vec<Cplx> {
+        let re: Vec<f32> = input.iter().map(|z| z.re).collect();
+        let im: Vec<f32> = input.iter().map(|z| z.im).collect();
+        let ro = self.i.process(&re);
+        let io = self.q.process(&im);
+        ro.into_iter().zip(io).map(|(r, i)| Cplx::new(r, i)).collect()
+    }
+
+    /// Reduced (up, down) ratio, from the I rail (both rails are identical).
+    pub fn ratio(&self) -> (usize, usize) {
+        self.i.ratio()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +252,25 @@ mod tests {
         let p1k = goertzel_power(&out[200..], 1000.0, 24000.0);
         let p3k = goertzel_power(&out[200..], 3000.0, 24000.0);
         assert!(10.0 * (p1k / p3k.max(1e-20)).log10() >= 40.0);
+    }
+
+    #[test]
+    fn complex_resampler_decimates_length() {
+        use crate::types::Cplx;
+        let mut r = ComplexResampler::new(240_000, 48_000, 16);
+        let input: Vec<Cplx> = (0..4800).map(|_| Cplx::new(0.25, -0.25)).collect();
+        let out = r.process(&input);
+        // 5:1 decimation → ~960 out; polyphase warm-up allows a small delta.
+        assert!((out.len() as i32 - 960).abs() <= 16, "got {}", out.len());
+    }
+
+    #[test]
+    fn complex_resampler_preserves_dc() {
+        use crate::types::Cplx;
+        let mut r = ComplexResampler::new(240_000, 48_000, 16);
+        let input: Vec<Cplx> = (0..48_000).map(|_| Cplx::new(0.5, 0.5)).collect();
+        let out = r.process(&input);
+        let mean = out.iter().copied().sum::<Cplx>() / out.len() as f32;
+        assert!((mean.re - 0.5).abs() < 0.05 && (mean.im - 0.5).abs() < 0.05, "got {mean:?}");
     }
 }
