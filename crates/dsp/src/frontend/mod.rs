@@ -18,6 +18,7 @@ pub mod resample;
 pub mod rsid;
 pub mod spectrum;
 pub mod stft;
+pub mod complex_stft;
 pub mod agc;
 pub mod limiter;
 pub mod detector;
