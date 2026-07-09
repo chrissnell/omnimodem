@@ -21,5 +21,6 @@ pub mod stft;
 pub mod agc;
 pub mod limiter;
 pub mod detector;
+pub mod squelch;
 pub mod noise;
 pub mod modulate;
