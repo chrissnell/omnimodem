@@ -13,6 +13,7 @@ pub mod msk;
 pub mod multicarrier;
 pub mod ofdm;
 pub mod nco;
+pub mod iq;
 pub mod resample;
 pub mod rsid;
 pub mod spectrum;
