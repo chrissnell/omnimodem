@@ -38,11 +38,11 @@ pub fn half_spectrum_dbfs(spectrum: &[Complex<f32>], window_sum: f32) -> Vec<f32
 pub fn full_spectrum_dbfs(spectrum: &[Complex<f32>], window_sum: f32) -> Vec<f32> {
     let n = spectrum.len();
     let mut out = vec![0.0f32; n];
-    for k in 0..n {
+    for (k, slot) in out.iter_mut().enumerate() {
         // fftshift: rotate by n/2 so negative freqs (upper FFT half) come first.
         let src = (k + n / 2) % n;
         let amp = spectrum[src].norm() / window_sum;
-        out[k] = 20.0 * (amp + 1e-12).log10();
+        *slot = 20.0 * (amp + 1e-12).log10();
     }
     out
 }
