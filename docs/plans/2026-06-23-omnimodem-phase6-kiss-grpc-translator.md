@@ -6,7 +6,7 @@
 
 **Architecture:** The KISS bridge lives on the **async control edge** (a tokio task next to the gRPC server), **not** in the synchronous DSP core. It is a first-class internal consumer of the existing public spine — `CoreHandle.commands` (`Command::Transmit`) for host→air and `CoreHandle.frames.subscribe()` (`FrameEvent::RxFrame`) for air→host — so it adds **zero** code to the sample path and keeps the DSP core clean, which is exactly what the design doc meant by "KISS stays out of the core." A `ConfigureKissListener` RPC starts/stops one listener per channel; `ControlService` owns a small registry of running listeners keyed by channel.
 
-**Tech Stack:** Rust, tonic/prost (gRPC), tokio (`net` + `sync` already enabled in the workspace), the existing `omnimodemd` core command/event bus.
+**Tech Stack:** Rust, tonic/prost (gRPC), tokio (`net` + `sync` already enabled in the workspace), the existing `omnimodem` core command/event bus.
 
 **Design-doc reconciliation:** The design (§"Phase 5", resolved decision #5) put KISS "out of the core" as "a separate external KISS↔gRPC translator process." This plan keeps the *spirit* (no DSP-core coupling; pure client of the gRPC spine) but co-locates the translator inside the daemon and configures it over gRPC — answering the question "could a gRPC call configure/invoke a KISS listener?" with **yes**. The bridge only ever calls `Transmit` and reads `RxFrame`, the same surface a separate process would use, so it can be lifted into its own binary later with no core changes if desired.
 
@@ -31,12 +31,12 @@ For v1 we **transmit** every received data frame (command low-nibble `0x0`) on t
 
 ## File Structure
 
-- `crates/omnimodemd/src/kiss/mod.rs` — module root; re-exports `codec` + `listener`.
-- `crates/omnimodemd/src/kiss/codec.rs` — pure KISS framing: `encode_data_frame`, `KissDecoder` (streaming), `KissFrame`. No I/O, fully unit-tested with known-answer vectors.
-- `crates/omnimodemd/src/kiss/listener.rs` — the tokio bridge: bind a `TcpListener`, accept clients, host→air (`KissFrame` data → `Command::Transmit`), air→host (`FrameEvent::RxFrame` → KISS bytes), plus the start/stop `KissRegistry`.
+- `crates/omnimodem/src/kiss/mod.rs` — module root; re-exports `codec` + `listener`.
+- `crates/omnimodem/src/kiss/codec.rs` — pure KISS framing: `encode_data_frame`, `KissDecoder` (streaming), `KissFrame`. No I/O, fully unit-tested with known-answer vectors.
+- `crates/omnimodem/src/kiss/listener.rs` — the tokio bridge: bind a `TcpListener`, accept clients, host→air (`KissFrame` data → `Command::Transmit`), air→host (`FrameEvent::RxFrame` → KISS bytes), plus the start/stop `KissRegistry`.
 - `proto/omnimodem.proto` — add `ConfigureKissListener` RPC + request/response (additive, per `proto/VERSIONING.md`).
-- `crates/omnimodemd/src/grpc/service.rs` — `ControlService` gains a `KissRegistry` field and the `configure_kiss_listener` handler.
-- `crates/omnimodemd/src/lib.rs` — add `pub mod kiss;` (no behavioral change; `ControlService::new` already the single construction site).
+- `crates/omnimodem/src/grpc/service.rs` — `ControlService` gains a `KissRegistry` field and the `configure_kiss_listener` handler.
+- `crates/omnimodem/src/lib.rs` — add `pub mod kiss;` (no behavioral change; `ControlService::new` already the single construction site).
 
 Convention note: existing phase plans live in `docs/plans/`; this plan follows that location.
 
@@ -45,14 +45,14 @@ Convention note: existing phase plans live in `docs/plans/`; this plan follows t
 ### Task 1: KISS codec — encode
 
 **Files:**
-- Create: `crates/omnimodemd/src/kiss/mod.rs`
-- Create: `crates/omnimodemd/src/kiss/codec.rs`
-- Modify: `crates/omnimodemd/src/lib.rs` (add `pub mod kiss;`)
-- Test: `crates/omnimodemd/src/kiss/codec.rs` (inline `#[cfg(test)]`)
+- Create: `crates/omnimodem/src/kiss/mod.rs`
+- Create: `crates/omnimodem/src/kiss/codec.rs`
+- Modify: `crates/omnimodem/src/lib.rs` (add `pub mod kiss;`)
+- Test: `crates/omnimodem/src/kiss/codec.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Create the module root**
 
-`crates/omnimodemd/src/kiss/mod.rs`:
+`crates/omnimodem/src/kiss/mod.rs`:
 
 ```rust
 //! KISS↔gRPC bridge. `codec` is pure framing (no I/O); `listener` is the tokio
@@ -64,7 +64,7 @@ pub mod codec;
 pub mod listener;
 ```
 
-And in `crates/omnimodemd/src/lib.rs`, add alongside the other `pub mod` lines:
+And in `crates/omnimodem/src/lib.rs`, add alongside the other `pub mod` lines:
 
 ```rust
 pub mod kiss;
@@ -81,7 +81,7 @@ pub mod codec;
 
 - [ ] **Step 2: Write the failing encode test**
 
-Create `crates/omnimodemd/src/kiss/codec.rs` with only the tests first:
+Create `crates/omnimodem/src/kiss/codec.rs` with only the tests first:
 
 ```rust
 #[cfg(test)]
@@ -113,7 +113,7 @@ mod tests {
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd kiss::codec 2>&1 | tail -15`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem kiss::codec 2>&1 | tail -15`
 Expected: FAIL — `cannot find function encode_data_frame`.
 (Note: this repo needs ALSA + `protoc` to build. If a build env script exists from a prior session source it; otherwise the toolchain must provide `libasound2-dev` / `pkg-config` / `protobuf-compiler`. See "Build prerequisites" at the end of this plan.)
 
@@ -152,13 +152,13 @@ pub fn encode_data_frame(payload: &[u8]) -> Vec<u8> {
 
 - [ ] **Step 5: Run the encode tests**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd kiss::codec 2>&1 | tail -15`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem kiss::codec 2>&1 | tail -15`
 Expected: PASS (3 tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/kiss/mod.rs crates/omnimodemd/src/kiss/codec.rs crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/kiss/mod.rs crates/omnimodem/src/kiss/codec.rs crates/omnimodem/src/lib.rs
 git commit -m "kiss: pure KISS data-frame encoder with escape handling"
 ```
 
@@ -167,8 +167,8 @@ git commit -m "kiss: pure KISS data-frame encoder with escape handling"
 ### Task 2: KISS codec — streaming decode
 
 **Files:**
-- Modify: `crates/omnimodemd/src/kiss/codec.rs`
-- Test: `crates/omnimodemd/src/kiss/codec.rs` (tests module)
+- Modify: `crates/omnimodem/src/kiss/codec.rs`
+- Test: `crates/omnimodem/src/kiss/codec.rs` (tests module)
 
 - [ ] **Step 1: Write the failing decode tests**
 
@@ -218,7 +218,7 @@ Add to the tests module:
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd kiss::codec 2>&1 | tail -15`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem kiss::codec 2>&1 | tail -15`
 Expected: FAIL — `cannot find type KissDecoder`.
 
 - [ ] **Step 3: Implement `KissFrame` + `KissDecoder`**
@@ -308,13 +308,13 @@ impl KissDecoder {
 
 - [ ] **Step 4: Run the decode tests**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd kiss::codec 2>&1 | tail -15`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem kiss::codec 2>&1 | tail -15`
 Expected: PASS (7 tests total).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/kiss/codec.rs
+git add crates/omnimodem/src/kiss/codec.rs
 git commit -m "kiss: streaming KISS decoder with chunk + escape handling"
 ```
 
@@ -323,13 +323,13 @@ git commit -m "kiss: streaming KISS decoder with chunk + escape handling"
 ### Task 3: The KISS listener task and registry
 
 **Files:**
-- Create: `crates/omnimodemd/src/kiss/listener.rs`
-- Modify: `crates/omnimodemd/src/kiss/mod.rs` (add `pub mod listener;`)
-- Test: `crates/omnimodemd/src/kiss/listener.rs` (inline integration-style test)
+- Create: `crates/omnimodem/src/kiss/listener.rs`
+- Modify: `crates/omnimodem/src/kiss/mod.rs` (add `pub mod listener;`)
+- Test: `crates/omnimodem/src/kiss/listener.rs` (inline integration-style test)
 
 - [ ] **Step 1: Add the module line**
 
-In `crates/omnimodemd/src/kiss/mod.rs`:
+In `crates/omnimodem/src/kiss/mod.rs`:
 
 ```rust
 pub mod listener;
@@ -337,7 +337,7 @@ pub mod listener;
 
 - [ ] **Step 2: Implement the bridge and registry**
 
-Create `crates/omnimodemd/src/kiss/listener.rs`. This is the core of the feature — read it whole before editing.
+Create `crates/omnimodem/src/kiss/listener.rs`. This is the core of the feature — read it whole before editing.
 
 ```rust
 //! The KISS-over-TCP bridge: one listener per channel, started/stopped over
@@ -574,17 +574,17 @@ mod tests {
 }
 ```
 
-Replace `harness_with_afsk_channel`'s `unimplemented!()` with the real setup. Look at `crates/omnimodemd/src/core/mod.rs` tests (around the `transmit_on_moded_channel_enqueues_and_completes` test, ~line 860) for exactly how a core is spawned with a `FileBackend` factory and an AFSK1200 channel is configured via `Command::ConfigureChannel` + `Command::ConfigureAudio` + `Command::ConfigurePtt`. Build the same here and return the `CoreHandle`. Do **not** leave `unimplemented!()` in the committed code.
+Replace `harness_with_afsk_channel`'s `unimplemented!()` with the real setup. Look at `crates/omnimodem/src/core/mod.rs` tests (around the `transmit_on_moded_channel_enqueues_and_completes` test, ~line 860) for exactly how a core is spawned with a `FileBackend` factory and an AFSK1200 channel is configured via `Command::ConfigureChannel` + `Command::ConfigureAudio` + `Command::ConfigurePtt`. Build the same here and return the `CoreHandle`. Do **not** leave `unimplemented!()` in the committed code.
 
 - [ ] **Step 4: Run the listener tests**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd kiss::listener 2>&1 | tail -25`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem kiss::listener 2>&1 | tail -25`
 Expected: both async tests PASS. If `rxframe_reaches_a_connected_kiss_client` is flaky on the 50 ms subscribe gap, increase it — the writer task must call `core.frames.subscribe()` before the `send`, or the broadcast value is missed (broadcast only delivers to existing subscribers).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/kiss/mod.rs crates/omnimodemd/src/kiss/listener.rs
+git add crates/omnimodem/src/kiss/mod.rs crates/omnimodem/src/kiss/listener.rs
 git commit -m "kiss: in-daemon KISS-over-TCP listener bridging Transmit <-> RxFrame"
 ```
 
@@ -627,7 +627,7 @@ message ConfigureKissListenerResponse {
 
 - [ ] **Step 2: Verify the proto compiles**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo build -p omnimodemd 2>&1 | tail -15`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo build -p omnimodem 2>&1 | tail -15`
 Expected: builds; prost generates `proto::ConfigureKissListenerRequest/Response` and the service-trait method `configure_kiss_listener` (which will be unimplemented until Task 5 — a missing-trait-method error here is expected and resolved in Task 5; if it blocks the build, do Task 5's handler in the same commit).
 
 - [ ] **Step 3: Commit**
@@ -642,7 +642,7 @@ git commit -m "proto: add ConfigureKissListener RPC for the KISS bridge"
 ### Task 5: gRPC handler + registry on `ControlService`
 
 **Files:**
-- Modify: `crates/omnimodemd/src/grpc/service.rs:14-33` (struct + `new`) and the `impl ModemControl` block
+- Modify: `crates/omnimodem/src/grpc/service.rs:14-33` (struct + `new`) and the `impl ModemControl` block
 - Test: covered by Task 3's listener tests + a handler smoke test here
 
 - [ ] **Step 1: Give `ControlService` a registry**
@@ -734,7 +734,7 @@ fn is_packet_mode(mode: &str) -> bool {
 
 - [ ] **Step 3: Write a handler smoke test**
 
-If `crates/omnimodemd/tests/` or a `grpc` test module spins up the service in-process, add a test that calls `configure_kiss_listener` with `enable=true` on an AFSK1200 channel and asserts `active == true` and a non-empty `bound_addr`, then `enable=false` returns `active == false`. Otherwise rely on Task 3's listener tests plus a unit test of `is_packet_mode`:
+If `crates/omnimodem/tests/` or a `grpc` test module spins up the service in-process, add a test that calls `configure_kiss_listener` with `enable=true` on an AFSK1200 channel and asserts `active == true` and a non-empty `bound_addr`, then `enable=false` returns `active == false`. Otherwise rely on Task 3's listener tests plus a unit test of `is_packet_mode`:
 
 ```rust
 #[test]
@@ -747,13 +747,13 @@ fn only_afsk_is_a_packet_mode() {
 
 - [ ] **Step 4: Build and test**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd kiss 2>&1 | tail -20 && cargo build -p omnimodemd 2>&1 | tail -5`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem kiss 2>&1 | tail -20 && cargo build -p omnimodem 2>&1 | tail -5`
 Expected: PASS + clean build (the `ModemControl` trait is now fully implemented).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/grpc/service.rs
+git add crates/omnimodem/src/grpc/service.rs
 git commit -m "grpc: ConfigureKissListener handler + per-channel KISS registry"
 ```
 
@@ -765,12 +765,12 @@ git commit -m "grpc: ConfigureKissListener handler + per-channel KISS registry"
 
 - [ ] **Step 1: Whole-crate build + clippy**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo clippy -p omnimodemd --all-targets 2>&1 | tail -30`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo clippy -p omnimodem --all-targets 2>&1 | tail -30`
 Expected: no errors. Resolve any unused-import warnings from the new module.
 
 - [ ] **Step 2: Full test suite**
 
-Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodemd 2>&1 | tail -30`
+Run: `source /tmp/buildenv.sh 2>/dev/null; cargo test -p omnimodem 2>&1 | tail -30`
 Expected: all pass, including `kiss::codec` (7), `kiss::listener` (2), and the unchanged Phase 1-5 suites.
 
 - [ ] **Step 3: Manual smoke (optional, documents real use)**

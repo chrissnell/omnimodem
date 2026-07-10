@@ -75,7 +75,7 @@ appending one on-air column per row incrementally.
 Four keyboard modes can carry a raster image in-band: they switch out of their text
 state machine, emit a mode-specific header, then send pixel-FSK where each 8-bit
 pixel maps to a carrier offset. The daemon assembles these in
-[`../../crates/omnimodemd/src/mode/picture_tx.rs`](../../crates/omnimodemd/src/mode/picture_tx.rs)
+[`../../crates/omnimodem/src/mode/picture_tx.rs`](../../crates/omnimodem/src/mode/picture_tx.rs)
 (`PictureSend::build`), driven by the `TransmitImage` RPC; the shared pixel-FSK codec
 is `modes/picture.rs`.
 

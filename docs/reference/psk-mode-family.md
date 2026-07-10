@@ -19,7 +19,7 @@ mode here (`PSK_RATE`). 16 kHz modes (8PSK/16PSK/OFDM) are out of scope.
 | Convolutional FEC + streaming Viterbi | `crates/dsp/src/fec/conv.rs` |
 | Diagonal interleaver (`DiagInterleaver`) | `crates/dsp/src/fec/interleave.rs` |
 | PSK31 + MFSK (IZ8BLY) Varicode | `crates/dsp/src/framing/varicode.rs` |
-| Daemon mode-string parse (delegates to `from_label`) | `crates/omnimodemd/src/mode/mod.rs` |
+| Daemon mode-string parse (delegates to `from_label`) | `crates/omnimodem/src/mode/mod.rs` |
 | TUI mode list + drift-guard test | `clients/omnimodem-tui/internal/app/modes.go` (+ `_test.go`) |
 
 fldigi reference source is checked out in-tree at `fldigi/src/psk/{psk.cxx,

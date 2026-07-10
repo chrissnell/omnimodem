@@ -43,7 +43,7 @@ and the [wiki](docs/wiki/README.md).
 
 | Path | What |
 |---|---|
-| `crates/omnimodemd/` | The daemon: gRPC edge, sync core, audio, devices, PTT, KISS, persistence, metrics, mode registry. |
+| `crates/omnimodem/` | The daemon: gRPC edge, sync core, audio, devices, PTT, KISS, persistence, metrics, mode registry. |
 | `crates/dsp/` | `omnimodem-dsp` — pure DSP/FEC/framing building blocks and the mode implementations. |
 | `crates/wavtool/` | Small WAV helper used by tests/tooling. |
 | `clients/omnimodem-tui/` | Reference terminal frontend (Go), talks to the daemon over gRPC. |
@@ -61,7 +61,7 @@ links ALSA (`libasound2-dev` + `pkg-config`). The Go TUI needs Go 1.26+.
 ```sh
 # Debian/Ubuntu: apt install -y protobuf-compiler libasound2-dev pkg-config
 # macOS:         brew install protobuf
-make            # builds both → target/release/omnimodemd and bin/omnimodem-tui
+make            # builds both → target/release/omnimodem and bin/omnimodem-tui
 make modem      # just the daemon
 make tui        # just the TUI
 make test       # Rust workspace + Go TUI

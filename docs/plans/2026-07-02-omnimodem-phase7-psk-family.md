@@ -61,8 +61,8 @@
 | `crates/dsp/src/frontend/mod.rs` | `pub mod multicarrier;` |
 | `crates/dsp/src/modes/mod.rs` | `pub mod psk;` (keep `pub mod psk31;` re-exporting `psk::` aliases for back-compat until the registry migrates). |
 | `crates/dsp/src/modes/psk31.rs` | Reduce to a thin `pub use crate::modes::psk::{...}` shim so existing `Psk31Mod`/`Psk31Demod` callers/tests keep working. |
-| `crates/omnimodemd/src/mode/mod.rs` | `ModeConfig::Psk` variant (parametric over submode + center) + `parse`/`to_mode_string`/`label` arms for every Phase-7 label. |
-| `crates/omnimodemd/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`native_rate`/`tx_slot_s` arms for the new `Psk` variant. |
+| `crates/omnimodem/src/mode/mod.rs` | `ModeConfig::Psk` variant (parametric over submode + center) + `parse`/`to_mode_string`/`label` arms for every Phase-7 label. |
+| `crates/omnimodem/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`native_rate`/`tx_slot_s` arms for the new `Psk` variant. |
 | `proto/omnimodem.proto` | Add `PskParams { string submode; float center_hz; }` to the `ModeParams` oneof. |
 | `clients/omnimodem-tui/internal/app/modes.go` | Add PSK-family rows to `modes` + a `psk` arm in `modeParamsFor`. |
 | `clients/omnimodem-tui/internal/pb/*` | Regenerate Go proto via `clients/omnimodem-tui/gen.sh` (adds `PskParams`). |
@@ -240,7 +240,7 @@ Re-parametrizes the existing differential-BPSK + Varicode assembly by symbol rat
 
 **Files:**
 - Create: `crates/dsp/src/modes/psk.rs`, `crates/dsp/tests/vectors/psk_bpsk.json`, `scratch/refvectors/psk_dump.cxx`
-- Modify: `crates/dsp/src/modes/mod.rs`, `crates/dsp/src/modes/psk31.rs`, `crates/omnimodemd/src/mode/{mod.rs,registry.rs}`, `proto/omnimodem.proto`, `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs,snapshots.rs}`, `clients/omnimodem-tui/internal/app/modes.go`
+- Modify: `crates/dsp/src/modes/mod.rs`, `crates/dsp/src/modes/psk31.rs`, `crates/omnimodem/src/mode/{mod.rs,registry.rs}`, `proto/omnimodem.proto`, `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs,snapshots.rs}`, `clients/omnimodem-tui/internal/app/modes.go`
 - Test: `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs}`, inline tests in `psk.rs`
 
 ### T1 — Extract golden vectors
@@ -746,7 +746,7 @@ git commit -m "feat(psk): parametric BPSK demodulator + psk31 back-compat shim (
 
 ### T6 — Register the BPSK family in the daemon
 
-- [ ] **Step 1: Write the failing test** (`crates/omnimodemd/src/mode/mod.rs`, in `#[cfg(test)] mod tests`)
+- [ ] **Step 1: Write the failing test** (`crates/omnimodem/src/mode/mod.rs`, in `#[cfg(test)] mod tests`)
 
 ```rust
 #[test]
@@ -765,12 +765,12 @@ fn parse_resolves_psk_family() {
 
 - [ ] **Step 2: Run it, verify it fails**
 
-Run: `cargo test -p omnimodemd parse_resolves_psk_family`
+Run: `cargo test -p omnimodem parse_resolves_psk_family`
 Expected: FAIL — `ModeConfig::Psk` does not exist.
 
 - [ ] **Step 3: Implement the `Psk` variant + registry arms**
 
-In `crates/omnimodemd/src/mode/mod.rs`: add the variant, parse, label, and string arms. Keep the old `Psk31 { center_hz }` variant as a parse alias that maps to `Psk { submode: "psk31", .. }` OR replace it — replace it, updating the two existing `Psk31` references in `registry.rs` and the `mod.rs` tests.
+In `crates/omnimodem/src/mode/mod.rs`: add the variant, parse, label, and string arms. Keep the old `Psk31 { center_hz }` variant as a parse alias that maps to `Psk { submode: "psk31", .. }` OR replace it — replace it, updating the two existing `Psk31` references in `registry.rs` and the `mod.rs` tests.
 
 ```rust
 // in enum ModeConfig (replaces `Psk31 { center_hz }`):
@@ -793,7 +793,7 @@ In `crates/omnimodemd/src/mode/mod.rs`: add the variant, parse, label, and strin
         omnimodem_dsp::modes::psk::PskVariant::from_label(submode).map(|v| v.label()).unwrap_or("psk"),
 ```
 
-In `crates/omnimodemd/src/mode/registry.rs`, replace the two `ModeConfig::Psk31` arms:
+In `crates/omnimodem/src/mode/registry.rs`, replace the two `ModeConfig::Psk31` arms:
 
 ```rust
 // demod_kind:
@@ -812,13 +812,13 @@ Update the `use omnimodem_dsp::modes::psk31::{...}` import to `use omnimodem_dsp
 
 - [ ] **Step 4: Run tests, verify pass**
 
-Run: `cargo test -p omnimodemd mode::`
+Run: `cargo test -p omnimodem mode::`
 Expected: PASS (new parse test + all existing registry/mode tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/mod.rs crates/omnimodemd/src/mode/registry.rs
+git add crates/omnimodem/src/mode/mod.rs crates/omnimodem/src/mode/registry.rs
 git commit -m "feat(daemon): register parametric PSK family (Psk ModeConfig variant)"
 ```
 
@@ -950,17 +950,17 @@ Regenerate both sides: run `clients/omnimodem-tui/gen.sh` (Go) and rebuild the R
         }}}
 ```
 
-The daemon's `ConfigureChannel` handler that maps `ModeParams` → mode string must gain a `PskParams` arm producing `"<submode>:center=<hz>"` — locate it (grep `Psk31Params` in `crates/omnimodemd/src`) and add the parallel `PskParams` case.
+The daemon's `ConfigureChannel` handler that maps `ModeParams` → mode string must gain a `PskParams` arm producing `"<submode>:center=<hz>"` — locate it (grep `Psk31Params` in `crates/omnimodem/src`) and add the parallel `PskParams` case.
 
 - [ ] **Step 4: Run tests, verify pass**
 
-Run: `cd clients/omnimodem-tui && go test ./...` and `cargo test -p omnimodemd`
+Run: `cd clients/omnimodem-tui && go test ./...` and `cargo test -p omnimodem`
 Expected: PASS (Go proto arm resolves; daemon param mapping test green).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add proto/omnimodem.proto clients/omnimodem-tui/internal/app/modes.go clients/omnimodem-tui/internal/app/modes_test.go clients/omnimodem-tui/internal/pb crates/omnimodemd/src
+git add proto/omnimodem.proto clients/omnimodem-tui/internal/app/modes.go clients/omnimodem-tui/internal/app/modes_test.go clients/omnimodem-tui/internal/pb crates/omnimodem/src
 git commit -m "feat(tui): PSK BPSK-rate modes selectable + PskParams proto"
 ```
 
@@ -1071,11 +1071,11 @@ git commit -m "feat(psk): +F modulator + soft-Viterbi demodulator (grid loopback
 ### T6 — Register +F (already covered by the parametric `Psk` arm)
 
 - [ ] **Step 1:** Extend `parse_resolves_psk_family` in `mode/mod.rs` with `psk63f`/`psk125f` assertions. The parametric arm from Task 1 T6 already resolves them (no new registry code); this test confirms it.
-- [ ] **Step 2: Run** `cargo test -p omnimodemd parse_resolves_psk_family` → PASS.
+- [ ] **Step 2: Run** `cargo test -p omnimodem parse_resolves_psk_family` → PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/mod.rs
+git add crates/omnimodem/src/mode/mod.rs
 git commit -m "test(daemon): confirm +F submodes resolve via the Psk arm"
 ```
 
@@ -1214,7 +1214,7 @@ git commit -m "feat(psk): differential QPSK modulator + soft-Viterbi demod (grid
 - [ ] **Step 1:** Extend `parse_resolves_psk_family` with `qpsk31`/`qpsk250` assertions (resolved by the Task-1 arm). **Step 2:** Run → PASS. **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/mod.rs
+git add crates/omnimodem/src/mode/mod.rs
 git commit -m "test(daemon): confirm QPSK submodes resolve via the Psk arm"
 ```
 
@@ -1328,11 +1328,11 @@ fn psk_variant_grid_matches_fldigi_param_table() {
 
 - [ ] **Step 2: Run** → FAIL if any table row disagrees with `params()`; **reconcile against `psk.cxx` (the reference wins)** — fix `params()`, not the test, if the code was wrong.
 - [ ] **Step 3:** Extend `parse_resolves_psk_family` (daemon) with `psk250r`/`psk125rc4` assertions (parametric arm resolves them).
-- [ ] **Step 4: Run** `cargo test -p omnimodem-dsp --lib modes::psk` and `cargo test -p omnimodemd parse_resolves_psk_family` → PASS.
+- [ ] **Step 4: Run** `cargo test -p omnimodem-dsp --lib modes::psk` and `cargo test -p omnimodem parse_resolves_psk_family` → PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/dsp/src/modes/psk.rs crates/omnimodemd/src/mode/mod.rs
+git add crates/dsp/src/modes/psk.rs crates/omnimodem/src/mode/mod.rs
 git commit -m "test(psk): full PskVariant grid param table-test vs fldigi"
 ```
 
@@ -1376,7 +1376,7 @@ Run:
 ```bash
 cargo build --workspace
 cargo test -p omnimodem-dsp --features testutil
-cargo test -p omnimodemd
+cargo test -p omnimodem
 cd clients/omnimodem-tui && go test ./... && cd -
 ```
 Expected: all green. Every new mode loopbacks; every KAT bit-domain gate is bit-exact; BER floors met; TUI tests pass.

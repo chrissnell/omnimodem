@@ -427,7 +427,7 @@ in the phase that owns it.
 ## Phase 1 — Program structure & gRPC control plane
 
 **Status: implemented & merged** (plan: `docs/plans/2026-06-18-omnimodem-phase1-grpc-control-plane.md`;
-code under `crates/omnimodemd/`).
+code under `crates/omnimodem/`).
 
 **Goal.** Stand up the workspace and the async-control-edge / sync-core split
 (Architecture) with the control plane fully working against a **stub core** — no

@@ -5,7 +5,7 @@
 //! RPC sequence against real hardware.
 
 // MANUAL REAL-HARDWARE GATE (run on a host with a sound card + radio):
-//   1. cargo run -p omnimodemd   (Phase-1 daemon over UDS)
+//   1. cargo run -p omnimodem   (Phase-1 daemon over UDS)
 //   2. With grpcurl or the reference client:
 //        a. ListDevices -> confirm the USB sound card appears with a stable
 //           DeviceId (usb:VVVV:PPPP:serial or alsa:<card>).
@@ -23,9 +23,9 @@
 // Pass criterion: the radio keys, audio plays, PTT releases after drain, and
 // hotplug eviction fires -- all over gRPC, with no DSP mode attached.
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{
     ConfigureAudioRequest, ConfigureChannelRequest, ConfigurePttRequest, ListDevicesRequest,
     PttMethod, SubscribeRequest, TransmitRequest,
 };
@@ -58,7 +58,7 @@ async fn phase2_exit_criterion_roundtrip() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_phase2_for_test(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_phase2_for_test(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let mut client = connect(sock).await;

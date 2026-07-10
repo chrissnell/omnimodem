@@ -8,8 +8,8 @@ the reference implementations (WSJT-X, fldigi, Direwolf) are the starting point.
 
 | Term | In this project | Pointer |
 |---|---|---|
-| Control edge | The async tonic/tokio surface: gRPC handlers + subscription streams. No DSP. | [`grpc-edge.md`](grpc-edge.md), `crates/omnimodemd/src/grpc/` |
-| Sync core | The synchronous `std::thread` command loop owning audio/DSP/PTT. No async on the sample path. | `crates/omnimodemd/src/core/mod.rs` |
+| Control edge | The async tonic/tokio surface: gRPC handlers + subscription streams. No DSP. | [`grpc-edge.md`](grpc-edge.md), `crates/omnimodem/src/grpc/` |
+| Sync core | The synchronous `std::thread` command loop owning audio/DSP/PTT. No async on the sample path. | `crates/omnimodem/src/core/mod.rs` |
 | `CoreHandle` | The edge's handle to the core: bounded command sender + the two broadcast event senders. | `core/mod.rs` |
 | `Command` | One variant per RPC action, carrying operands + a `oneshot` reply channel. | `core/command.rs` |
 | Supervisor | State owner on the core thread: channels, device cache, PTT registry, interlock, SQLite store. | `supervisor/mod.rs` |

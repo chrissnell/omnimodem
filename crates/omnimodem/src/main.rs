@@ -1,10 +1,10 @@
-//! omnimodemd entrypoint: wire the sync core to the authorized gRPC edge.
+//! omnimodem entrypoint: wire the sync core to the authorized gRPC edge.
 
-use omnimodemd::authz::{self, Transport};
-use omnimodemd::core::command::Command;
-use omnimodemd::grpc::ControlService;
-use omnimodemd::metrics::ChannelMetricsSnapshot;
-use omnimodemd::persist::Store;
+use omnimodem::authz::{self, Transport};
+use omnimodem::core::command::Command;
+use omnimodem::grpc::ControlService;
+use omnimodem::metrics::ChannelMetricsSnapshot;
+use omnimodem::persist::Store;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = std::env::var("OMNIMODEM_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| runtime_dir.join("omnimodem.conf"));
-    let registered_devices = omnimodemd::config::load_registered_devices(&config_path);
+    let registered_devices = omnimodem::config::load_registered_devices(&config_path);
     if !registered_devices.is_empty() {
         tracing::info!(
             count = registered_devices.len(),
@@ -53,12 +53,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!(
-        version = omnimodemd::VERSION,
+        version = omnimodem::VERSION,
         runtime_dir = %runtime_dir.display(),
-        "omnimodemd starting",
+        "omnimodem starting",
     );
     let store = Store::open(&db_path)?;
-    let (core_handle, _join) = omnimodemd::production_core(store, registered_devices)?;
+    let (core_handle, _join) = omnimodem::production_core(store, registered_devices)?;
 
     // Optional Prometheus exporter (off unless OMNIMODEM_PROMETHEUS_ADDR is set).
     if let Some(addr) = std::env::var("OMNIMODEM_PROMETHEUS_ADDR")
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::task::block_in_place(|| rx.blocking_recv()).unwrap_or_default()
         };
         tokio::spawn(async move {
-            if let Err(e) = omnimodemd::metrics::prometheus::serve(addr, fetch).await {
+            if let Err(e) = omnimodem::metrics::prometheus::serve(addr, fetch).await {
                 tracing::warn!("prometheus exporter exited: {e}");
             }
         });
@@ -89,11 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let serve = async {
         match &transport {
             Transport::Routable { addr } => {
-                tracing::info!(%addr, "omnimodemd {} serving (routable mTLS)", omnimodemd::VERSION);
+                tracing::info!(%addr, "omnimodem {} serving (routable mTLS)", omnimodem::VERSION);
                 authz::serve_routable(svc, *addr).await
             }
             _ => {
-                tracing::info!(socket = %sock_path.display(), "omnimodemd {} serving (uds)", omnimodemd::VERSION);
+                tracing::info!(socket = %sock_path.display(), "omnimodem {} serving (uds)", omnimodem::VERSION);
                 authz::serve_uds(svc, &sock_path).await
             }
         }

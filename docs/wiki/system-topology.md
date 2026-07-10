@@ -8,9 +8,9 @@ build/run steps are in [`../running.md`](../running.md).
 
 | Process | Language | Source | Notes |
 |---|---|---|---|
-| `omnimodemd` | Rust | [`../../crates/omnimodemd/src/main.rs`](../../crates/omnimodemd/src/main.rs) | The modem daemon. Owns audio, DSP, PTT; serves the gRPC control plane. Binary crate `omnimodemd`. |
+| `omnimodem` | Rust | [`../../crates/omnimodem/src/main.rs`](../../crates/omnimodem/src/main.rs) | The modem daemon. Owns audio, DSP, PTT; serves the gRPC control plane. Binary crate `omnimodem`. |
 | `omnimodem-tui` | Go | [`../../clients/omnimodem-tui/cmd/omnimodem-tui/main.go`](../../clients/omnimodem-tui/cmd/omnimodem-tui/main.go) | Reference terminal client. Talks gRPC to the daemon. Not required by the daemon. |
-| `omnimodem-dsp` | Rust (lib) | [`../../crates/dsp/`](../../crates/dsp/) | Pure DSP/FEC/framing library + mode implementations. No process of its own; linked into `omnimodemd`. |
+| `omnimodem-dsp` | Rust (lib) | [`../../crates/dsp/`](../../crates/dsp/) | Pure DSP/FEC/framing library + mode implementations. No process of its own; linked into `omnimodem`. |
 | `wavtool` | Rust | [`../../crates/wavtool/src/main.rs`](../../crates/wavtool/src/main.rs) | Small WAV helper for tooling/tests. |
 
 ## The async-edge / sync-core split
@@ -23,7 +23,7 @@ A hard line runs through the daemon (see [`grpc-edge.md`](grpc-edge.md)):
 - **Synchronous core** (plain `std::thread`): the `Supervisor`, the live per-channel
   RX/TX worker threads, audio, PTT. **No async on the sample path.**
 
-Bridge, created in [`../../crates/omnimodemd/src/core/mod.rs`](../../crates/omnimodemd/src/core/mod.rs) (`spawn`):
+Bridge, created in [`../../crates/omnimodem/src/core/mod.rs`](../../crates/omnimodem/src/core/mod.rs) (`spawn`):
 
 | Item | Value | Source |
 |---|---|---|
@@ -36,12 +36,12 @@ Bridge, created in [`../../crates/omnimodemd/src/core/mod.rs`](../../crates/omni
 | Item | Value | Source |
 |---|---|---|
 | Service | `omnimodem.v1.ModemControl` | [`../../proto/omnimodem.proto`](../../proto/omnimodem.proto) |
-| Default transport | Unix-domain socket | [`../../crates/omnimodemd/src/main.rs`](../../crates/omnimodemd/src/main.rs), [`../../crates/omnimodemd/src/authz/uds.rs`](../../crates/omnimodemd/src/authz/uds.rs) |
+| Default transport | Unix-domain socket | [`../../crates/omnimodem/src/main.rs`](../../crates/omnimodem/src/main.rs), [`../../crates/omnimodem/src/authz/uds.rs`](../../crates/omnimodem/src/authz/uds.rs) |
 | Default socket path | `${OMNIMODEM_RUNTIME_DIR}/omnimodem.sock` → `<tempdir>/omnimodem/omnimodem.sock` (Linux `/tmp/omnimodem/omnimodem.sock`) | `main.rs` |
-| UDS authz | socket-file mode hardened + `SO_PEERCRED` peer-uid == daemon uid | [`../../crates/omnimodemd/src/authz/uds.rs`](../../crates/omnimodemd/src/authz/uds.rs) |
-| Routable transport | mTLS TCP when `OMNIMODEM_ROUTABLE_ADDR` set; **fails closed** without TLS material | [`../../crates/omnimodemd/src/authz/tls.rs`](../../crates/omnimodemd/src/authz/tls.rs), `authz/mod.rs` |
-| Prometheus metrics | optional exporter on `OMNIMODEM_PROMETHEUS_ADDR` | [`../../crates/omnimodemd/src/metrics/prometheus.rs`](../../crates/omnimodemd/src/metrics/prometheus.rs) |
-| KISS-over-TCP (per packet channel) | started on demand by `ConfigureKissListener`, binds `host:port` | [`../../crates/omnimodemd/src/kiss/listener.rs`](../../crates/omnimodemd/src/kiss/listener.rs) |
+| UDS authz | socket-file mode hardened + `SO_PEERCRED` peer-uid == daemon uid | [`../../crates/omnimodem/src/authz/uds.rs`](../../crates/omnimodem/src/authz/uds.rs) |
+| Routable transport | mTLS TCP when `OMNIMODEM_ROUTABLE_ADDR` set; **fails closed** without TLS material | [`../../crates/omnimodem/src/authz/tls.rs`](../../crates/omnimodem/src/authz/tls.rs), `authz/mod.rs` |
+| Prometheus metrics | optional exporter on `OMNIMODEM_PROMETHEUS_ADDR` | [`../../crates/omnimodem/src/metrics/prometheus.rs`](../../crates/omnimodem/src/metrics/prometheus.rs) |
+| KISS-over-TCP (per packet channel) | started on demand by `ConfigureKissListener`, binds `host:port` | [`../../crates/omnimodem/src/kiss/listener.rs`](../../crates/omnimodem/src/kiss/listener.rs) |
 
 ## Environment knobs (daemon)
 
@@ -59,10 +59,10 @@ UDS path or `host:port`), and its own identity config (see [`tui-client.md`](tui
 
 | Item | Value | Source |
 |---|---|---|
-| Store | SQLite | [`../../crates/omnimodemd/src/persist/mod.rs`](../../crates/omnimodemd/src/persist/mod.rs) |
-| Path | `${OMNIMODEM_RUNTIME_DIR}/omnimodem.sqlite` | [`../../crates/omnimodemd/src/main.rs`](../../crates/omnimodemd/src/main.rs) |
-| Keyed on | the stable **`DeviceId`** (canonical string), never the volatile `/dev` path | `persist/mod.rs`, [`../../crates/omnimodemd/src/ids.rs`](../../crates/omnimodemd/src/ids.rs) |
-| What persists | channel config: name, mode string, RX/TX/PTT device ids, sample rates, fanout, PTT method + timing, RSID flags | `persist/mod.rs`, [`../../crates/omnimodemd/src/supervisor/channel.rs`](../../crates/omnimodemd/src/supervisor/channel.rs) |
+| Store | SQLite | [`../../crates/omnimodem/src/persist/mod.rs`](../../crates/omnimodem/src/persist/mod.rs) |
+| Path | `${OMNIMODEM_RUNTIME_DIR}/omnimodem.sqlite` | [`../../crates/omnimodem/src/main.rs`](../../crates/omnimodem/src/main.rs) |
+| Keyed on | the stable **`DeviceId`** (canonical string), never the volatile `/dev` path | `persist/mod.rs`, [`../../crates/omnimodem/src/ids.rs`](../../crates/omnimodem/src/ids.rs) |
+| What persists | channel config: name, mode string, RX/TX/PTT device ids, sample rates, fanout, PTT method + timing, RSID flags | `persist/mod.rs`, [`../../crates/omnimodem/src/supervisor/channel.rs`](../../crates/omnimodem/src/supervisor/channel.rs) |
 | Write path | on the core thread / off the DSP hot path — a disk hiccup can't cause an audio underrun | `persist/mod.rs` |
 
 On startup the core restores persisted channels and re-establishes live audio/PTT

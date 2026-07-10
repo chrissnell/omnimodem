@@ -71,7 +71,7 @@ func getSdrCapsCmd(c client.ModemClient, ch uint32) tea.Cmd {
 }
 
 // isSDRDevice reports whether a channel's bound capture device is an rtl_tcp SDR
-// endpoint, whose canonical id is "rtltcp:<host>:<port>" (see crates/omnimodemd
+// endpoint, whose canonical id is "rtltcp:<host>:<port>" (see crates/omnimodem
 // ids.rs). SDR channels route to the tuning view instead of the operate view.
 func isSDRDevice(id string) bool {
 	const prefix = "rtltcp:"

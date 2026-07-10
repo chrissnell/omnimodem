@@ -884,7 +884,7 @@ No placeholders; every step has runnable code and an exact command.
 
 This plan (DSP) is the foundation. The remaining Phase A plans, each its own document under `docs/plans/`:
 
-**Plan 2 — `rtl_tcp` backend + control/telemetry seam** (`crates/omnimodemd/src/audio/`, `core/`):
+**Plan 2 — `rtl_tcp` backend + control/telemetry seam** (`crates/omnimodem/src/audio/`, `core/`):
 - `DeviceId::RtlTcp { host, port }` variant + `to_canonical_string`/`parse` (`ids.rs`).
 - `RtlTcpBackend` implementing `AudioBackend` (`audio/rtlsdr.rs`): TCP connect, 12-byte header parse, command encoder (freq/rate/gain/ppm), IQ read loop calling `NbfmReceiver::push_iq`, delivering `AudioChunk`s via `CaptureHandle`.
 - **Seam decision to confirm before starting Plan 2:** the running backend needs (a) a runtime **control** path for tune/gain/demod-mode and (b) a **telemetry-out** path for the RF waterfall. Proposed: mirror the proven `AudioGain` pattern — an `Arc` of atomics (`SdrControl`) for control, and hand the SDR backend a clone of the `broadcast::Sender<TelemetryEvent>` so it emits `SpectrumFrame{transmit:false, freq_start_hz: RF…}` directly (RX worker's audio-passband tap stays off for SDR channels). This extends the backend construction path; get maintainer sign-off on that seam first.

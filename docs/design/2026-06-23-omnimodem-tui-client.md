@@ -4,7 +4,7 @@
 > Scope: configuration + digital-mode **TX**. RX (decode display) is deferred, but
 > the layout reserves its place so it drops in without rework.
 
-A terminal client for `omnimodemd`, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+A terminal client for `omnimodem`, built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 It lets an operator enumerate audio/PTT hardware, bind a channel, pick a digital
 mode, and send a message — hearing the modulated signal on the output device.
 
@@ -16,7 +16,7 @@ that bar; §6 is the layout it produces.
 ## 1. Goals & non-goals
 
 **Goals (MVP):**
-1. Connect to a local `omnimodemd` over its gRPC control plane.
+1. Connect to a local `omnimodem` over its gRPC control plane.
 2. Enumerate audio + PTT devices; select RX/TX audio and a PTT device + method.
 3. Bind a channel (`ConfigureChannel` + `ConfigureAudio` + `ConfigurePtt`).
 4. Show live audio levels (dBFS) and PTT state from the event stream.
@@ -38,7 +38,7 @@ that bar; §6 is the layout it produces.
 
 ## 2. Where it lives
 
-`omnimodemd` is a Rust workspace; the TUI is Go. Proposal: a self-contained Go
+`omnimodem` is a Rust workspace; the TUI is Go. Proposal: a self-contained Go
 module at **`clients/omnimodem-tui/`** in this repo, generating bindings from
 `proto/omnimodem.proto` via `protoc-gen-go` + `protoc-gen-go-grpc`. One repo keeps
 the proto and its first reference frontend versioned together. (Alternative: a

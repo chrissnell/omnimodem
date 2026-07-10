@@ -1,7 +1,7 @@
 //! Integration: unary RPCs over an in-process UDS server (no authz).
 
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{ConfigureChannelRequest, GetStateRequest, TransmitRequest};
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{ConfigureChannelRequest, GetStateRequest, TransmitRequest};
 use tokio::net::UnixStream;
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
@@ -27,7 +27,7 @@ async fn configure_get_transmit_roundtrip() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
     });
     // Give the server a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;

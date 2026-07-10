@@ -56,9 +56,9 @@ Phase 5 is **five independent workstreams**. Per the writing-plans scope check, 
 
 | File | Responsibility |
 |---|---|
-| `crates/omnimodemd/src/metrics/mod.rs` | `ChannelMetrics` accumulator + the per-channel metric snapshot type. |
-| `crates/omnimodemd/src/metrics/prometheus.rs` | Optional Prometheus text-exposition HTTP exporter over a tokio listener. |
-| `crates/omnimodemd/src/ptt/lease.rs` | `TxLeaseRegistry`: per-channel exclusive TX lease over a rig. |
+| `crates/omnimodem/src/metrics/mod.rs` | `ChannelMetrics` accumulator + the per-channel metric snapshot type. |
+| `crates/omnimodem/src/metrics/prometheus.rs` | Optional Prometheus text-exposition HTTP exporter over a tokio listener. |
+| `crates/omnimodem/src/ptt/lease.rs` | `TxLeaseRegistry`: per-channel exclusive TX lease over a rig. |
 | `crates/omnimodem-cli/Cargo.toml` + `src/main.rs` | Reference CLI/TUI client (clap subcommands + a ratatui live view). |
 | `crates/omnimodem-cli/src/tui.rs` | Live channel/metrics/event TUI. |
 
@@ -69,14 +69,14 @@ Phase 5 is **five independent workstreams**. Per the writing-plans scope check, 
 | `crates/dsp/src/fec/mod.rs` | `pub mod conv; fano; fht; interleave; golay; rs_gf64;` |
 | `crates/dsp/src/framing/message77.rs` | Add the legacy 72-bit (JT65/JT9) and 50-bit (WSPR) packers. |
 | `crates/dsp/src/modes/mod.rs`, `crates/dsp/src/lib.rs` | `pub mod` + re-export the eight new modes. |
-| `crates/omnimodemd/src/mode/mod.rs` | Extend `ModeConfig` + `parse`/`label` with the eight new modes. |
-| `crates/omnimodemd/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`tx_slot_s` arms for the eight modes. |
-| `crates/omnimodemd/src/core/event.rs` | Add `TelemetryEvent::ChannelMetrics { .. }`. |
-| `crates/omnimodemd/src/core/rx_worker.rs` | Accumulate + emit per-channel metrics from decode results. |
-| `crates/omnimodemd/src/core/tx_worker.rs` | Honor the TX exclusive lease before keying. |
-| `crates/omnimodemd/src/ptt/interlock.rs` (or new `lease.rs`) | Exclusive-lease state. |
-| `crates/omnimodemd/src/authz/tls.rs` | Replace the fail-closed stub with a real rustls mTLS config + per-method authz. |
-| `crates/omnimodemd/src/authz/mod.rs`, `src/main.rs` | `serve_routable` path that binds TCP under mTLS. |
+| `crates/omnimodem/src/mode/mod.rs` | Extend `ModeConfig` + `parse`/`label` with the eight new modes. |
+| `crates/omnimodem/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`tx_slot_s` arms for the eight modes. |
+| `crates/omnimodem/src/core/event.rs` | Add `TelemetryEvent::ChannelMetrics { .. }`. |
+| `crates/omnimodem/src/core/rx_worker.rs` | Accumulate + emit per-channel metrics from decode results. |
+| `crates/omnimodem/src/core/tx_worker.rs` | Honor the TX exclusive lease before keying. |
+| `crates/omnimodem/src/ptt/interlock.rs` (or new `lease.rs`) | Exclusive-lease state. |
+| `crates/omnimodem/src/authz/tls.rs` | Replace the fail-closed stub with a real rustls mTLS config + per-method authz. |
+| `crates/omnimodem/src/authz/mod.rs`, `src/main.rs` | `serve_routable` path that binds TCP under mTLS. |
 | `proto/omnimodem.proto` | Add `ChannelMetrics`, `GetMetrics`, `AcquireTxLease`/`ReleaseTxLease` RPCs + messages. |
 | `Cargo.toml` (workspace) | Add `crates/omnimodem-cli`; add `ratatui`/`crossterm`/`clap` and `tonic` `tls` feature. |
 | `crates/dsp/tests/kat.rs`, `ber.rs`, `loopback.rs`, `snapshots.rs` | Per-block KAT + per-mode loopback/BER/golden + a `phase5_exit_criterion` gate. |
@@ -942,12 +942,12 @@ All four are **windowed/block** modes (`BlockDemodulator`), like the Phase-4 FT8
 ### Task B.0: Add the four WSJT-X mode labels to the daemon config
 
 **Files:**
-- Modify: `crates/omnimodemd/src/mode/mod.rs`
-- Test: `crates/omnimodemd/src/mode/mod.rs` (inline)
+- Modify: `crates/omnimodem/src/mode/mod.rs`
+- Test: `crates/omnimodem/src/mode/mod.rs` (inline)
 
 - [ ] **Step 1: Write the failing parse test**
 
-Add to the inline `mod tests` in `crates/omnimodemd/src/mode/mod.rs`:
+Add to the inline `mod tests` in `crates/omnimodem/src/mode/mod.rs`:
 
 ```rust
     #[test]
@@ -961,12 +961,12 @@ Add to the inline `mod tests` in `crates/omnimodemd/src/mode/mod.rs`:
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p omnimodemd mode::tests::parse_resolves_wsjtx_breadth_modes`
+Run: `cargo test -p omnimodem mode::tests::parse_resolves_wsjtx_breadth_modes`
 Expected: FAIL — variants don't exist.
 
 - [ ] **Step 3: Extend the enum + parse + label**
 
-In `crates/omnimodemd/src/mode/mod.rs`, add to the `ModeConfig` enum (after `Psk31`):
+In `crates/omnimodem/src/mode/mod.rs`, add to the `ModeConfig` enum (after `Psk31`):
 
 ```rust
     Ft4,
@@ -995,13 +995,13 @@ Add to `label`'s match:
 
 - [ ] **Step 4: Run mode tests**
 
-Run: `cargo test -p omnimodemd mode::`
+Run: `cargo test -p omnimodem mode::`
 Expected: PASS (the `labels_are_distinct_and_non_empty` test still holds; add the four labels there too if it enumerates).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/mod.rs
+git add crates/omnimodem/src/mode/mod.rs
 git commit -m "Add FT4/JT65/JT9/WSPR mode labels to ModeConfig"
 ```
 
@@ -1596,8 +1596,8 @@ git commit -m "Add WSPR assembly (4-FSK + Fano + bit-reversal interleave + 50-bi
 ### Task B.6: Register the four WSJT-X modes in the daemon
 
 **Files:**
-- Modify: `crates/omnimodemd/src/mode/registry.rs`
-- Test: `crates/omnimodemd/src/mode/registry.rs` (inline)
+- Modify: `crates/omnimodem/src/mode/registry.rs`
+- Test: `crates/omnimodem/src/mode/registry.rs` (inline)
 
 - [ ] **Step 1: Write the failing registry test**
 
@@ -1623,7 +1623,7 @@ Add to `registry.rs`'s `mod tests`:
 
 - [ ] **Step 2: Run to confirm it fails (non-exhaustive match)**
 
-Run: `cargo test -p omnimodemd mode::registry`
+Run: `cargo test -p omnimodem mode::registry`
 Expected: FAIL — the new `ModeConfig` arms are unhandled (compile error on the `match`es).
 
 - [ ] **Step 3: Add the registry arms**
@@ -1674,13 +1674,13 @@ fn windowed(bd: Box<dyn BlockDemodulator>) -> DemodKind {
 
 - [ ] **Step 4: Run registry + mode tests**
 
-Run: `cargo test -p omnimodemd mode::`
+Run: `cargo test -p omnimodem mode::`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/registry.rs
+git add crates/omnimodem/src/mode/registry.rs
 git commit -m "Register FT4/JT65/JT9/WSPR in the daemon mode registry"
 ```
 
@@ -1693,7 +1693,7 @@ All four are **streaming** modes (`Demodulator`), like the Phase-4 PSK31/RTTY/CW
 ### Task C.0: Add the four fldigi mode labels to the daemon config
 
 **Files:**
-- Modify: `crates/omnimodemd/src/mode/mod.rs`
+- Modify: `crates/omnimodem/src/mode/mod.rs`
 - Test: inline
 
 - [ ] **Step 1: Failing parse test**
@@ -1739,10 +1739,10 @@ Add to `label`:
 
 - [ ] **Step 3: Run + commit**
 
-Run: `cargo test -p omnimodemd mode::` → PASS.
+Run: `cargo test -p omnimodem mode::` → PASS.
 
 ```bash
-git add crates/omnimodemd/src/mode/mod.rs
+git add crates/omnimodem/src/mode/mod.rs
 git commit -m "Add MFSK16/Olivia/THOR/Hell mode labels to ModeConfig"
 ```
 
@@ -2130,7 +2130,7 @@ git commit -m "Add Feld-Hell assembly (OOK column raster + font correlator)"
 ### Task C.5: Register the four fldigi modes in the daemon
 
 **Files:**
-- Modify: `crates/omnimodemd/src/mode/registry.rs`
+- Modify: `crates/omnimodem/src/mode/registry.rs`
 - Test: inline
 
 - [ ] **Step 1: Failing registry test**
@@ -2173,10 +2173,10 @@ Import the new types and add `demod_kind`/`build_modulator` arms:
 
 - [ ] **Step 3: Run + commit**
 
-Run: `cargo test -p omnimodemd mode::` → PASS.
+Run: `cargo test -p omnimodem mode::` → PASS.
 
 ```bash
-git add crates/omnimodemd/src/mode/registry.rs
+git add crates/omnimodem/src/mode/registry.rs
 git commit -m "Register MFSK16/Olivia/THOR/Hell in the daemon mode registry"
 ```
 
@@ -2189,13 +2189,13 @@ The lossy-telemetry event class already exists (Phase 1); Phase 5 grows the **me
 ### Task D.1: Define the `ChannelMetrics` accumulator
 
 **Files:**
-- Create: `crates/omnimodemd/src/metrics/mod.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
-- Test: `crates/omnimodemd/src/metrics/mod.rs` (inline)
+- Create: `crates/omnimodem/src/metrics/mod.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
+- Test: `crates/omnimodem/src/metrics/mod.rs` (inline)
 
 - [ ] **Step 1: Declare the module**
 
-In `crates/omnimodemd/src/lib.rs`, after `pub mod core;` add:
+In `crates/omnimodem/src/lib.rs`, after `pub mod core;` add:
 
 ```rust
 pub mod metrics;
@@ -2203,7 +2203,7 @@ pub mod metrics;
 
 - [ ] **Step 2: Write the accumulator + failing test**
 
-Create `crates/omnimodemd/src/metrics/mod.rs`:
+Create `crates/omnimodem/src/metrics/mod.rs`:
 
 ```rust
 //! Per-channel metrics (design §"Metrics & observability"). The RX worker feeds
@@ -2297,29 +2297,29 @@ mod tests {
 
 - [ ] **Step 3: Create an empty `prometheus.rs` so the module compiles**
 
-Create `crates/omnimodemd/src/metrics/prometheus.rs` with just `//! Prometheus text-exposition exporter (filled in Task D.4).` for now.
+Create `crates/omnimodem/src/metrics/prometheus.rs` with just `//! Prometheus text-exposition exporter (filled in Task D.4).` for now.
 
 - [ ] **Step 4: Run the test**
 
-Run: `cargo test -p omnimodemd metrics::`
+Run: `cargo test -p omnimodem metrics::`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/metrics/ crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/metrics/ crates/omnimodem/src/lib.rs
 git commit -m "Add per-channel ChannelMetrics accumulator"
 ```
 
 ### Task D.2: Add the `ChannelMetrics` telemetry event and emit it from the RX worker
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/event.rs`, `crates/omnimodemd/src/core/rx_worker.rs`
-- Test: `crates/omnimodemd/src/core/rx_worker.rs` (inline)
+- Modify: `crates/omnimodem/src/core/event.rs`, `crates/omnimodem/src/core/rx_worker.rs`
+- Test: `crates/omnimodem/src/core/rx_worker.rs` (inline)
 
 - [ ] **Step 1: Add the event variant**
 
-In `crates/omnimodemd/src/core/event.rs`, add to `TelemetryEvent`:
+In `crates/omnimodem/src/core/event.rs`, add to `TelemetryEvent`:
 
 ```rust
     /// Per-channel decode/health metrics (lossy: only the latest matters).
@@ -2337,7 +2337,7 @@ In `crates/omnimodemd/src/core/event.rs`, add to `TelemetryEvent`:
 
 - [ ] **Step 2: Write the failing RX-worker test**
 
-Inspect the RX worker first: `grep -nE 'fn |FrameEvent|telemetry|emit' crates/omnimodemd/src/core/rx_worker.rs`. The worker already emits `FrameEvent::RxFrame` for each decode. Add a test asserting a `ChannelMetrics` telemetry event is emitted after decodes (adapt to the worker's existing test harness — likely a `FileBackend` capture feeding an AFSK demod, as in the Phase-4 `configuring_an_afsk_channel_spawns_rx_and_emits_frames` core test):
+Inspect the RX worker first: `grep -nE 'fn |FrameEvent|telemetry|emit' crates/omnimodem/src/core/rx_worker.rs`. The worker already emits `FrameEvent::RxFrame` for each decode. Add a test asserting a `ChannelMetrics` telemetry event is emitted after decodes (adapt to the worker's existing test harness — likely a `FileBackend` capture feeding an AFSK demod, as in the Phase-4 `configuring_an_afsk_channel_spawns_rx_and_emits_frames` core test):
 
 ```rust
     #[test]
@@ -2371,21 +2371,21 @@ Throttle: only send when the second-resolution timestamp advances or a frame was
 
 - [ ] **Step 4: Run RX worker + core tests**
 
-Run: `cargo test -p omnimodemd core::`
+Run: `cargo test -p omnimodem core::`
 Expected: PASS (existing decode tests still green; the new metrics test passes).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/event.rs crates/omnimodemd/src/core/rx_worker.rs
+git add crates/omnimodem/src/core/event.rs crates/omnimodem/src/core/rx_worker.rs
 git commit -m "Emit per-channel ChannelMetrics telemetry from the RX worker"
 ```
 
 ### Task D.3: Proto + gRPC: `ChannelMetrics` event mapping and `GetMetrics` RPC
 
 **Files:**
-- Modify: `proto/omnimodem.proto`, `crates/omnimodemd/src/grpc/convert.rs`, `crates/omnimodemd/src/grpc/service.rs`, `crates/omnimodemd/src/grpc/subscribe.rs`, `crates/omnimodemd/src/core/command.rs`, `crates/omnimodemd/src/core/mod.rs`
-- Test: `crates/omnimodemd/tests/` (integration) or inline convert test
+- Modify: `proto/omnimodem.proto`, `crates/omnimodem/src/grpc/convert.rs`, `crates/omnimodem/src/grpc/service.rs`, `crates/omnimodem/src/grpc/subscribe.rs`, `crates/omnimodem/src/core/command.rs`, `crates/omnimodem/src/core/mod.rs`
+- Test: `crates/omnimodem/tests/` (integration) or inline convert test
 
 - [ ] **Step 1: Extend the proto (additive only — VERSIONING.md)**
 
@@ -2427,7 +2427,7 @@ message ChannelMetrics {
 
 - [ ] **Step 2: Map the telemetry event to the proto in `subscribe.rs`**
 
-Find where `TelemetryEvent` variants become `Event`s (`grep -n 'TelemetryEvent::' crates/omnimodemd/src/grpc/subscribe.rs crates/omnimodemd/src/grpc/convert.rs`). Add the `ChannelMetrics` arm mapping daemon fields → `proto::ChannelMetrics`, wrapped in `Event { kind: Some(event::Kind::ChannelMetrics(..)) }`.
+Find where `TelemetryEvent` variants become `Event`s (`grep -n 'TelemetryEvent::' crates/omnimodem/src/grpc/subscribe.rs crates/omnimodem/src/grpc/convert.rs`). Add the `ChannelMetrics` arm mapping daemon fields → `proto::ChannelMetrics`, wrapped in `Event { kind: Some(event::Kind::ChannelMetrics(..)) }`.
 
 - [ ] **Step 3: Add a `GetMetrics` command + core handler**
 
@@ -2466,23 +2466,23 @@ Add `convert::metrics_to_proto(snapshot) -> proto::ChannelMetrics` in `convert.r
 
 - [ ] **Step 5: Run the full daemon test suite + commit**
 
-Run: `cargo test -p omnimodemd`
+Run: `cargo test -p omnimodem`
 Expected: PASS (regenerated proto compiles; existing subscribe tests still green).
 
 ```bash
-git add proto/omnimodem.proto crates/omnimodemd/src/grpc/ crates/omnimodemd/src/core/command.rs crates/omnimodemd/src/core/mod.rs
+git add proto/omnimodem.proto crates/omnimodem/src/grpc/ crates/omnimodem/src/core/command.rs crates/omnimodem/src/core/mod.rs
 git commit -m "Add GetMetrics RPC and ChannelMetrics event to the gRPC surface"
 ```
 
 ### Task D.4: Optional Prometheus text-exposition exporter
 
 **Files:**
-- Modify: `crates/omnimodemd/src/metrics/prometheus.rs`, `crates/omnimodemd/src/main.rs`
-- Test: `crates/omnimodemd/src/metrics/prometheus.rs` (inline)
+- Modify: `crates/omnimodem/src/metrics/prometheus.rs`, `crates/omnimodem/src/main.rs`
+- Test: `crates/omnimodem/src/metrics/prometheus.rs` (inline)
 
 - [ ] **Step 1: Write the failing render test**
 
-Replace `crates/omnimodemd/src/metrics/prometheus.rs`:
+Replace `crates/omnimodem/src/metrics/prometheus.rs`:
 
 ```rust
 //! Optional Prometheus exporter. Off by default; enabled by setting
@@ -2554,7 +2554,7 @@ mod tests {
 
 - [ ] **Step 2: Run the render test**
 
-Run: `cargo test -p omnimodemd metrics::prometheus`
+Run: `cargo test -p omnimodem metrics::prometheus`
 Expected: PASS.
 
 - [ ] **Step 3: Wire the exporter into `main.rs` behind the env var**
@@ -2563,11 +2563,11 @@ In `main.rs`, after the core is built, if `OMNIMODEM_PROMETHEUS_ADDR` parses to 
 
 - [ ] **Step 4: Build + commit**
 
-Run: `cargo build -p omnimodemd`
+Run: `cargo build -p omnimodem`
 Expected: builds.
 
 ```bash
-git add crates/omnimodemd/src/metrics/prometheus.rs crates/omnimodemd/src/main.rs
+git add crates/omnimodem/src/metrics/prometheus.rs crates/omnimodem/src/main.rs
 git commit -m "Add optional Prometheus /metrics exporter (env-gated)"
 ```
 
@@ -2580,17 +2580,17 @@ Three independent integration pieces. None depends on WS-A/B/C; the lease and mT
 ### Task E.1: TX exclusive lease registry
 
 **Files:**
-- Create: `crates/omnimodemd/src/ptt/lease.rs`
-- Modify: `crates/omnimodemd/src/ptt/mod.rs`
-- Test: `crates/omnimodemd/src/ptt/lease.rs` (inline)
+- Create: `crates/omnimodem/src/ptt/lease.rs`
+- Modify: `crates/omnimodem/src/ptt/mod.rs`
+- Test: `crates/omnimodem/src/ptt/lease.rs` (inline)
 
 - [ ] **Step 1: Declare the module**
 
-In `crates/omnimodemd/src/ptt/mod.rs`, add `pub mod lease;`.
+In `crates/omnimodem/src/ptt/mod.rs`, add `pub mod lease;`.
 
 - [ ] **Step 2: Write the registry + failing tests**
 
-Create `crates/omnimodemd/src/ptt/lease.rs`:
+Create `crates/omnimodem/src/ptt/lease.rs`:
 
 ```rust
 //! TX exclusive lease (design §"Phase 4 TX model" / §"Open questions": the lease
@@ -2711,18 +2711,18 @@ mod tests {
 
 - [ ] **Step 3: Run + commit**
 
-Run: `cargo test -p omnimodemd ptt::lease` → PASS.
+Run: `cargo test -p omnimodem ptt::lease` → PASS.
 
 ```bash
-git add crates/omnimodemd/src/ptt/lease.rs crates/omnimodemd/src/ptt/mod.rs
+git add crates/omnimodem/src/ptt/lease.rs crates/omnimodem/src/ptt/mod.rs
 git commit -m "Add TX exclusive lease registry (per-rig, per-channel)"
 ```
 
 ### Task E.2: Honor the lease in the TX worker + expose Acquire/Release RPCs
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/tx_worker.rs`, `crates/omnimodemd/src/core/mod.rs`, `crates/omnimodemd/src/core/command.rs`, `proto/omnimodem.proto`, `crates/omnimodemd/src/grpc/service.rs`
-- Test: `crates/omnimodemd/src/core/tx_worker.rs` (inline)
+- Modify: `crates/omnimodem/src/core/tx_worker.rs`, `crates/omnimodem/src/core/mod.rs`, `crates/omnimodem/src/core/command.rs`, `proto/omnimodem.proto`, `crates/omnimodem/src/grpc/service.rs`
+- Test: `crates/omnimodem/src/core/tx_worker.rs` (inline)
 
 - [ ] **Step 1: Thread the lease into `TxWorkerCfg`**
 
@@ -2786,19 +2786,19 @@ Add `Command::AcquireTxLease { channel, reply }` / `ReleaseTxLease { channel, re
 
 - [ ] **Step 5: Run + commit**
 
-Run: `cargo test -p omnimodemd`
+Run: `cargo test -p omnimodem`
 Expected: PASS.
 
 ```bash
-git add crates/omnimodemd/src/core/ proto/omnimodem.proto crates/omnimodemd/src/grpc/service.rs
+git add crates/omnimodem/src/core/ proto/omnimodem.proto crates/omnimodem/src/grpc/service.rs
 git commit -m "Honor TX exclusive lease in the TX worker; add Acquire/Release RPCs"
 ```
 
 ### Task E.3: Real mTLS for routable binds
 
 **Files:**
-- Modify: `crates/omnimodemd/src/authz/tls.rs`, `crates/omnimodemd/src/authz/mod.rs`, `crates/omnimodemd/src/main.rs`, `Cargo.toml` (workspace), `crates/omnimodemd/Cargo.toml`
-- Test: `crates/omnimodemd/src/authz/tls.rs` (inline) + `crates/omnimodemd/tests/` (integration)
+- Modify: `crates/omnimodem/src/authz/tls.rs`, `crates/omnimodem/src/authz/mod.rs`, `crates/omnimodem/src/main.rs`, `Cargo.toml` (workspace), `crates/omnimodem/Cargo.toml`
+- Test: `crates/omnimodem/src/authz/tls.rs` (inline) + `crates/omnimodem/tests/` (integration)
 
 - [ ] **Step 1: Enable the `tls` feature on tonic**
 
@@ -2806,7 +2806,7 @@ In the workspace `Cargo.toml`, change the tonic dependency to `tonic = { version
 
 - [ ] **Step 2: Replace the fail-closed stub with a real config loader + failing test**
 
-Rewrite `crates/omnimodemd/src/authz/tls.rs`:
+Rewrite `crates/omnimodem/src/authz/tls.rs`:
 
 ```rust
 //! mTLS for routable binds (design §"Local authorization": mTLS + per-method
@@ -2905,11 +2905,11 @@ In `main.rs`, choose the transport: if `OMNIMODEM_ROUTABLE_ADDR` is set, build `
 
 - [ ] **Step 5: Run tests + build, then commit**
 
-Run: `cargo test -p omnimodemd authz::` and `cargo build -p omnimodemd`
+Run: `cargo test -p omnimodem authz::` and `cargo build -p omnimodem`
 Expected: PASS / builds.
 
 ```bash
-git add crates/omnimodemd/src/authz/ crates/omnimodemd/src/main.rs Cargo.toml crates/omnimodemd/Cargo.toml
+git add crates/omnimodem/src/authz/ crates/omnimodem/src/main.rs Cargo.toml crates/omnimodem/Cargo.toml
 git commit -m "Implement mTLS for routable binds (fail-closed cert loading + serve_routable)"
 ```
 
@@ -2959,14 +2959,14 @@ tonic-build = { workspace = true }
 tonic-build = { workspace = true }
 ```
 
-The CLI reuses the same `proto/omnimodem.proto`; add a `build.rs` that compiles it (copy the daemon's `build.rs` pattern — confirm with `cat crates/omnimodemd/build.rs`).
+The CLI reuses the same `proto/omnimodem.proto`; add a `build.rs` that compiles it (copy the daemon's `build.rs` pattern — confirm with `cat crates/omnimodem/build.rs`).
 
 - [ ] **Step 3: Write the clap CLI + arg-parse test**
 
 Create `crates/omnimodem-cli/src/main.rs`:
 
 ```rust
-//! `omnimodem` — reference CLI/TUI client for omnimodemd. Speaks the same
+//! `omnimodem` — reference CLI/TUI client for omnimodem. Speaks the same
 //! `ModemControl` gRPC surface third-party frontends use (design goal #2), over
 //! the default UDS or a routable mTLS endpoint. Subcommands cover the everyday
 //! operator loop; `tui` opens the live dashboard.

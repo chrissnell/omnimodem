@@ -50,7 +50,7 @@ thread honor a live `capture_rate` change.
 **Build/test conventions:**
 - `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0`. **Never run `cargo fmt`.**
 - `protoc` present; `build.rs` runs tonic-build on `cargo build`.
-- Daemon tests: `cargo test -p omnimodemd`. Round-trip gRPC tests use the generated
+- Daemon tests: `cargo test -p omnimodem`. Round-trip gRPC tests use the generated
   client over an in-process UDS (`serve_uds_no_authz`), like `tests/unary.rs`.
 - Full gate: `cargo test` + `cargo clippy --all-targets -- -D warnings`.
 
@@ -62,7 +62,7 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 `GetSdrCaps`/`SetSdrGain` need the tuner caps + gain table. Both live in the shared
 `SdrControl` so the async core reads what the capture thread learned at connect.
 
-**Files:** `crates/omnimodemd/src/audio/rtlsdr.rs`.
+**Files:** `crates/omnimodem/src/audio/rtlsdr.rs`.
 
 - [ ] Add `TunerCaps { tuner: String, freq_min_hz, freq_max_hz, sample_rates:
   Vec<u32>, gains_db: Vec<f32>, bias_tee_supported: bool,
@@ -85,7 +85,7 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 
 ### Task 2: Publish caps + honor live `capture_rate` in the capture thread
 
-**Files:** `crates/omnimodemd/src/audio/rtlsdr.rs`.
+**Files:** `crates/omnimodem/src/audio/rtlsdr.rs`.
 
 - [ ] In `open_capture`, after `parse_header`, `self.control.set_caps(
   caps_from_header(&hdr))` so the core can answer `GetSdrCaps`.
@@ -100,7 +100,7 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 
 ### Task 3: CoreError variants for the SDR surface
 
-**Files:** `crates/omnimodemd/src/core/error.rs`, `crates/omnimodemd/src/grpc/convert.rs`.
+**Files:** `crates/omnimodem/src/core/error.rs`, `crates/omnimodem/src/grpc/convert.rs`.
 
 - [ ] Add `CoreError::Unimplemented(String)` → `Status::unimplemented` and
   `CoreError::SdrRequired(ChannelId)` → `Status::failed_precondition` ("channel is
@@ -116,11 +116,11 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 - [ ] Add `SdrState sdr_state = 15;` to the `Event` oneof and define
   `message SdrState { uint32 channel; double center_hz; double offset_hz; double
   freq_hz; bool gain_auto; float gain_db; DemodMode demod_mode; float squelch_db; }`.
-- [ ] `cargo build -p omnimodemd` regenerates stubs. Confirm additive in the PR body.
+- [ ] `cargo build -p omnimodem` regenerates stubs. Confirm additive in the PR body.
 
 ### Task 5: `Command` variants + result structs
 
-**Files:** `crates/omnimodemd/src/core/command.rs`.
+**Files:** `crates/omnimodem/src/core/command.rs`.
 
 - [ ] `SetSdrTune{channel, freq_hz, reply: oneshot<Result<SdrTuneOk, CoreError>>}`,
   `SetSdrGain{channel, auto, gain_db, reply: …<SdrGainOk…>}`,
@@ -134,7 +134,7 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 
 ### Task 6: `TelemetryEvent::SdrState` + proto conversion
 
-**Files:** `crates/omnimodemd/src/core/event.rs`, `crates/omnimodemd/src/grpc/convert.rs`.
+**Files:** `crates/omnimodem/src/core/event.rs`, `crates/omnimodem/src/grpc/convert.rs`.
 
 - [ ] `TelemetryEvent::SdrState { channel, center_hz, offset_hz, freq_hz,
   gain_auto, gain_db, demod_mode: u8, squelch_db }` (LOSSY).
@@ -142,8 +142,8 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 
 ### Task 7: `plan_tune` split + core dispatch arms
 
-**Files:** `crates/omnimodemd/src/audio/rtlsdr.rs` (`plan_tune`),
-`crates/omnimodemd/src/core/mod.rs` (dispatch).
+**Files:** `crates/omnimodem/src/audio/rtlsdr.rs` (`plan_tune`),
+`crates/omnimodem/src/core/mod.rs` (dispatch).
 
 - [ ] `pub fn plan_tune(center_hz: f64, capture_rate: u32, target_hz: f64) -> (f64,
   f32)`: if `center_hz != 0` and `|target - center| <= MAX_OFFSET` (=
@@ -170,7 +170,7 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 
 ### Task 8: gRPC handlers
 
-**Files:** `crates/omnimodemd/src/grpc/service.rs`.
+**Files:** `crates/omnimodem/src/grpc/service.rs`.
 
 - [ ] `set_sdr_tune`, `set_sdr_gain`, `configure_sdr`, `get_sdr_caps` — each mirrors
   `set_audio_gain`: validate cheap invariants in the handler (e.g. `freq_hz` finite
@@ -180,8 +180,8 @@ The tune split (`SetSdrTune`) needs the capture rate to know the band width, and
 
 ### Task 9: Tests — handler/core unit + gRPC round-trip
 
-**Files:** `crates/omnimodemd/src/core/mod.rs` (`#[cfg(test)]`),
-`crates/omnimodemd/tests/sdr_control.rs` (new integration).
+**Files:** `crates/omnimodem/src/core/mod.rs` (`#[cfg(test)]`),
+`crates/omnimodem/tests/sdr_control.rs` (new integration).
 
 - [ ] Core-level tests (drive `Command`s through a `TestCore`, mirroring the
   existing `SetAudioGain` core tests): tune split moves the NCO within band and

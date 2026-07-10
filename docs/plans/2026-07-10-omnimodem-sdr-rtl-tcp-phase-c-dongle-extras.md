@@ -101,6 +101,6 @@ full `u32` mode so the distinction is preserved at the wire layer.
 
 ## Verification gate
 
-- `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo test -p omnimodemd`
+- `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo test -p omnimodem`
 - `... cargo clippy --all-targets -- -D warnings` clean.
 - Paste output into the PR. Commit as `chrissnell`, no AI attribution.

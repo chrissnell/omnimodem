@@ -74,7 +74,7 @@ pub struct SdrDemod {
 - **API** mirrors `NbfmReceiver`: `new(kind, capture_rate, channel_rate,
   offset_hz, deviation_hz, squelch)`, `retune`, `set_squelch`, `push_iq`.
 
-### Daemon dispatch (`crates/omnimodemd/src/audio/rtlsdr.rs`)
+### Daemon dispatch (`crates/omnimodem/src/audio/rtlsdr.rs`)
 
 - Capture thread builds `SdrDemod` from `control.demod_mode()` instead of
   `NbfmReceiver`. Track `seen_mode` alongside `cur_rate`; on a generation change,

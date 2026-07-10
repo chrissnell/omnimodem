@@ -13,12 +13,12 @@
 ## File Structure
 
 - `proto/omnimodem.proto` — add two request fields + one response field (additive, per `proto/VERSIONING.md`).
-- `crates/omnimodemd/src/supervisor/channel.rs` — add `tx_device_id` / `tx_sample_rate` to `ChannelConfig`.
-- `crates/omnimodemd/src/persist/mod.rs` — schema columns, idempotent migration, upsert, load.
-- `crates/omnimodemd/src/supervisor/mod.rs` — `configure_audio` signature + store.
-- `crates/omnimodemd/src/core/command.rs` — `Command::ConfigureAudio` fields.
-- `crates/omnimodemd/src/core/mod.rs` — `AudioBinding` struct, `configure_audio` opens RX/TX on their own backends, and every `live.audio` reader updated.
-- `crates/omnimodemd/src/grpc/service.rs` — parse `tx_device_id` (default to capture device), return `actual_tx_sample_rate`.
+- `crates/omnimodem/src/supervisor/channel.rs` — add `tx_device_id` / `tx_sample_rate` to `ChannelConfig`.
+- `crates/omnimodem/src/persist/mod.rs` — schema columns, idempotent migration, upsert, load.
+- `crates/omnimodem/src/supervisor/mod.rs` — `configure_audio` signature + store.
+- `crates/omnimodem/src/core/command.rs` — `Command::ConfigureAudio` fields.
+- `crates/omnimodem/src/core/mod.rs` — `AudioBinding` struct, `configure_audio` opens RX/TX on their own backends, and every `live.audio` reader updated.
+- `crates/omnimodem/src/grpc/service.rs` — parse `tx_device_id` (default to capture device), return `actual_tx_sample_rate`.
 
 Convention note: existing phase plans live in `docs/plans/`; this plan follows that location.
 
@@ -53,7 +53,7 @@ message ConfigureAudioResponse {
 
 - [ ] **Step 2: Verify the proto compiles via the build**
 
-Run: `cargo build -p omnimodemd 2>&1 | tail -20`
+Run: `cargo build -p omnimodem 2>&1 | tail -20`
 Expected: builds (prost regenerates `proto::ConfigureAudioRequest` with the new `tx_device_id` / `tx_sample_rate` and `ConfigureAudioResponse::actual_tx_sample_rate`). Unused-field warnings are fine at this step.
 
 - [ ] **Step 3: Commit**
@@ -68,9 +68,9 @@ git commit -m "proto: add optional split RX/TX audio device fields to ConfigureA
 ### Task 2: Persist the TX device on `ChannelConfig`
 
 **Files:**
-- Modify: `crates/omnimodemd/src/supervisor/channel.rs:8-22`
-- Modify: `crates/omnimodemd/src/persist/mod.rs:43-145`
-- Test: `crates/omnimodemd/src/persist/mod.rs` (tests module at bottom)
+- Modify: `crates/omnimodem/src/supervisor/channel.rs:8-22`
+- Modify: `crates/omnimodem/src/persist/mod.rs:43-145`
+- Test: `crates/omnimodem/src/persist/mod.rs` (tests module at bottom)
 
 - [ ] **Step 1: Write the failing round-trip test**
 
@@ -96,7 +96,7 @@ If `sample_channel()` does not exist, build the `ChannelConfig` inline mirroring
 
 - [ ] **Step 2: Run it to verify it fails to compile**
 
-Run: `cargo test -p omnimodemd persist:: 2>&1 | tail -20`
+Run: `cargo test -p omnimodem persist:: 2>&1 | tail -20`
 Expected: FAIL — `no field tx_device_id on type ChannelConfig`.
 
 - [ ] **Step 3: Add the struct fields**
@@ -151,13 +151,13 @@ Adjust the two `/* new index */` values to the column positions you added (they 
 
 - [ ] **Step 5: Run the persist tests**
 
-Run: `cargo test -p omnimodemd persist:: 2>&1 | tail -20`
+Run: `cargo test -p omnimodem persist:: 2>&1 | tail -20`
 Expected: PASS, including the existing `migrates_a_phase1_schema_and_backfills_defaults` (an old row with no `tx_*` columns backfills `''` / `0` and resolves `tx_device_id` to the capture device).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/supervisor/channel.rs crates/omnimodemd/src/persist/mod.rs
+git add crates/omnimodem/src/supervisor/channel.rs crates/omnimodem/src/persist/mod.rs
 git commit -m "persist: store optional split TX audio device per channel"
 ```
 
@@ -166,8 +166,8 @@ git commit -m "persist: store optional split TX audio device per channel"
 ### Task 3: Supervisor stores the TX device
 
 **Files:**
-- Modify: `crates/omnimodemd/src/supervisor/mod.rs:90-105`
-- Test: `crates/omnimodemd/src/supervisor/mod.rs` (tests module)
+- Modify: `crates/omnimodem/src/supervisor/mod.rs:90-105`
+- Test: `crates/omnimodem/src/supervisor/mod.rs` (tests module)
 
 - [ ] **Step 1: Update `configure_audio` to accept and store the TX device**
 
@@ -206,13 +206,13 @@ The existing tests around line 218/231 call `configure_audio(...)`. Update each 
 
 - [ ] **Step 3: Run the supervisor tests**
 
-Run: `cargo test -p omnimodemd supervisor:: 2>&1 | tail -20`
+Run: `cargo test -p omnimodem supervisor:: 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/supervisor/mod.rs
+git add crates/omnimodem/src/supervisor/mod.rs
 git commit -m "supervisor: thread TX device through configure_audio"
 ```
 
@@ -221,7 +221,7 @@ git commit -m "supervisor: thread TX device through configure_audio"
 ### Task 4: Command carries the TX device
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/command.rs:28-34`
+- Modify: `crates/omnimodem/src/core/command.rs:28-34`
 
 - [ ] **Step 1: Add fields to `Command::ConfigureAudio`**
 
@@ -252,7 +252,7 @@ pub struct ConfigureAudioOk {
 
 - [ ] **Step 3: Verify it compiles (handlers updated in Task 5/6)**
 
-Run: `cargo build -p omnimodemd 2>&1 | tail -20`
+Run: `cargo build -p omnimodem 2>&1 | tail -20`
 Expected: FAILs in `core/mod.rs` and `grpc/service.rs` (callers not yet updated). That is expected — Tasks 5 and 6 fix them. Do not commit yet; commit at the end of Task 5 with the core change.
 
 ---
@@ -260,10 +260,10 @@ Expected: FAILs in `core/mod.rs` and `grpc/service.rs` (callers not yet updated)
 ### Task 5: Core opens RX and TX on their own devices
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/mod.rs:100-115` (`LiveBindings`)
-- Modify: `crates/omnimodemd/src/core/mod.rs:289-327` (`configure_audio`)
-- Modify: `crates/omnimodemd/src/core/mod.rs` — every `live.audio` reader (lines 262, 275, 361, 400, 506, 510, 590) and the `Command::ConfigureAudio` match arm
-- Test: `crates/omnimodemd/src/core/mod.rs` (tests module)
+- Modify: `crates/omnimodem/src/core/mod.rs:100-115` (`LiveBindings`)
+- Modify: `crates/omnimodem/src/core/mod.rs:289-327` (`configure_audio`)
+- Modify: `crates/omnimodem/src/core/mod.rs` — every `live.audio` reader (lines 262, 275, 361, 400, 506, 510, 590) and the `Command::ConfigureAudio` match arm
+- Test: `crates/omnimodem/src/core/mod.rs` (tests module)
 
 - [ ] **Step 1: Introduce the `AudioBinding` struct and update `LiveBindings`**
 
@@ -409,13 +409,13 @@ If the existing core tests drive the core over its real `mpsc`/`oneshot` command
 
 - [ ] **Step 6: Run it to verify it fails, then passes**
 
-Run: `cargo test -p omnimodemd core:: 2>&1 | tail -30`
+Run: `cargo test -p omnimodem core:: 2>&1 | tail -30`
 Expected: the new test FAILs first if written before the code, then PASSes after Steps 1-4. The existing `transmit_on_moded_channel_enqueues_and_completes` and `rx_worker_*` tests must still pass (single-device path: `tx_dev == rx_dev`).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/command.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/command.rs crates/omnimodem/src/core/mod.rs
 git commit -m "core: open RX and TX audio on independent devices via AudioBinding"
 ```
 
@@ -424,8 +424,8 @@ git commit -m "core: open RX and TX audio on independent devices via AudioBindin
 ### Task 6: gRPC handler defaults TX to the capture device
 
 **Files:**
-- Modify: `crates/omnimodemd/src/grpc/service.rs:98-121`
-- Test: `crates/omnimodemd/src/grpc/service.rs` or the crate's gRPC test module
+- Modify: `crates/omnimodem/src/grpc/service.rs:98-121`
+- Test: `crates/omnimodem/src/grpc/service.rs` or the crate's gRPC test module
 
 - [ ] **Step 1: Parse `tx_device_id` (empty == capture device) and return both rates**
 
@@ -474,13 +474,13 @@ If the crate has a gRPC-level test that calls `configure_audio` against an in-pr
 
 - [ ] **Step 3: Run the gRPC tests**
 
-Run: `cargo test -p omnimodemd grpc:: 2>&1 | tail -20`
+Run: `cargo test -p omnimodem grpc:: 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/grpc/service.rs
+git add crates/omnimodem/src/grpc/service.rs
 git commit -m "grpc: accept optional tx_device_id, default to capture device"
 ```
 
@@ -492,12 +492,12 @@ git commit -m "grpc: accept optional tx_device_id, default to capture device"
 
 - [ ] **Step 1: Build and lint the whole crate**
 
-Run: `cargo build -p omnimodemd && cargo clippy -p omnimodemd --all-targets 2>&1 | tail -30`
+Run: `cargo build -p omnimodem && cargo clippy -p omnimodem --all-targets 2>&1 | tail -30`
 Expected: no errors. Fix any unused-import or `too_many_arguments` clippy notes introduced (the `#[allow(clippy::too_many_arguments)]` already on `configure_audio` covers the extra params).
 
 - [ ] **Step 2: Run the whole crate test suite**
 
-Run: `cargo test -p omnimodemd 2>&1 | tail -30`
+Run: `cargo test -p omnimodem 2>&1 | tail -30`
 Expected: all pass, including persistence migration, supervisor, core, and gRPC tests.
 
 - [ ] **Step 3: Commit any lint fixups**
