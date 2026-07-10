@@ -15,6 +15,16 @@ Output type: **text** (UTF-8 in `RxFrame.data`), **packet** (opaque bytes in
 |---|---|---|---|---|
 | AFSK 1200 (AX.25) | `afsk1200.rs` | Bell-202 1200-baud AFSK, NRZI/HDLC, AX.25 — the baseline packet mode; drives the multi-slicer ensemble and the KISS bridge | Both | Packet |
 
+## Surveillance (wideband SDR)
+
+Not an audio mode: consumes a wideband magnitude stream from the rtl_tcp SDR
+capture (no channelization), not a soundcard. See
+[`../design/2026-07-10-adsb-mode-design.md`](../design/2026-07-10-adsb-mode-design.md).
+
+| Mode | File | What it is | RX/TX | Output |
+|---|---|---|---|---|
+| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude. DSP + KATs landed; daemon wiring / typed `AircraftReport` / TUI flights table are Phases 2-4. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
+
 ## WSJT-X weak-signal family (windowed / time-aligned)
 
 Block-demod modes that buffer a time slot and decode multi-pass. LDPC or K=32
