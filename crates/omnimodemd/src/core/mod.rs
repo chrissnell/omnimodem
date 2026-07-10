@@ -260,10 +260,16 @@ fn handle_command(
             // string remains the persisted form (gRPC proto unchanged); it is
             // resolved to a `ModeConfig` at use.
             let res = match crate::mode::ModeConfig::parse(&mode) {
-                Some(_) => supervisor
-                    .configure_channel(id, name, mode, rsid_tx, rsid_rx)
-                    .map_err(Into::into),
-                None => Err(CoreError::UnknownMode(mode)),
+                Some(_) => {
+                    tracing::info!(channel = id.0, name = %name, mode = %mode, "mode selected");
+                    supervisor
+                        .configure_channel(id, name, mode, rsid_tx, rsid_rx)
+                        .map_err(Into::into)
+                }
+                None => {
+                    tracing::warn!(channel = id.0, mode = %mode, "rejected unknown mode");
+                    Err(CoreError::UnknownMode(mode))
+                }
             };
             if res.is_ok() {
                 let _ = telemetry.send(TelemetryEvent::ChannelConfigured { channel: id });
@@ -730,6 +736,15 @@ fn configure_audio(
         Err(e) => return Err(e.into()),
     };
 
+    tracing::info!(
+        channel = id.0,
+        rx_device = %device_id.to_canonical_string(),
+        tx_device = %tx_device_id.to_canonical_string(),
+        rx_rate,
+        tx_rate,
+        "audio bound{}",
+        if tx_rate == 0 { " (RX-only)" } else { "" },
+    );
     live.audio.insert(
         id,
         AudioBinding { rx_dev: device_id, tx_dev: tx_device_id, tx_rate },
@@ -760,6 +775,12 @@ fn configure_ptt(
     }
     supervisor.configure_ptt(id, ptt.clone())?;
     let driver = supervisor.ptt_registry_mut().build_driver(&ptt)?;
+    tracing::info!(
+        channel = id.0,
+        device = %ptt.device_id.to_canonical_string(),
+        method = ?ptt.method,
+        "PTT configured",
+    );
     live.drivers.insert(id, driver);
     live.ptt_dev.insert(id, ptt.device_id);
     Ok(())
@@ -808,6 +829,10 @@ fn try_spawn_workers(
                 .clone();
             match registry::demod_kind(&mode) {
                 DemodKind::Streaming(demod) => {
+                    tracing::info!(
+                        channel = channel.0, mode = mode.label(),
+                        device = %rig.to_canonical_string(), "RX started (streaming)",
+                    );
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
                         telemetry.clone(), metrics, gain.clone(), spectrum.clone(), rsid_rx,
@@ -815,6 +840,11 @@ fn try_spawn_workers(
                     live.rx_workers.insert(channel, w);
                 }
                 DemodKind::Windowed(bd, window_s) => {
+                    tracing::info!(
+                        channel = channel.0, mode = mode.label(),
+                        device = %rig.to_canonical_string(), window_s,
+                        "RX started (windowed)",
+                    );
                     let w = RxWorker::spawn_windowed(
                         channel, rig, capture, bd, interlock.clone(), frames.clone(),
                         telemetry.clone(), metrics, window_s, gain.clone(), spectrum.clone(),
@@ -840,6 +870,10 @@ fn try_spawn_workers(
             live.audio.get(&channel).map(|b| (b.tx_dev.clone(), b.tx_rate)),
             registry::build_modulator(&mode),
         ) {
+            tracing::info!(
+                channel = channel.0, mode = mode.label(),
+                device = %rig.to_canonical_string(), "TX ready",
+            );
             let sink = live.sinks.remove(&channel).unwrap();
             let driver = live.drivers.remove(&channel).unwrap();
             let slot_s = registry::tx_slot_s(&mode);
@@ -911,6 +945,7 @@ fn key_ptt(
 
     match result {
         Ok(()) => {
+            tracing::info!(channel = channel.0, keyed, "PTT keyed (manual)");
             let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed });
             Ok(())
         }
@@ -1056,12 +1091,17 @@ fn poll_hotplug(
     for ev in watcher.poll(enumerator) {
         match ev {
             HotplugEvent::Arrived(desc) => {
+                tracing::info!(
+                    device = %desc.id.to_canonical_string(), label = %desc.label,
+                    "device arrived",
+                );
                 let _ = telemetry.send(TelemetryEvent::DeviceArrived {
                     device_id: desc.id,
                     label: desc.label,
                 });
             }
             HotplugEvent::Departed(id) => {
+                tracing::info!(device = %id.to_canonical_string(), "device departed");
                 let _ = telemetry.send(TelemetryEvent::DeviceDeparted { device_id: id.clone() });
                 supervisor.ptt_registry_mut().evict(&id);
                 // Drop audio handles for channels bound to this device on
