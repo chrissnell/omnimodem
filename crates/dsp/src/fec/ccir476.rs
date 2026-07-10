@@ -24,6 +24,9 @@
 
 /// Letter-shift table: `CODE_TO_LTRS[code]` is the ASCII letter for a valid
 /// codeword, `b'_'` if unused. ref: navtex.cxx:465-475 (verbatim).
+// Kept as a per-codeword 16-column byte grid (not a packed byte string) so it
+// stays auditable byte-for-byte against navtex.cxx; the KAT asserts it exactly.
+#[allow(clippy::byte_char_slices)]
 pub const CODE_TO_LTRS: [u8; 128] = [
     b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
     b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'J', b'_', b'_', b'_', b'F', b'_', b'C', b'K', b'_',

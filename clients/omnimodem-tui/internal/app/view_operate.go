@@ -70,6 +70,12 @@ func newOperateView(m *Model) *operateView {
 		v.modeLabel = baseModeLabel(cl.mode)
 		if mi := modeByLabel(cl.mode); mi != nil {
 			v.slotSecs = mi.slotSecs
+			// FST4's T/R period is operator-selectable and carried in the mode
+			// string's tail; honour it so the slot clock and TX watchdog match the
+			// configured sequence length rather than the table's 15 s default.
+			if mi.label == "fst4" {
+				v.slotSecs = modeStringParam(cl.mode, "tr", mi.slotSecs)
+			}
 			switch mi.shape {
 			case "sequencer":
 				v.seq = newFT8Seq(v.myCall, v.myGrid)
@@ -129,7 +135,7 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, transmitCmd(v.m.c, v.m.sel, v.tx.payload)
 		}
 		v.tx.halt()
-		v.m.toast = ui.NewToast(fmt.Sprintf("TX lease held by ch%d", msg.resp.GetHeldBy()), ui.SeverityWarn)
+		v.m.toast = ui.NewToast(fmt.Sprintf("TX lease held by CH%d", msg.resp.GetHeldBy()), ui.SeverityWarn)
 		return v, nil
 	case transmitMsg:
 		v.tx.id = msg.id
@@ -345,7 +351,7 @@ func (v *operateView) sendImage() tea.Cmd {
 	ps, ok := buildPictureSend(v.modeLabel, v.staged.img)
 	if !ok {
 		v.m.toast = ui.NewToast(
-			fmt.Sprintf("%s can't transmit a picture — use an SSTV or WEFAX mode", v.modeLabel),
+			fmt.Sprintf("%s can't transmit a picture — use an SSTV or WEFAX mode", displayMode(v.modeLabel)),
 			ui.SeverityError)
 		return nil
 	}
@@ -439,7 +445,7 @@ func (v *operateView) Render(w, h int) string {
 
 	if v.seq != nil {
 		b.WriteString(fmt.Sprintf("%s · slot %.1f/%gs · DX [%s %s]\n\n",
-			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs,
+			displayMode(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs,
 			orDash(v.seq.dxCall), v.seq.dxGrid))
 		b.WriteString("next: " + v.seq.current() + "\n")
 		b.WriteString("cq:   " + v.seq.cq() + "\n\n")
@@ -452,7 +458,7 @@ func (v *operateView) Render(w, h int) string {
 			b.WriteString(fmt.Sprintf("%s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
 		}
 		b.WriteString(fmt.Sprintf("%s beacon · slot %.0f/%gs · spots: %d",
-			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs, len(v.transcript)))
+			displayMode(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs, len(v.transcript)))
 		return b.String()
 	}
 	if v.raster != nil {
@@ -460,7 +466,7 @@ func (v *operateView) Render(w, h int) string {
 		// then either the staged-picture preview (ready to transmit) or the text
 		// compose line (the mode also paints typed text into pixels on TX).
 		b.WriteString(fmt.Sprintf("%s · facsimile raster · %d cols\n\n",
-			strings.ToUpper(v.modeLabel), len(v.raster.cols)))
+			displayMode(v.modeLabel), len(v.raster.cols)))
 		b.WriteString(v.raster.render(w) + "\n\n")
 		if v.staged != nil {
 			b.WriteString(v.stagedPreview(w, h))
@@ -521,9 +527,9 @@ func (v *operateView) Title() string {
 	cl := v.m.live[v.m.sel]
 	mode := "—"
 	if cl != nil {
-		mode = orNone(baseModeLabel(cl.mode))
+		mode = orNone(displayMode(cl.mode))
 	}
-	return fmt.Sprintf("Operate ch%d · %s", v.m.sel, mode)
+	return fmt.Sprintf("Operate CH%d · %s", v.m.sel, mode)
 }
 
 func (v *operateView) Hints() []ui.Hint {

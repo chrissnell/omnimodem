@@ -371,7 +371,7 @@ func TestHellImageShapeRendersRaster(t *testing.T) {
 	if got := v.raster.render(80); !strings.Contains(got, "#") {
 		t.Fatalf("raster should render on-pixels as blocks, got %q", got)
 	}
-	if got := v.Render(80, 24); !strings.Contains(got, "FELDHELL") {
+	if got := v.Render(80, 24); !strings.Contains(got, "Feld Hell") {
 		t.Fatalf("raster header should name the mode, got %q", firstLine(got))
 	}
 }

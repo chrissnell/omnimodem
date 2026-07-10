@@ -349,6 +349,105 @@ impl ModemControl for ControlService {
         }))
     }
 
+    async fn set_sdr_tune(
+        &self,
+        request: Request<proto::SetSdrTuneRequest>,
+    ) -> Result<Response<proto::SetSdrTuneResponse>, Status> {
+        let req = request.into_inner();
+        if !req.freq_hz.is_finite() || req.freq_hz <= 0.0 {
+            return Err(Status::invalid_argument("freq_hz must be a positive frequency"));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::SetSdrTune {
+            channel: ChannelId(req.channel),
+            freq_hz: req.freq_hz,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::SetSdrTuneResponse {
+            actual_freq_hz: ok.actual_freq_hz,
+            center_hz: ok.center_hz,
+            offset_hz: ok.offset_hz,
+        }))
+    }
+
+    async fn set_sdr_gain(
+        &self,
+        request: Request<proto::SetSdrGainRequest>,
+    ) -> Result<Response<proto::SetSdrGainResponse>, Status> {
+        let req = request.into_inner();
+        if !req.r#auto && !req.gain_db.is_finite() {
+            return Err(Status::invalid_argument("gain_db must be finite"));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::SetSdrGain {
+            channel: ChannelId(req.channel),
+            auto: req.r#auto,
+            gain_db: req.gain_db,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::SetSdrGainResponse { actual_gain_db: ok.actual_gain_db }))
+    }
+
+    async fn configure_sdr(
+        &self,
+        request: Request<proto::ConfigureSdrRequest>,
+    ) -> Result<Response<proto::ConfigureSdrResponse>, Status> {
+        let req = request.into_inner();
+        // Reject a `demod_mode` that is not a defined `DemodMode` value up front —
+        // an undefined code must not silently fold into NBFM. Every defined mode
+        // (NBFM/AM/WFM/SSB) is implemented and passes through to the core.
+        let demod_mode = proto::DemodMode::try_from(req.demod_mode)
+            .map_err(|_| Status::invalid_argument(format!("unknown demod_mode {}", req.demod_mode)))?;
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ConfigureSdr {
+            channel: ChannelId(req.channel),
+            capture_rate: req.capture_rate,
+            demod_mode: demod_mode as u8,
+            squelch_db: req.squelch_db,
+            ppm: req.ppm,
+            bias_tee: req.bias_tee,
+            direct_sampling: req.direct_sampling,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::ConfigureSdrResponse {
+            actual_capture_rate: ok.actual_capture_rate,
+        }))
+    }
+
+    async fn get_sdr_caps(
+        &self,
+        request: Request<proto::GetSdrCapsRequest>,
+    ) -> Result<Response<proto::GetSdrCapsResponse>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::GetSdrCaps { channel: ChannelId(req.channel), reply: tx })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::GetSdrCapsResponse {
+            tuner: ok.tuner,
+            freq_min_hz: ok.freq_min_hz,
+            freq_max_hz: ok.freq_max_hz,
+            sample_rates: ok.sample_rates,
+            gains_db: ok.gains_db,
+            bias_tee_supported: ok.bias_tee_supported,
+            direct_sampling_supported: ok.direct_sampling_supported,
+        }))
+    }
+
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(

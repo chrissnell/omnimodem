@@ -6,9 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 // drainCmd runs a command and feeds every resulting message back into the view,
@@ -121,7 +123,7 @@ func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {
 
 	// Enter opens the picker over the focused (TX) field.
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !v.picking {
+	if !v.pickerOpen() {
 		t.Fatal("enter on a device field must open the picker modal")
 	}
 	if out := v.Render(80, 20); !strings.Contains(out, "TX device") || !strings.Contains(out, "Speaker") {
@@ -130,7 +132,7 @@ func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {
 
 	// Enter again chooses the highlighted device and closes the modal.
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if v.picking {
+	if v.pickerOpen() {
 		t.Fatal("choosing a device must close the picker modal")
 	}
 	if v.txID != "usb:tx" {
@@ -148,8 +150,8 @@ func TestConfigDevicePickerEscCancels(t *testing.T) {
 	v := newConfigView(m)
 	v.setDevices([]*pb.DeviceInfo{devItem("usb:tx", "Speaker", false, true)})
 	v.focus = fTx
-	v.picking = true
-	if _, _ = v.Update(tea.KeyMsg{Type: tea.KeyEsc}); v.picking {
+	v.picker = pickDevice
+	if _, _ = v.Update(tea.KeyMsg{Type: tea.KeyEsc}); v.pickerOpen() {
 		t.Fatal("esc must close the picker modal")
 	}
 	if v.txID != "" {
@@ -311,12 +313,12 @@ func TestConfigWarnsWhenBoundRxOnly(t *testing.T) {
 // device with a "(same as RX)" note, not a bare "(same as RX)" that reads as if
 // the TX choice was lost.
 func TestConfigTxShowsEffectiveDeviceWhenSameAsRx(t *testing.T) {
-	// Distinct TX device: shown outright.
-	if got := txDeviceLabel("virtual:BlackHole 16ch", "virtual:BlackHole 2ch"); !strings.Contains(got, "BlackHole 16ch") {
+	// Distinct TX device: shown outright (wide budget so nothing clips).
+	if got := txDeviceValue("virtual:BlackHole 16ch", "virtual:BlackHole 2ch", 40); !strings.Contains(got, "BlackHole 16ch") {
 		t.Fatalf("distinct TX must show its own device, got %q", got)
 	}
 	// TX mirrors RX (empty tx): show the RX device AND the note.
-	got := txDeviceLabel("", "virtual:BlackHole 2ch")
+	got := txDeviceValue("", "virtual:BlackHole 2ch", 40)
 	if !strings.Contains(got, "BlackHole 2ch") {
 		t.Fatalf("TX mirroring RX must show the RX device, got %q", got)
 	}
@@ -324,7 +326,7 @@ func TestConfigTxShowsEffectiveDeviceWhenSameAsRx(t *testing.T) {
 		t.Fatalf("TX mirroring RX must still note (same as RX), got %q", got)
 	}
 	// No RX yet: bare note is fine.
-	if got := txDeviceLabel("", ""); strings.Contains(got, "✓") {
+	if got := txDeviceValue("", "", 40); strings.Contains(got, "✓") {
 		t.Fatalf("with no RX, TX must not claim a device, got %q", got)
 	}
 }
@@ -414,7 +416,7 @@ func TestConfigPttDeviceAutoAppliesAndPersists(t *testing.T) {
 
 	// Open the PTT picker and choose the (only) device.
 	v.focus = fPtt
-	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open picker
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})           // open picker
 	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose → auto-apply
 	if v.pttID != "usb:1:2:" {
 		t.Fatalf("ptt device must be recorded, got %q", v.pttID)
@@ -590,5 +592,414 @@ func TestConfigEscPersistsAllChosenDevices(t *testing.T) {
 	// a snapshot, not by the deviceless ChannelConfigured event.
 	if f.StateCalls == 0 {
 		t.Fatal("esc-close must refresh live state so a reopen reflects the save")
+	}
+}
+
+// The mode selector cascades: Family is chosen first, then Mode within it.
+// Cycling the family must land on that family's first submode and rebuild the
+// settings; cycling the mode must stay inside the current family.
+func TestConfigFamilyCascadesToMode(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+
+	// Start on a known multi-member family so the cascade is observable.
+	v.familyIdx = familyIdxOfMode(modeIdxByLabel("dominoex4"))
+	v.modeIdx = modeIdxByLabel("dominoex4")
+	famName := v.familyName()
+
+	// Cycling Mode moves within the family, never out of it.
+	v.focus = fMode
+	v.cycle(+1)
+	if v.familyName() != famName {
+		t.Fatalf("cycling mode left the family: %q -> %q", famName, v.familyName())
+	}
+	if familyName(v.modeLabel()) != famName {
+		t.Fatalf("mode %q is not in family %q", v.modeLabel(), famName)
+	}
+
+	// Cycling Family lands on the new family's first submode.
+	v.focus = fFamily
+	v.cycle(+1)
+	fam := families[v.familyIdx]
+	if v.modeIdx != fam.modes[0] {
+		t.Fatalf("changing family must select its first mode; got %q want %q",
+			v.modeLabel(), modes[fam.modes[0]].label)
+	}
+}
+
+// Preload must point the Family selector at the family owning the saved mode, so
+// reopening Configure shows the right family/mode pair (not family 0).
+func TestConfigPreloadSelectsMatchingFamily(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "eme", mode: "jt65", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	if v.modeLabel() != "jt65" {
+		t.Fatalf("mode not preloaded: %q", v.modeLabel())
+	}
+	if v.familyName() != "JT65" {
+		t.Fatalf("family must match preloaded mode; got %q", v.familyName())
+	}
+}
+
+// The Render output must present both the Family and Mode rows of the cascade.
+func TestConfigRendersFamilyAndModeRows(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a", mode: "dominoex8", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	out := v.Render(100, 40)
+	if !strings.Contains(out, "Family") {
+		t.Fatalf("Render must show a Family row:\n%s", out)
+	}
+	if !strings.Contains(out, "DominoEX") {
+		t.Fatalf("Render must show the selected family name:\n%s", out)
+	}
+	if !strings.Contains(out, "DominoEX 8") {
+		t.Fatalf("Render must show the selected mode:\n%s", out)
+	}
+}
+
+// Cycling the Family with an RX device chosen must auto-apply, persisting the
+// new (first-of-family) mode through ConfigureChannel.
+func TestConfigAutoAppliesOnFamilyChange(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+	v.focus = fFamily
+
+	if _, cmd := v.Update(tea.KeyMsg{Type: tea.KeyRight}); cmd != nil {
+		cmd() // ConfigureChannel
+	}
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("family change must auto-apply ConfigureChannel, got %d", len(f.ChannelCalls))
+	}
+}
+
+// modeStringFor: the mode-string tail is only appended for the modes with no
+// typed ModeParams message (FST4/JS8/MSK144); everything else stays a bare label.
+func TestModeStringForTailModes(t *testing.T) {
+	cases := map[string]struct {
+		vals map[string]string
+		want string
+	}{
+		"fst4":   {map[string]string{"tr": "300"}, "fst4:tr=300"},
+		"js8":    {map[string]string{"sub": "fast"}, "js8:sub=fast"},
+		"msk144": {map[string]string{"freq": "1200"}, "msk144:freq=1200"},
+	}
+	for label, c := range cases {
+		if got := modeStringFor(label, c.vals); got != c.want {
+			t.Fatalf("modeStringFor(%q) = %q, want %q", label, got, c.want)
+		}
+	}
+	// A bare label with no tail params (default via empty vals) still round-trips.
+	if got := modeStringFor("fst4", nil); got != "fst4:tr=15" {
+		t.Fatalf("fst4 default tail = %q, want fst4:tr=15", got)
+	}
+	// Modes that use typed ModeParams keep the bare label.
+	for _, label := range []string{"psk31", "ft8", "cw", "fsq"} {
+		if got := modeStringFor(label, map[string]string{"center": "1500"}); got != label {
+			t.Fatalf("modeStringFor(%q) must stay bare, got %q", label, got)
+		}
+	}
+}
+
+// modeStringParam extracts a numeric tail key, falling back to the default.
+func TestModeStringParam(t *testing.T) {
+	if got := modeStringParam("fst4:tr=300", "tr", 15); got != 300 {
+		t.Fatalf("tr parse = %v, want 300", got)
+	}
+	if got := modeStringParam("fst4", "tr", 15); got != 15 {
+		t.Fatalf("missing tail must return default, got %v", got)
+	}
+	if got := modeStringParam("msk144:freq=1200,x=1", "freq", 1500); got != 1200 {
+		t.Fatalf("freq parse = %v, want 1200", got)
+	}
+}
+
+// Each daemon-tunable mode must expose an editable field for its extra param:
+// FSQ 'directed', JS8 speed, FST4 T/R, MSK144 center.
+func TestModeFieldsCoverDaemonParams(t *testing.T) {
+	hasKey := func(label, key string) bool {
+		for _, f := range modeFields(label) {
+			if f.Key == key {
+				return true
+			}
+		}
+		return false
+	}
+	for _, tc := range []struct{ label, key string }{
+		{"fsq", "directed"}, {"fsq", "center"},
+		{"js8", "sub"}, {"fst4", "tr"}, {"msk144", "freq"},
+	} {
+		if !hasKey(tc.label, tc.key) {
+			t.Fatalf("mode %q must expose a %q settings field", tc.label, tc.key)
+		}
+	}
+}
+
+// The FSQ directed toggle must reach ConfigureChannel as a typed FsqParams flag.
+func TestConfigFsqDirectedReachesRPC(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	// Seed the session cache so the settings form opens with directed on.
+	m.modeParams[0] = savedModeParams{label: "fsq", vals: map[string]float64{"center": 1500, "directed": 1}}
+	m.live[0] = &chanLive{name: "fsq-net", mode: "fsq", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	if v.modeLabel() != "fsq" {
+		t.Fatalf("expected fsq preloaded, got %q", v.modeLabel())
+	}
+	v.persistAll()()
+	if len(f.ChannelCalls) != 1 {
+		t.Fatalf("want one ConfigureChannel, got %d", len(f.ChannelCalls))
+	}
+	fp := f.ChannelCalls[0].GetModeParams().GetFsq()
+	if fp == nil || !fp.GetDirected() {
+		t.Fatalf("FSQ directed flag must reach the RPC, got %+v", f.ChannelCalls[0].GetModeParams())
+	}
+}
+
+// MSK144's audio center must reach ConfigureChannel as a mode-string tail (it has
+// no typed ModeParams message).
+func TestConfigMsk144CenterReachesModeString(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	m.modeParams[0] = savedModeParams{label: "msk144", vals: map[string]float64{"freq": 1200}}
+	m.live[0] = &chanLive{name: "ms", mode: "msk144", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	v.persistAll()()
+	if len(f.ChannelCalls) != 1 || f.ChannelCalls[0].GetMode() != "msk144:freq=1200" {
+		t.Fatalf("MSK144 center must ride the mode string, got mode=%q", f.ChannelCalls[0].GetMode())
+	}
+}
+
+// FST4's T/R period must reach ConfigureChannel via the mode string AND drive the
+// operate view's slot clock, so the TX watchdog matches the chosen sequence.
+func TestFst4TrReachesModeStringAndSlotClock(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	m.modeParams[0] = savedModeParams{label: "fst4", vals: map[string]float64{"tr": 300}}
+	m.live[0] = &chanLive{name: "lf", mode: "fst4", deviceID: "usb:rx"}
+	v := newConfigView(m)
+	v.persistAll()()
+	if f.ChannelCalls[0].GetMode() != "fst4:tr=300" {
+		t.Fatalf("FST4 T/R must ride the mode string, got %q", f.ChannelCalls[0].GetMode())
+	}
+	// The operate view, opened on the persisted mode string, must adopt the period.
+	m.live[0].mode = "fst4:tr=300"
+	ov := newOperateView(m)
+	if ov.slotSecs != 300 {
+		t.Fatalf("operate slot clock must reflect the FST4 T/R period, got %v", ov.slotSecs)
+	}
+}
+
+// The device picker filters by the focused field's capability (RX shows only
+// capture devices), navigates with the cursor, narrows with '/', and enter
+// chooses the highlighted (possibly filtered) device.
+func TestConfigDevicePickerNavFilterCapability(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{
+		devItem("usb:mic", "USB Mic", true, false),
+		devItem("bh:2", "BlackHole 2ch", true, true),
+		devItem("spk:only", "Speakers", false, true), // playback-only
+		devItem("hw:cap", "Line In", true, false),
+	})
+	v.focus = fRx
+
+	// RX picker must exclude the playback-only device.
+	for _, d := range v.capabilityDevices() {
+		if d.id == "spk:only" {
+			t.Fatalf("RX picker must exclude playback-only devices")
+		}
+	}
+	if len(v.capabilityDevices()) != 3 {
+		t.Fatalf("RX picker should show 3 capture devices, got %d", len(v.capabilityDevices()))
+	}
+
+	// Open and navigate.
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !v.pickerOpen() || v.picker != pickDevice {
+		t.Fatal("enter must open the device picker")
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if v.pickIdx != 1 {
+		t.Fatalf("down must advance the cursor, got %d", v.pickIdx)
+	}
+
+	// Filter to "line" → only Line In remains (id column carries the device id).
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !v.filtering {
+		t.Fatal("'/' must start filtering")
+	}
+	for _, r := range "line" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if got := v.pickerRows(); len(got) != 1 || got[0].cells[1] != "hw:cap" {
+		t.Fatalf("filter must narrow to Line In, got %+v", got)
+	}
+
+	// Enter applies the filter (leaves typing), enter again chooses.
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.filtering {
+		t.Fatal("enter must leave filter typing")
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.rxID != "hw:cap" {
+		t.Fatalf("enter must choose the highlighted filtered device, got %q", v.rxID)
+	}
+	if v.pickerOpen() {
+		t.Fatal("choosing must close the picker")
+	}
+}
+
+// The redesigned form composes titled cards; each section's header is present.
+func TestConfigRendersSectionCards(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	out := v.Render(100, 30)
+	for _, title := range []string{"STATION", "MODE", "AUDIO", "RSID"} {
+		if !strings.Contains(out, title) {
+			t.Fatalf("config screen must show the %q card:\n%s", title, out)
+		}
+	}
+	if !strings.Contains(out, "╭") {
+		t.Fatalf("config screen must use rounded card borders:\n%s", out)
+	}
+}
+
+// Enter on the Family field opens the family picker (homed on the current
+// family); choosing one switches family, homes the mode on the family's first
+// submode, and auto-applies.
+func TestConfigFamilyPickerModal(t *testing.T) {
+	f := &client.Fake{}
+	m := New(f, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{devItem("usb:1:2:", "Rig", true, true)})
+	v.rxID = "usb:1:2:"
+	v.saved = v.sig()
+	v.focus = fFamily
+
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.picker != pickFamily {
+		t.Fatal("enter on Family must open the family picker")
+	}
+	if v.pickIdx != v.familyIdx {
+		t.Fatalf("family picker must home on the current family, idx=%d family=%d", v.pickIdx, v.familyIdx)
+	}
+
+	// Filter to Throb and choose it.
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "throb" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // leave filter typing
+	if rows := v.pickerRows(); len(rows) != 1 || rows[0].cells[0] != "Throb" {
+		t.Fatalf("filter should narrow to Throb, got %+v", rows)
+	}
+	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose
+	if v.pickerOpen() {
+		t.Fatal("choosing must close the picker")
+	}
+	if v.familyName() != "Throb" {
+		t.Fatalf("family must switch to Throb, got %q", v.familyName())
+	}
+	if v.modeIdx != families[v.familyIdx].modes[0] {
+		t.Fatal("mode must home on the first submode of the chosen family")
+	}
+	if cmd != nil {
+		cmd()
+	}
+	if len(f.ChannelCalls) == 0 {
+		t.Fatal("choosing a family must auto-apply the mode change")
+	}
+}
+
+// Enter on the Mode field opens the mode picker scoped to the current family;
+// choosing a submode selects it.
+func TestConfigModePickerModal(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	v := newConfigView(m)
+	v.modeIdx = modeIdxByLabel("scottie1")
+	v.familyIdx = familyIdxOfMode(v.modeIdx)
+	v.focus = fMode
+
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if v.picker != pickMode {
+		t.Fatal("enter on Mode must open the mode picker")
+	}
+	// Every row must belong to the current (SSTV) family.
+	if v.familyName() != "SSTV" {
+		t.Fatalf("mode picker should be scoped to SSTV, got %q", v.familyName())
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "martin2" {
+		v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // leave filter
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choose
+	if v.modeLabel() != "martin2" {
+		t.Fatalf("mode must switch to martin2, got %q", v.modeLabel())
+	}
+	if v.pickerOpen() {
+		t.Fatal("choosing must close the mode picker")
+	}
+}
+
+// Regression: the Name/Call/Grid inputs must fit the STATION card so the value
+// never wraps (the reported "vfo-a" → "vfo-"/"a" break). Checked across widths.
+func TestConfigStationFieldsDoNotWrap(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a"}
+	m.myCall, m.myGrid = "NW5W", "DN40CL"
+	v := newConfigView(m)
+	for _, lw := range []int{32, 39, 48} {
+		card := ui.Card("STATION", v.stationBody(lw), true, lw)
+		lines := strings.Split(card, "\n")
+		// top border + title + rule + 3 field rows + bottom border = 7 lines. A
+		// wrap would add an extra line.
+		if len(lines) != 7 {
+			t.Fatalf("width %d: STATION card must be 7 lines (no wrap), got %d:\n%s", lw, len(lines), card)
+		}
+		for _, ln := range lines {
+			if lipgloss.Width(ln) != lw {
+				t.Fatalf("width %d: line width %d != %d (overflow):\n%s", lw, lipgloss.Width(ln), lw, card)
+			}
+		}
+		if !strings.Contains(card, "vfo-a") {
+			t.Fatalf("width %d: name value must render intact:\n%s", lw, card)
+		}
+	}
+}
+
+// Regression: the Settings row leads with the edit button so it lines up under
+// the Family/Mode values, rather than being pushed far right by the count.
+func TestConfigSettingsEditLeadsValue(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.sel = 0
+	m.live[0] = &chanLive{name: "vfo-a", mode: "psk125"}
+	v := newConfigView(m)
+	if s := v.settingsSummary(30); !strings.HasPrefix(s, "✎ edit") {
+		t.Fatalf("settings value must lead with the edit button, got %q", s)
+	}
+	// The MODE card must not wrap either, at any width.
+	for _, lw := range []int{32, 39, 48} {
+		card := ui.Card("MODE", v.modeBody(lw), true, lw)
+		if n := len(strings.Split(card, "\n")); n != 7 {
+			t.Fatalf("width %d: MODE card must be 7 lines (no wrap), got %d:\n%s", lw, n, card)
+		}
 	}
 }

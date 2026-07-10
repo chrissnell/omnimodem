@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // The Settings row shows a count and an edit cue, not the individual values —
@@ -18,7 +18,7 @@ func TestSettingsRowShowsCountNotValue(t *testing.T) {
 	v.modeIdx = modeIdxByLabel("psk31")
 	v.rebuildSettings()
 	out := v.Render(100, 30)
-	if !strings.Contains(out, "1 setting") || !strings.Contains(out, "enter to edit") {
+	if !strings.Contains(out, "1 setting") || !strings.Contains(out, "edit") {
 		t.Fatalf("Settings row must show a count + edit cue:\n%s", out)
 	}
 	if strings.Contains(out, "1000") {
@@ -36,8 +36,8 @@ func TestSettingsModalHeaderAndHotkeys(t *testing.T) {
 	v.focus = fSettings
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open editor
 	out := v.Render(100, 30)
-	if !strings.Contains(out, "psk31 settings") {
-		t.Fatalf("modal header must read 'psk31 settings':\n%s", out)
+	if !strings.Contains(out, "PSK31 settings") {
+		t.Fatalf("modal header must read 'PSK31 settings':\n%s", out)
 	}
 	// The hotkeys must NOT be appended to the title (the old wrapping layout).
 	if strings.Contains(out, "settings  ‹↑") || strings.Contains(out, "settings  ↑") {

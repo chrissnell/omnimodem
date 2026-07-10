@@ -69,6 +69,41 @@ func modeFields(label string) []ui.Field {
 			{Key: "tx", Label: "Transmit", Kind: ui.FieldToggle, Default: "1",
 				Help: "Enable the transmit modulator"},
 		}
+	case "fsq", "fsq-1.5", "fsq-2", "fsq-4.5", "fsq-6":
+		// FSQ shares the family audio-center knob but also carries the FSQCALL
+		// directed flag, which turns on the CRC8 selective-call header (the
+		// operator callsign is injected from the station identity, not edited here).
+		return []ui.Field{
+			centerField(1500),
+			{Key: "directed", Label: "Directed", Kind: ui.FieldToggle, Default: "0",
+				Help: "Send the FSQCALL CRC8 directed header + selective-call framing"},
+		}
+	case "js8":
+		// JS8 runs one of four fixed speeds; the daemon windows each at its own T/R
+		// period. Higher speeds trade robustness for throughput.
+		return []ui.Field{
+			{Key: "sub", Label: "Speed", Kind: ui.FieldEnum, Default: "normal",
+				Options: []ui.Option{
+					{Label: "Normal (15s)", Value: "normal"},
+					{Label: "Fast (10s)", Value: "fast"},
+					{Label: "Turbo (6s)", Value: "turbo"},
+					{Label: "Slow (30s)", Value: "slow"},
+				}},
+		}
+	case "fst4":
+		// FST4's defining knob is the T/R period: longer slots dig deeper on LF/MF
+		// at the cost of QSO rate. The values are the WSJT-X FST4 sequence lengths.
+		return []ui.Field{
+			{Key: "tr", Label: "T/R period", Kind: ui.FieldEnum, Default: "15", Unit: "s",
+				Options: enumFrom([]float64{15, 30, 60, 120, 300, 900, 1800}),
+				Help:    "Transmit/receive slot length (seconds)"},
+		}
+	case "msk144":
+		// MSK144 is streaming (no T/R slot); its one knob is the audio centre.
+		return []ui.Field{
+			{Key: "freq", Label: "Center", Kind: ui.FieldNumber, Default: "1500", Unit: "Hz",
+				Help: "Audio center frequency (Hz)"},
+		}
 	}
 
 	// The submode families all share a single audio-center knob. Their bare-label
@@ -81,8 +116,9 @@ func modeFields(label string) []ui.Field {
 		return []ui.Field{centerField(def)}
 	}
 
-	// Contestia's tones/bandwidth are fixed by the submode label, and the windowed
-	// modes (ft8/ft4/jt65/jt9/fst4/wspr) have no operator settings.
+	// Contestia's tones/bandwidth are fixed by the submode label, and the remaining
+	// windowed modes (ft8/ft4/jt65/jt9/wspr and the jt4 submodes) have no operator
+	// settings.
 	return nil
 }
 

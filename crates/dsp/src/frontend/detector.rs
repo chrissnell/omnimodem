@@ -82,10 +82,106 @@ impl EnvelopeDetector {
     }
 }
 
+/// One-pole DC blocker (`y[n] = x[n] - x[n-1] + r·y[n-1]`). A high-pass with a
+/// corner near DC: it strips the constant term an envelope detector leaves on an
+/// AM signal while passing the audio modulation essentially untouched. `r` is the
+/// pole radius (closer to 1.0 → lower corner).
+pub struct DcBlock {
+    r: f32,
+    prev_x: f32,
+    prev_y: f32,
+}
+
+impl DcBlock {
+    /// `r` in `[0, 1)`; 0.995 puts the corner well below the audio band at 48 kHz.
+    pub fn new(r: f32) -> Self {
+        DcBlock { r, prev_x: 0.0, prev_y: 0.0 }
+    }
+
+    pub fn push(&mut self, x: Sample) -> Sample {
+        let y = x - self.prev_x + self.r * self.prev_y;
+        self.prev_x = x;
+        self.prev_y = y;
+        y
+    }
+}
+
+impl Default for DcBlock {
+    fn default() -> Self {
+        DcBlock::new(0.995)
+    }
+}
+
+/// One-pole de-emphasis low-pass (`y[n] = y[n-1] + α·(x[n] - y[n-1])`) with a
+/// time-constant τ. Undoes the transmit pre-emphasis on FM voice (75 µs US,
+/// 50 µs EU): it rolls off high audio, so it stays **off** for data/APRS NBFM
+/// where the AFSK twist must be preserved.
+pub struct Deemphasis {
+    alpha: f32,
+    y: f32,
+}
+
+impl Deemphasis {
+    /// `tau_us` is the de-emphasis time constant in microseconds; `rate_hz` the
+    /// audio sample rate. `α = dt / (τ + dt)`.
+    pub fn new(tau_us: f32, rate_hz: f32) -> Self {
+        let dt = 1.0e6 / rate_hz; // sample period in µs
+        Deemphasis { alpha: dt / (tau_us + dt), y: 0.0 }
+    }
+
+    pub fn push(&mut self, x: Sample) -> Sample {
+        self.y += self.alpha * (x - self.y);
+        self.y
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f32::consts::TAU;
+
+    #[test]
+    fn dc_block_removes_offset_keeps_tone() {
+        let rate = 48_000.0;
+        let f = 1_000.0;
+        let mut dc = DcBlock::default();
+        let mut out = Vec::new();
+        for k in 0..48_000 {
+            let x = 0.7 + 0.3 * (TAU * f * k as f32 / rate).sin(); // tone on a DC pedestal
+            out.push(dc.push(x));
+        }
+        let steady = &out[2_000..];
+        let mean = steady.iter().sum::<f32>() / steady.len() as f32;
+        assert!(mean.abs() < 0.01, "DC term should be removed, mean {mean}");
+        // The tone survives: peak-to-peak stays near the 0.6 input swing.
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for &s in steady {
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+        assert!((hi - lo) > 0.5, "tone should pass, p2p {}", hi - lo);
+    }
+
+    #[test]
+    fn deemphasis_attenuates_high_more_than_low() {
+        let rate = 48_000.0;
+        let amp = |f: f32| {
+            let mut d = Deemphasis::new(75.0, rate);
+            let mut hi = f32::MIN;
+            let mut lo = f32::MAX;
+            for k in 0..48_000 {
+                let y = d.push((TAU * f * k as f32 / rate).sin());
+                if k > 4_000 {
+                    hi = hi.max(y);
+                    lo = lo.min(y);
+                }
+            }
+            hi - lo
+        };
+        let low = amp(300.0);
+        let high = amp(3_000.0);
+        assert!(high < low * 0.6, "high tone {high} should be well below low {low}");
+    }
 
     #[test]
     fn discriminator_output_proportional_to_frequency() {

@@ -257,6 +257,10 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             continue;
         }
 
+        tracing::info!(
+            channel = cfg.channel.0, transmit_id = job.transmit_id.0,
+            device = %cfg.rig.to_canonical_string(), "TX start",
+        );
         let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
             channel: cfg.channel,
             transmit_id: job.transmit_id,
@@ -283,6 +287,10 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
         }
         let _ = cfg.telemetry.send(TelemetryEvent::PttKeyed { channel: cfg.channel, keyed: false });
         cfg.interlock.end_tx(&cfg.rig);
+        tracing::info!(
+            channel = cfg.channel.0, transmit_id = job.transmit_id.0,
+            outcome = ?outcome, "TX complete",
+        );
         let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
             channel: cfg.channel,
             transmit_id: job.transmit_id,

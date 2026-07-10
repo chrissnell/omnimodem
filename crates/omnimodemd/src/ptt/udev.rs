@@ -25,7 +25,10 @@ pub fn suggest(id: &DeviceId) -> Option<(String, String)> {
             format!("KERNELS==\"{bus}-{ports}\""),
             format!("topo-{bus}-{ports}"),
         ),
-        DeviceId::AlsaCard { .. } | DeviceId::Placeholder { .. } => return None,
+        // A network SDR endpoint has no local device node to pin.
+        DeviceId::AlsaCard { .. } | DeviceId::RtlTcp { .. } | DeviceId::Placeholder { .. } => {
+            return None
+        }
     };
     let rule = format!(
         "SUBSYSTEM==\"tty\", {matchers}, SYMLINK+=\"omnimodem/{label}\"\n"

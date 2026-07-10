@@ -26,6 +26,9 @@ pub fn core_error_to_status(e: CoreError) -> Status {
             PttError::Unsupported => Status::unimplemented(e.to_string()),
             PttError::Io(_) => Status::internal(e.to_string()),
         },
+        CoreError::Unimplemented(_) => Status::unimplemented(e.to_string()),
+        CoreError::SdrRequired(_) => Status::failed_precondition(e.to_string()),
+        CoreError::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
         CoreError::Closed => Status::unavailable(e.to_string()),
     }
 }
@@ -267,6 +270,26 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
                 extended,
             })
         }
+        TelemetryEvent::SdrState {
+            channel,
+            center_hz,
+            offset_hz,
+            freq_hz,
+            gain_auto,
+            gain_db,
+            demod_mode,
+            squelch_db,
+        } => Kind::SdrState(proto::SdrState {
+            channel: channel.0,
+            center_hz,
+            offset_hz,
+            freq_hz,
+            gain_auto,
+            gain_db,
+            // The proto enum and the `SdrControl` u8 share numbering.
+            demod_mode: demod_mode as i32,
+            squelch_db,
+        }),
     };
     proto::Event { kind: Some(kind) }
 }
