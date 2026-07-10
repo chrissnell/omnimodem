@@ -16,12 +16,15 @@ hotplug diff) hangs off of. Variants, in rough precedence of durability:
 | `AlsaCard` | `card_name` | ALSA card by its stable *name* (not the volatile index). |
 | `Topology` | `bus, ports` | Two identical adapters with no serial — disambiguate by USB port chain. |
 | `Serial` | `by_id` | Wraps a `/dev/serial/by-id/<symlink>` (already stable by construction). |
+| `RtlTcp` | `host, port` | An `rtl_tcp` SDR endpoint (local or remote); the endpoint *is* the audio device. |
 | `Placeholder` | `tag` | Virtual backends (file/stdin/loopback) and test fixtures. |
 
 Each variant round-trips through a canonical string (`usb:VVVV:PPPP:serial`,
-`alsa:<name>`, `topo:<bus>-<ports>`, `serial:<by_id>`, `virtual:<tag>`), which is
-what persistence stores. **Config keys on this, never a `/dev` path** — that is why a
-renamed or re-enumerated device keeps its channel binding.
+`alsa:<name>`, `topo:<bus>-<ports>`, `serial:<by_id>`, `rtltcp:<host>:<port>`,
+`virtual:<tag>`), which is what persistence stores. **Config keys on this, never a
+`/dev` path** — that is why a renamed or re-enumerated device keeps its channel
+binding. An `rtltcp:host:port` id needs no enumeration: bind it ad-hoc and the core
+synthesizes a capture-only descriptor.
 
 ## Audio backends
 
@@ -32,12 +35,37 @@ without hardware.
 | Backend | File | Use |
 |---|---|---|
 | cpal (ALSA/CoreAudio/…) | `audio/cpal_backend.rs` | Real hardware; rebuilds the stream with backoff on error. |
+| `rtl_tcp` SDR | `audio/rtlsdr.rs` | Receives off a (local/remote) RTL-SDR dongle over TCP; demods IQ → audio, RX-only. |
 | File | `audio/file.rs` | Deterministic replay of a recorded corpus (also the test input). |
 | stdin | `audio/stdin.rs` | Raw i16 PCM piped in. |
 | Null | `audio/backend.rs` (`NullBackend`) | No-op fallback when a device can't be resolved. |
 
 `CaptureHandle` / `PlaybackHandle` carry the stream's sample rate and cumulative
 submitted/drained sample counts (the watermark the no-sleep TX cycle times off).
+
+### `rtl_tcp` SDR backend
+
+[`audio/rtlsdr.rs`](../../crates/omnimodemd/src/audio/rtlsdr.rs) (`RtlTcpBackend`).
+Connects to a bare `rtl_tcp` server (no gqrx/`rtl_fm`/`socat`), reads the 12-byte
+`RTL0` header, sends 5-byte `[opcode][u32 BE]` commands (center freq, rate, gain
+mode/level, ppm), and streams raw u8 IQ. The capture thread runs the Plan-1 DSP
+chain (`u8_iq_to_cplx` → `NbfmReceiver`: NCO channel-select → decimate → NBFM
+discriminator → power squelch) to deliver mono i16 audio at the channel rate — so
+every downstream mode (AFSK1200/APRS first) works unmodified. Playback is
+`Unsupported` (dongles are receive-only).
+
+- **`SdrControl`** — an `Arc`-of-atomics runtime cell (the RX analogue of
+  `AudioGain`): NCO offset, hardware center, gain (auto/manual dB), squelch dBFS,
+  ppm, demod mode. The core (writer, via gRPC in Plan 3) and the capture thread
+  (reader) share it, so tune/gain/squelch changes reach a *running* capture with no
+  respawn. Effective demod freq = hardware center + NCO offset.
+- **RF waterfall** — the capture thread also runs `ComplexStft` + `full_spectrum_dbfs`
+  + `SpectrumPlan::new_centered` and emits `SpectrumFrame{transmit:false}` with
+  **absolute RF** `freq_start_hz`. The seam: `AudioBackend::attach_sdr_context` (a
+  default-no-op trait method) injects the channel id, telemetry sender, and shared
+  `SdrControl` from `core::configure_audio`, which the device factory (keyed only on
+  identity) cannot supply. For an SDR channel the RX worker's audio-passband spectrum
+  tap is held off, so there is exactly one waterfall producer per channel.
 
 ### The 48 kHz ceiling
 
