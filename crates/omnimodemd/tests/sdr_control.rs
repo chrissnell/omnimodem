@@ -1,8 +1,8 @@
 //! Integration: the SDR (rtl_tcp) control RPCs over an in-process UDS server,
 //! driven against a fake `rtl_tcp` endpoint. Covers the full wiring — proto →
 //! Command → core → SdrControl — plus the `SdrState` broadcast, per-mode demod
-//! selectability (Phase B), and the remaining `UNIMPLEMENTED` boundary (bias-tee,
-//! deferred to Phase C).
+//! selectability (Phase B), and the Phase-C dongle extras (bias-tee,
+//! direct-sampling).
 
 use omnimodemd::proto::event::Kind;
 use omnimodemd::proto::modem_control_client::ModemControlClient;
@@ -121,7 +121,10 @@ async fn sdr_control_roundtrip() {
     assert_eq!(caps.gains_db.len(), 29);
     assert!(caps.freq_min_hz < caps.freq_max_hz);
     assert!(caps.sample_rates.contains(&240_000));
-    assert!(!caps.bias_tee_supported);
+    // R820T supports both bias-tee (tuner feature) and direct-sampling (ADC).
+    assert!(caps.bias_tee_supported);
+    assert!(caps.direct_sampling_supported);
+    let vhf_min = caps.freq_min_hz; // remember the non-direct-sampling floor
 
     // Absolute tune → split into center + NCO offset; the effective freq matches.
     let tune = client
@@ -180,8 +183,9 @@ async fn sdr_control_roundtrip() {
         assert_eq!(cfg.actual_capture_rate, 240_000, "{mode:?}");
     }
 
-    // Bias-tee is deferred to Phase C — requesting it is UNIMPLEMENTED.
-    let err = client
+    // Phase C: bias-tee and direct-sampling now apply successfully, and enabling
+    // direct-sampling widens the reported tunable range down to HF.
+    let cfg = client
         .configure_sdr(ConfigureSdrRequest {
             channel: 0,
             capture_rate: 0,
@@ -189,11 +193,20 @@ async fn sdr_control_roundtrip() {
             squelch_db: -30.0,
             ppm: 0,
             bias_tee: true,
-            direct_sampling: false,
+            direct_sampling: true,
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .unwrap()
+        .into_inner();
+    assert_eq!(cfg.actual_capture_rate, 240_000);
+    let hf_caps = client
+        .get_sdr_caps(GetSdrCapsRequest { channel: 0 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(hf_caps.freq_min_hz, 0.0); // HF floor at DC
+    assert!(hf_caps.freq_max_hz >= 28_800_000.0); // at least the ADC Nyquist
+    assert!(hf_caps.freq_min_hz < vhf_min); // strictly wider than the VHF-only range
 
     // An undefined demod_mode code must be rejected, not silently folded to NBFM.
     let err = client

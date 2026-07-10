@@ -82,10 +82,9 @@ service ModemControl {
   // tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
   rpc SetSdrGain(SetSdrGainRequest) returns (SetSdrGainResponse);
 
-  // Source-wide SDR config: capture rate, demod mode, squelch, ppm. Only NBFM is
-  // implemented in Phase A (other DemodMode values return UNIMPLEMENTED);
-  // bias_tee/direct_sampling are Phase C (requesting either returns UNIMPLEMENTED,
-  // leaving them false is a no-op). Echoes the actual capture rate.
+  // Source-wide SDR config: capture rate, demod mode, squelch, ppm, bias-tee,
+  // direct-sampling. All DemodMode values are implemented and selectable at
+  // runtime. Echoes the actual capture rate.
   rpc ConfigureSdr(ConfigureSdrRequest) returns (ConfigureSdrResponse);
 
   // Query the bound tuner's capabilities (tuner name, RF range, valid capture
@@ -628,8 +627,8 @@ message ConfigureSdrRequest {
   DemodMode demod_mode      = 3;  // only DEMOD_NBFM implemented in Phase A
   float     squelch_db      = 4;  // dBFS open threshold; <= -200 disables squelch
   int32     ppm             = 5;  // frequency correction (ppm)
-  bool      bias_tee        = 6;  // Phase C: true returns UNIMPLEMENTED
-  bool      direct_sampling = 7;  // Phase C: true returns UNIMPLEMENTED
+  bool      bias_tee        = 6;  // power an inline LNA/antenna over coax
+  bool      direct_sampling = 7;  // bypass tuner for HF (Q-branch when true)
 }
 message ConfigureSdrResponse {
   uint32 actual_capture_rate = 1;

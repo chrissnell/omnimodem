@@ -149,16 +149,18 @@ threshold in dBFS (`<= -200` disables it); `ppm` is the frequency correction.
 (`DEMOD_NBFM`/`DEMOD_AM`/`DEMOD_WFM`/`DEMOD_USB`/`DEMOD_LSB`) and selectable at
 runtime. FM audio is currently **flat** (no de-emphasis): the NBFM path keeps
 AFSK/APRS twist intact, and `DEMOD_WFM` broadcast audio is not yet de-emphasized —
-a de-emphasis control is deferred to a later phase. `bias_tee`/`direct_sampling`
-are Phase C: requesting either returns
-`UNIMPLEMENTED`, leaving them `false` is a no-op. The response echoes
+a de-emphasis control is deferred to a later phase. `bias_tee` powers an inline
+LNA/antenna over the coax; `direct_sampling` bypasses the tuner to reach HF
+(`true` selects the Q-branch), and while it is on `GetSdrCaps` widens the reported
+tunable range down to DC. The response echoes
 `actual_capture_rate`.
 
 #### `GetSdrCaps(GetSdrCapsRequest) → GetSdrCapsResponse`
 Query the bound tuner's capabilities: `tuner` name (e.g. `R820T`), `freq_min_hz`/
 `freq_max_hz`, valid `sample_rates`, and the discrete `gains_db` table — derived from
-the `rtl_tcp` header plus per-tuner static tables. `bias_tee_supported` /
-`direct_sampling_supported` are `false` in Phase A.
+the `rtl_tcp` header plus per-tuner static tables. `bias_tee_supported` is `true`
+for R820-class tuners; `direct_sampling_supported` is `true` for every dongle (an
+ADC feature). When direct-sampling is active the range widens to `[0, ~28.8 MHz]`.
 
 ### State & metrics
 
@@ -232,7 +234,10 @@ optional escalation to exclusivity.
 Enumerate present audio/PTT-capable devices. Each `DeviceInfo` has the canonical,
 stable `device_id`, an operator-facing `label`, and `has_capture`/`has_playback`
 flags. Use these `device_id`s with `ConfigureAudio`/`ConfigurePtt` — they are
-durable across renames and hotplug.
+durable across renames and hotplug. The list also includes any `rtl_tcp` SDR
+endpoints registered in the daemon config file (see `docs/running.md`), which no
+hardware scan would surface; an unregistered `rtltcp:host:port` can still be bound
+ad-hoc.
 
 #### `SuggestUdevRule(SuggestUdevRuleRequest) → SuggestUdevRuleResponse`
 Return ready-to-install udev rule text for a device (creating a stable
