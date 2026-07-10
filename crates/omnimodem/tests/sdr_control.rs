@@ -4,9 +4,9 @@
 //! selectability (Phase B), and the Phase-C dongle extras (bias-tee,
 //! direct-sampling).
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{
     ConfigureAudioRequest, ConfigureChannelRequest, ConfigureSdrRequest, DemodMode,
     GetSdrCapsRequest, SetSdrGainRequest, SetSdrTuneRequest, SubscribeRequest,
 };
@@ -73,7 +73,7 @@ async fn start_server() -> (ModemControlClient<tonic::transport::Channel>, u16) 
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 

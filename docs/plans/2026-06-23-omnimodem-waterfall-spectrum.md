@@ -49,7 +49,7 @@ shipped code, not the task bodies below**:
 6. **`fft_size` clamp.** Shipped clamps to `[64, 16384]` then rounds up to a power of
    two; this plan said `[256, 8192]`. Minor.
 
-Per #24: `dsp` 230 tests and `omnimodemd` 140 lib + integration tests pass.
+Per #24: `dsp` 230 tests and `omnimodem` 140 lib + integration tests pass.
 
 ---
 
@@ -71,13 +71,13 @@ export LD_LIBRARY_PATH=/tmp/alsa-root/prefix/usr/lib/x86_64-linux-gnu
 - `proto/omnimodem.proto` — `SpectrumFrame`, `Event.spectrum_frame = 13`, `ConfigureSpectrum` RPC + req/resp (additive).
 - `crates/dsp/src/frontend/spectrum.rs` *(new)* — pure per-frame transform + unit tests.
 - `crates/dsp/src/frontend/mod.rs` — `pub mod spectrum;`.
-- `crates/omnimodemd/src/core/spectrum.rs` *(new)* — `SpectrumControl`, `ResolvedSpectrumCfg`, `resolve()`, `SpectrumTap` + unit tests.
-- `crates/omnimodemd/src/core/event.rs` — `TelemetryEvent::SpectrumFrame`.
-- `crates/omnimodemd/src/core/command.rs` — `Command::ConfigureSpectrum`, `ConfigureSpectrumOk`.
-- `crates/omnimodemd/src/core/mod.rs` — own `controls`/`rx_rates` maps; handler; clone control into workers.
-- `crates/omnimodemd/src/core/rx_worker.rs` — call `SpectrumTap` in the streaming + windowed loops.
-- `crates/omnimodemd/src/grpc/convert.rs` — `TelemetryEvent::SpectrumFrame` → proto.
-- `crates/omnimodemd/src/grpc/service.rs` — `configure_spectrum` handler.
+- `crates/omnimodem/src/core/spectrum.rs` *(new)* — `SpectrumControl`, `ResolvedSpectrumCfg`, `resolve()`, `SpectrumTap` + unit tests.
+- `crates/omnimodem/src/core/event.rs` — `TelemetryEvent::SpectrumFrame`.
+- `crates/omnimodem/src/core/command.rs` — `Command::ConfigureSpectrum`, `ConfigureSpectrumOk`.
+- `crates/omnimodem/src/core/mod.rs` — own `controls`/`rx_rates` maps; handler; clone control into workers.
+- `crates/omnimodem/src/core/rx_worker.rs` — call `SpectrumTap` in the streaming + windowed loops.
+- `crates/omnimodem/src/grpc/convert.rs` — `TelemetryEvent::SpectrumFrame` → proto.
+- `crates/omnimodem/src/grpc/service.rs` — `configure_spectrum` handler.
 
 ---
 
@@ -140,7 +140,7 @@ message ConfigureSpectrumResponse {
 
 - [x] **Step 5: Verify it compiles** (regenerates tonic bindings):
 
-Run: `cargo check -p omnimodemd`
+Run: `cargo check -p omnimodem`
 Expected: builds; `proto::SpectrumFrame`, `proto::ConfigureSpectrumRequest/Response` now exist.
 
 - [x] **Step 6: Commit**
@@ -299,10 +299,10 @@ git commit -m "dsp: spectrum line transform (half-spectrum dBFS, max-pool, quant
 Resolve request params (against the capture rate) into a `ResolvedSpectrumCfg`; hold a shared `SpectrumControl`; a `SpectrumTap` runs the per-chunk FFT.
 
 **Files:**
-- Create: `crates/omnimodemd/src/core/spectrum.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs` (add `mod spectrum;` + re-exports)
+- Create: `crates/omnimodem/src/core/spectrum.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs` (add `mod spectrum;` + re-exports)
 
-- [x] **Step 1: Register the module.** In `crates/omnimodemd/src/core/mod.rs`, next to `mod gain;`:
+- [x] **Step 1: Register the module.** In `crates/omnimodem/src/core/mod.rs`, next to `mod gain;`:
 
 ```rust
 mod spectrum;
@@ -512,13 +512,13 @@ mod tests {
 
 - [x] **Step 4: Run tests:**
 
-Run: `cargo test -p omnimodemd core::spectrum`
+Run: `cargo test -p omnimodem core::spectrum`
 Expected: 4 passed.
 
 - [x] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/spectrum.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/spectrum.rs crates/omnimodem/src/core/mod.rs
 git commit -m "core: spectrum request resolution + SpectrumControl/SpectrumTap"
 ```
 
@@ -527,8 +527,8 @@ git commit -m "core: spectrum request resolution + SpectrumControl/SpectrumTap"
 ## Task 4: Telemetry event + proto conversion
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/event.rs`
-- Modify: `crates/omnimodemd/src/grpc/convert.rs`
+- Modify: `crates/omnimodem/src/core/event.rs`
+- Modify: `crates/omnimodem/src/grpc/convert.rs`
 
 - [x] **Step 1: Add the variant.** In `core/event.rs`, inside `enum TelemetryEvent`, after `ChannelMetrics { … }`:
 
@@ -569,13 +569,13 @@ git commit -m "core: spectrum request resolution + SpectrumControl/SpectrumTap"
 
 - [x] **Step 3: Build:**
 
-Run: `cargo check -p omnimodemd`
+Run: `cargo check -p omnimodem`
 Expected: builds (the `match` is now exhaustive over the new variant).
 
 - [x] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/event.rs crates/omnimodemd/src/grpc/convert.rs
+git add crates/omnimodem/src/core/event.rs crates/omnimodem/src/grpc/convert.rs
 git commit -m "core+grpc: TelemetryEvent::SpectrumFrame and proto conversion"
 ```
 
@@ -586,8 +586,8 @@ git commit -m "core+grpc: TelemetryEvent::SpectrumFrame and proto conversion"
 Wire `ConfigureSpectrum` from the async edge into the sync core: store each channel's capture rate at `ConfigureAudio`, resolve on `ConfigureSpectrum`, publish to the per-channel `SpectrumControl`, reply with actuals.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/command.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs`
+- Modify: `crates/omnimodem/src/core/command.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs`
 
 - [x] **Step 1: Add the command + reply struct** to `command.rs`. Add to `enum Command` (after `SetAudioGain`):
 
@@ -672,13 +672,13 @@ Import `ConfigureSpectrumOk` (`use crate::core::command::ConfigureSpectrumOk;`) 
 
 - [x] **Step 5: Build:**
 
-Run: `cargo check -p omnimodemd`
+Run: `cargo check -p omnimodem`
 Expected: builds.
 
 - [x] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/command.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/command.rs crates/omnimodem/src/core/mod.rs
 git commit -m "core: ConfigureSpectrum command + handler (resolve, publish control)"
 ```
 
@@ -689,8 +689,8 @@ git commit -m "core: ConfigureSpectrum command + handler (resolve, publish contr
 Clone the per-channel `SpectrumControl` into the RX workers and run the tap on raw capture samples.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/rx_worker.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs` (spawn sites)
+- Modify: `crates/omnimodem/src/core/rx_worker.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs` (spawn sites)
 
 - [x] **Step 1: Add a `control` param** to `RxWorker::spawn_streaming` (after `gain`):
 
@@ -736,13 +736,13 @@ Add `control.clone()` as the new trailing argument to each spawn call, matching 
 
 - [x] **Step 4: Build:**
 
-Run: `cargo check -p omnimodemd`
+Run: `cargo check -p omnimodem`
 Expected: builds; both spawn calls pass `control.clone()`.
 
 - [x] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/rx_worker.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/rx_worker.rs crates/omnimodem/src/core/mod.rs
 git commit -m "core: run SpectrumTap in RX workers on raw capture samples"
 ```
 
@@ -751,7 +751,7 @@ git commit -m "core: run SpectrumTap in RX workers on raw capture samples"
 ## Task 7: gRPC service handler
 
 **Files:**
-- Modify: `crates/omnimodemd/src/grpc/service.rs`
+- Modify: `crates/omnimodem/src/grpc/service.rs`
 
 - [x] **Step 1: Add the handler** (after `set_audio_gain`, mirroring it):
 
@@ -790,13 +790,13 @@ git commit -m "core: run SpectrumTap in RX workers on raw capture samples"
 
 - [x] **Step 2: Build:**
 
-Run: `cargo check -p omnimodemd`
+Run: `cargo check -p omnimodem`
 Expected: builds; `ModemControl` trait is fully implemented.
 
 - [x] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/grpc/service.rs
+git add crates/omnimodem/src/grpc/service.rs
 git commit -m "grpc: configure_spectrum handler"
 ```
 
@@ -805,13 +805,13 @@ git commit -m "grpc: configure_spectrum handler"
 ## Task 8: End-to-end test + full gate
 
 **Files:**
-- Create/Modify: a test under `crates/omnimodemd/tests/` (e.g. `spectrum.rs`) following the existing `subscribe.rs` / `e2e.rs` harness (file backend capture, in-process server).
+- Create/Modify: a test under `crates/omnimodem/tests/` (e.g. `spectrum.rs`) following the existing `subscribe.rs` / `e2e.rs` harness (file backend capture, in-process server).
 
 - [x] **Step 1: Write the failing test.** Model it on `tests/subscribe.rs`: start the in-process service, `ConfigureChannel`, `ConfigureAudio` with the file/loopback backend, `ConfigureSpectrum{enable:true, bin_count:64, fft_size:512, rate_hz:10, freq_hi_hz:3000}`, subscribe, and assert at least one `Event::SpectrumFrame` arrives with `bins.len() == response.bin_count` and `freq_step_hz > 0`. Reuse whatever capture-injection helper `subscribe.rs`/`e2e.rs` use; do not invent a new backend.
 
 - [x] **Step 2: Run it, expect FAIL → then PASS** once wiring is correct:
 
-Run: `cargo test -p omnimodemd --test spectrum`
+Run: `cargo test -p omnimodem --test spectrum`
 Expected: PASS (frames flow end to end).
 
 - [x] **Step 3: Full gate:**
@@ -822,7 +822,7 @@ Expected: all green. Fix any clippy nits (e.g. `too_many_arguments` on the spawn
 - [x] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/tests/spectrum.rs
+git add crates/omnimodem/tests/spectrum.rs
 git commit -m "test: end-to-end SpectrumFrame streaming"
 ```
 

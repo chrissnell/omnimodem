@@ -1,6 +1,6 @@
 # Waterfall / Spectrum API — Design
 
-> Status: **Design / RFC**, ready to implement. Daemon-side (`omnimodemd` + `dsp`)
+> Status: **Design / RFC**, ready to implement. Daemon-side (`omnimodem` + `dsp`)
 > additions that let any frontend (the TUI, a GUI, a web client) draw a real
 > waterfall. Additive within `omnimodem.v1` (see `proto/VERSIONING.md`).
 
@@ -142,16 +142,16 @@ changes.
   range-restrict, max-pool, uint8 quantize. Pure fn over an `Stft` frame; unit-test
   with a known tone (peak lands in the right bucket) and a full-scale sine (~0 dBFS).
   Keep `Stft` itself untouched.
-- `crates/omnimodemd/src/core/event.rs` — `TelemetryEvent::SpectrumFrame { channel,
+- `crates/omnimodem/src/core/event.rs` — `TelemetryEvent::SpectrumFrame { channel,
   timestamp_ns, freq_start_hz, freq_step_hz, db_floor, db_ceiling, bins: Vec<u8> }`.
-- `crates/omnimodemd/src/core/command.rs` — `Command::ConfigureSpectrum { … }`
+- `crates/omnimodem/src/core/command.rs` — `Command::ConfigureSpectrum { … }`
   (mirror `SetAudioGain`).
-- `crates/omnimodemd/src/core/mod.rs` — own the per-channel `SpectrumCfg`; create/
+- `crates/omnimodem/src/core/mod.rs` — own the per-channel `SpectrumCfg`; create/
   drop the tap on the command; clone the telemetry sender into the worker.
-- `crates/omnimodemd/src/core/rx_worker.rs` — the `SpectrumTap` hook above.
-- `crates/omnimodemd/src/grpc/convert.rs` — `TelemetryEvent::SpectrumFrame` →
+- `crates/omnimodem/src/core/rx_worker.rs` — the `SpectrumTap` hook above.
+- `crates/omnimodem/src/grpc/convert.rs` — `TelemetryEvent::SpectrumFrame` →
   `Event::Kind::SpectrumFrame`.
-- `crates/omnimodemd/src/grpc/service.rs` — `configure_spectrum` handler →
+- `crates/omnimodem/src/grpc/service.rs` — `configure_spectrum` handler →
   `Command::ConfigureSpectrum`, echo actual params.
 
 ## 6. Client (TUI) consumption — sanity check on the contract

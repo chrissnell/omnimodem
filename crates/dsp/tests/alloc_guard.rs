@@ -5,15 +5,23 @@
 //! bug, so this is a hard test, not advisory.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 struct Counting;
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+// Per-thread allocation counter. A process-global counter would also tally
+// allocations made concurrently by libtest's harness threads (output capture,
+// etc.), racing the measured loop and flaking the assertion; counting only the
+// current thread attributes allocations to the code actually under test. The
+// counter is `const`-initialized so first access never itself allocates (which
+// would recurse through this allocator).
+thread_local! {
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
         System.alloc(layout)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -25,9 +33,9 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 
 fn count_allocs<F: FnOnce()>(f: F) -> usize {
-    let before = ALLOCS.load(Ordering::Relaxed);
+    let before = ALLOCS.with(|c| c.get());
     f();
-    ALLOCS.load(Ordering::Relaxed) - before
+    ALLOCS.with(|c| c.get()) - before
 }
 
 #[test]

@@ -6,7 +6,7 @@ section. For *what* a mode does in operator terms, see
 [`dsp-building-blocks.md`](dsp-building-blocks.md). This page only routes you to
 source.
 
-## Daemon: control edge (`crates/omnimodemd/src/`)
+## Daemon: control edge (`crates/omnimodem/src/`)
 
 Async tonic/tokio surface. See [`grpc-edge.md`](grpc-edge.md) for how it works.
 
@@ -20,7 +20,7 @@ Async tonic/tokio surface. See [`grpc-edge.md`](grpc-edge.md) for how it works.
 | Proto ⇄ core conversions | `grpc/convert.rs` | `snapshot_to_proto`, `*_event_to_proto`, `core_error_to_status` |
 | Generated proto types (re-export of tonic-build output) | `proto.rs` | — |
 
-## Daemon: sync core (`crates/omnimodemd/src/core/`)
+## Daemon: sync core (`crates/omnimodem/src/core/`)
 
 | Concern | File | Key symbol |
 |---|---|---|
@@ -34,14 +34,14 @@ Async tonic/tokio surface. See [`grpc-edge.md`](grpc-edge.md) for how it works.
 | Runtime audio gain (lock-free `AtomicU32`, no respawn) | `core/gain.rs` | `AudioGain` |
 | Host clock-offset metric source | `core/clock.rs` | `ClockSource`, `SlotClock` |
 
-## Daemon: supervisor (`crates/omnimodemd/src/supervisor/`)
+## Daemon: supervisor (`crates/omnimodem/src/supervisor/`)
 
 | Concern | File | Key symbol |
 |---|---|---|
 | State owner: channels, device cache, PTT registry, interlock, store | `supervisor/mod.rs` | `Supervisor` |
 | Persisted channel config + runtime state | `supervisor/channel.rs` | `ChannelConfig`, `ChannelState` |
 
-## Daemon: mode registry (`crates/omnimodemd/src/mode/`)
+## Daemon: mode registry (`crates/omnimodem/src/mode/`)
 
 The one place a mode string/params becomes a boxed demod/mod. Adding a mode touches
 here + the DSP crate, not five `match` sites.
@@ -55,7 +55,7 @@ here + the DSP crate, not five `match` sites.
 Typed `ModeParams` (proto) → mode string happens in `grpc/service.rs::effective_mode`;
 that string is then parsed by `ModeConfig::parse`.
 
-## Daemon: audio (`crates/omnimodemd/src/audio/`)
+## Daemon: audio (`crates/omnimodem/src/audio/`)
 
 | Concern | File | Key symbol |
 |---|---|---|
@@ -69,7 +69,7 @@ that string is then parsed by `ModeConfig::parse`.
 | Streaming rational resampler | `audio/resample.rs` | `RationalResampler` |
 | Capture fan-out (1 source → N consumers) | `audio/fanout.rs` | — |
 
-## Daemon: devices & identity (`crates/omnimodemd/src/`)
+## Daemon: devices & identity (`crates/omnimodem/src/`)
 
 | Concern | File | Key symbol |
 |---|---|---|
@@ -79,7 +79,7 @@ that string is then parsed by `ModeConfig::parse`.
 | Device cache (`DeviceId` → live device) | `device/cache.rs` | `DeviceCache` |
 | Hotplug diff (arrivals/departures) | `device/hotplug.rs` | `HotplugWatcher` |
 
-## Daemon: PTT (`crates/omnimodemd/src/ptt/`)
+## Daemon: PTT (`crates/omnimodem/src/ptt/`)
 
 | Concern | File | Key symbol |
 |---|---|---|
@@ -130,7 +130,7 @@ Crate name `omnimodem-dsp`.
 
 | Scope | Location |
 |---|---|
-| Daemon integration (unary, subscribe, e2e, e2e_hardware) | `crates/omnimodemd/tests/` |
+| Daemon integration (unary, subscribe, e2e, e2e_hardware) | `crates/omnimodem/tests/` |
 | DSP known-answer, round-trip, BER, snapshots, loopback, alloc-guard | `crates/dsp/tests/` |
 | DSP hot-path benchmarks (`criterion`) | `crates/dsp/benches/hotpath.rs` |
 | TUI unit tests | `clients/omnimodem-tui/internal/**/**_test.go` |

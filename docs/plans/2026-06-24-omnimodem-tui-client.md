@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Bubble Tea terminal client for `omnimodemd` from `docs/design/2026-06-23-omnimodem-tui-client.md` — connect, configure audio/PTT, pick a digital mode, and transmit — with a status bar, macro bar, activity pane, a real waterfall, and a hard TX abort.
+**Goal:** Build the Bubble Tea terminal client for `omnimodem` from `docs/design/2026-06-23-omnimodem-tui-client.md` — connect, configure audio/PTT, pick a digital mode, and transmit — with a status bar, macro bar, activity pane, a real waterfall, and a hard TX abort.
 
 **Architecture:** A single Elm-style root `Model` routes between screens (Connect → Dashboard → Config → Operate). All daemon I/O goes through a `ModemClient` interface (real gRPC impl + a fake for tests), so every `Update` is unit-testable without a live daemon. The `SubscribeEvents` stream is bridged into Bubble Tea via a goroutine → buffered channel → re-issued `tea.Cmd`. Mutating RPCs run as `tea.Cmd`s returning typed result msgs; state of record is `GetState` snapshot + event deltas.
 
@@ -187,7 +187,7 @@ type grpcClient struct {
 	c    pb.ModemControlClient
 }
 
-// Dial connects to omnimodemd over UDS (path) or TCP (host:port). mTLS is out of
+// Dial connects to omnimodem over UDS (path) or TCP (host:port). mTLS is out of
 // scope for the MVP; local UDS relies on socket-mode + SO_PEERCRED authz.
 func Dial(addr string) (ModemClient, error) {
 	conn, err := grpc.NewClient(dialTarget(addr), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -1030,7 +1030,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", defaultSock(), "omnimodemd address: a UDS path or host:port")
+	addr := flag.String("addr", defaultSock(), "omnimodem address: a UDS path or host:port")
 	flag.Parse()
 
 	c, err := client.Dial(*addr)

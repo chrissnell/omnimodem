@@ -82,4 +82,4 @@ on-air text mode.
 - RSID is not a selectable `ModeConfig` — it is a detector/annotator + a TX
   preamble option — so it adds no `registry.rs` arm; instead it plumbs a
   per-channel enable + a control event, and the ID table is validated against
-  `ModeConfig::parse` in an omnimodemd unit test.
+  `ModeConfig::parse` in an omnimodem unit test.

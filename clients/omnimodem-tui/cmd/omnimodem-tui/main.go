@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", defaultSock(), "omnimodemd address: a UDS path or host:port")
+	addr := flag.String("addr", defaultSock(), "omnimodem address: a UDS path or host:port")
 	flag.Parse()
 
 	c, err := client.Dial(*addr)
@@ -28,7 +28,7 @@ func main() {
 	}
 }
 
-// defaultSock mirrors omnimodemd's own default so the two connect with no flags:
+// defaultSock mirrors omnimodem's own default so the two connect with no flags:
 // OMNIMODEM_RUNTIME_DIR if set, else <tempdir>/omnimodem (Go's os.TempDir matches
 // the daemon's std::env::temp_dir), with the socket inside it.
 func defaultSock() string {

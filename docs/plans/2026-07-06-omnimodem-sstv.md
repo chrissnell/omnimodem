@@ -8,7 +8,7 @@
 
 **Reference:** `n5ac/mmsstv`, upstream commit **`8060b5f`** ("Added LGPL files received from AA6YQ"). Native sample rate **11025 Hz** (`Main.cpp:212`; all mode timing is `ms * SampFreq / 1000.0`).
 
-**Tech stack:** Rust (edition 2021, workspace). New mode assembly `crates/dsp/src/modes/sstv.rs` + supporting DSP blocks under `crates/dsp/src/`, one arm in `crates/omnimodemd/src/mode/registry.rs`, a `SstvParams` proto message, and the TUI `image` view (already exists from Hell, Phase 10). Reuses `FramePayload::Image`, the `Image` gRPC message, and the conformance harness in `crates/dsp/tests/` (`kat.rs`, `ber.rs`, `loopback.rs`, `vectors/`).
+**Tech stack:** Rust (edition 2021, workspace). New mode assembly `crates/dsp/src/modes/sstv.rs` + supporting DSP blocks under `crates/dsp/src/`, one arm in `crates/omnimodem/src/mode/registry.rs`, a `SstvParams` proto message, and the TUI `image` view (already exists from Hell, Phase 10). Reuses `FramePayload::Image`, the `Image` gRPC message, and the conformance harness in `crates/dsp/tests/` (`kat.rs`, `ber.rs`, `loopback.rs`, `vectors/`).
 
 **The hard part (called out up front):** MMSSTV is a **Borland C++ Builder / VCL Windows app** (`.dfm`, `.cbproj`, `__fastcall`, `TColor`, `Graphics::TBitmap`, Shift-JIS source). It **does not build on Linux/CI as-is.** The golden-vector step therefore requires **isolating the DSP core** (`sstv.cpp` + `ComLib.cpp` colour math + `fir.cpp`) into a minimal standalone harness decoupled from the VCL — this is Task Group F0 and it is a prerequisite for every mode's T1.
 

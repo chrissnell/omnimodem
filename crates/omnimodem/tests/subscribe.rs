@@ -1,8 +1,8 @@
 //! Integration: snapshot-on-subscribe + live event delivery.
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
 use tokio::net::UnixStream;
 use tokio_stream::StreamExt;
 use tonic::transport::{Endpoint, Uri};
@@ -28,7 +28,7 @@ async fn snapshot_then_live_events() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 

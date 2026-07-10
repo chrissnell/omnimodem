@@ -15,10 +15,10 @@
 **In scope:**
 
 - **Five mode assemblies** (`crates/dsp/src/modes/`): `afsk1200` (streaming/HDLC), `psk31` (streaming, differential PSK + Varicode), `rtty` (streaming, 2-FSK + Baudot), `cw` (streaming, envelope + Morse), `ft8` (block/windowed: STFT → candidate → Costas-array sync → soft-LLR → LDPC+OSD → CRC-14 → 77-bit unpack). Each exposes a TX `Modulator` and an RX demod.
-- **Mode registry wiring** (`crates/omnimodemd/src/mode/`): extend `ModeConfig::parse` to the five labels with default parameters; `build_demod` / `build_block_demod` / `build_modulator` construct the dsp assemblies.
-- **Daemon RX worker** (`crates/omnimodemd/src/core/rx_worker.rs`): per-channel thread pulling `AudioChunk`s, resampling to the mode's native rate, driving streaming **or** windowed demods, honoring the RX/TX interlock, emitting `FrameEvent::RxFrame`.
-- **Daemon TX model** (`crates/omnimodemd/src/core/tx_worker.rs`): per-channel worker, cooperative frame queue, payload→`Frame`→samples via the mode `Modulator`, time-slot-aligned scheduling for windowed modes, serialized per-rig via the shared PTT registry/interlock. (Exclusive lease deferred to Phase 5 per design §"Open questions".)
-- **Time synchronization** (`crates/omnimodemd/src/core/clock.rs`): a `ClockSource` reporting host NTP offset/error, surfaced as a `TelemetryEvent::ClockOffset` metric, plus a `SlotClock` that computes the next FT8 15 s boundary.
+- **Mode registry wiring** (`crates/omnimodem/src/mode/`): extend `ModeConfig::parse` to the five labels with default parameters; `build_demod` / `build_block_demod` / `build_modulator` construct the dsp assemblies.
+- **Daemon RX worker** (`crates/omnimodem/src/core/rx_worker.rs`): per-channel thread pulling `AudioChunk`s, resampling to the mode's native rate, driving streaming **or** windowed demods, honoring the RX/TX interlock, emitting `FrameEvent::RxFrame`.
+- **Daemon TX model** (`crates/omnimodem/src/core/tx_worker.rs`): per-channel worker, cooperative frame queue, payload→`Frame`→samples via the mode `Modulator`, time-slot-aligned scheduling for windowed modes, serialized per-rig via the shared PTT registry/interlock. (Exclusive lease deferred to Phase 5 per design §"Open questions".)
+- **Time synchronization** (`crates/omnimodem/src/core/clock.rs`): a `ClockSource` reporting host NTP offset/error, surfaced as a `TelemetryEvent::ClockOffset` metric, plus a `SlotClock` that computes the next FT8 15 s boundary.
 - **Conformance gates** (`crates/dsp/tests/`, `crates/dsp/src/testutil.rs`): per-mode loopback round-trips; AWGN BER/decode-rate sweeps with thresholds; a seedable Watterson HF-fading fixture; bidirectional cross-decode interop tests gated `#[ignore]` behind reference binaries; a `phase4_exit_criterion` aggregate gate.
 
 **Out of scope (Phase 5):** FT4/JT65/JT9/WSPR/MFSK/Olivia/Hell/FreeDV/M17/ARDOP; TX exclusive lease; mTLS for routable binds; Prometheus exporter; reference CLI/TUI; KISS/AGWPE translator; SIC and AP decoding for FT8 (the Phase-4 FT8 decoder is BP+OSD single-pass per candidate — design lists SIC/AP as WSJT-X-class differentiators that compose later).
@@ -39,9 +39,9 @@ Per the writing-plans scope check: the five mode assemblies (Parts A–E) are **
 | `crates/dsp/src/modes/rtty.rs` | `RttyDemod` + `RttyMod`: 2-FSK + Baudot. |
 | `crates/dsp/src/modes/cw.rs` | `CwDemod` + `CwMod`: envelope detect + Morse. |
 | `crates/dsp/src/modes/ft8.rs` | `Ft8Demod` (block) + `Ft8Mod`: STFT→candidate→Costas→LLR→LDPC+OSD→77-bit. |
-| `crates/omnimodemd/src/core/rx_worker.rs` | Per-channel RX thread; streaming + windowed driving; interlock-gated; emits frames. |
-| `crates/omnimodemd/src/core/tx_worker.rs` | Per-channel TX worker; cooperative queue; modulate; slot-align; `drive_tx_cycle`. |
-| `crates/omnimodemd/src/core/clock.rs` | `ClockSource` (host NTP offset) + `SlotClock` (next windowed-TX boundary). |
+| `crates/omnimodem/src/core/rx_worker.rs` | Per-channel RX thread; streaming + windowed driving; interlock-gated; emits frames. |
+| `crates/omnimodem/src/core/tx_worker.rs` | Per-channel TX worker; cooperative queue; modulate; slot-align; `drive_tx_cycle`. |
+| `crates/omnimodem/src/core/clock.rs` | `ClockSource` (host NTP offset) + `SlotClock` (next windowed-TX boundary). |
 | `crates/dsp/tests/loopback.rs` | TX-modulator → RX-demod round-trips for all five modes. |
 | `crates/dsp/tests/ber.rs` | Seeded AWGN (and Watterson) decode-rate sweeps with per-mode thresholds. |
 
@@ -50,11 +50,11 @@ Per the writing-plans scope check: the five mode assemblies (Parts A–E) are **
 | File | Change |
 |---|---|
 | `crates/dsp/src/lib.rs` | `pub mod modes;` + re-exports. |
-| `crates/omnimodemd/src/mode/mod.rs` | Extend `ModeConfig::parse` to the five labels (default params). |
-| `crates/omnimodemd/src/mode/registry.rs` | `build_demod`/`build_block_demod`/`build_modulator` construct the assemblies. |
-| `crates/omnimodemd/src/core/mod.rs` | Spawn/teardown RX & TX workers; route `Transmit` through the TX worker; emit `ClockOffset`. |
-| `crates/omnimodemd/src/core/command.rs` | (no new command — `Transmit` payload reinterpreted per-mode.) |
-| `crates/omnimodemd/src/core/event.rs` | Add `TelemetryEvent::ClockOffset { channel, offset_s, est_error_s }`. |
+| `crates/omnimodem/src/mode/mod.rs` | Extend `ModeConfig::parse` to the five labels (default params). |
+| `crates/omnimodem/src/mode/registry.rs` | `build_demod`/`build_block_demod`/`build_modulator` construct the assemblies. |
+| `crates/omnimodem/src/core/mod.rs` | Spawn/teardown RX & TX workers; route `Transmit` through the TX worker; emit `ClockOffset`. |
+| `crates/omnimodem/src/core/command.rs` | (no new command — `Transmit` payload reinterpreted per-mode.) |
+| `crates/omnimodem/src/core/event.rs` | Add `TelemetryEvent::ClockOffset { channel, offset_s, est_error_s }`. |
 | `crates/dsp/src/testutil.rs` | Add `WattersonChannel` fading fixture + `decode_rate` helper. |
 | `crates/dsp/tests/kat.rs` | Add per-mode KAT + cross-decode `#[ignore]` gates; extend `phase4_exit_criterion`. |
 | `crates/dsp/tests/snapshots.rs` | Add mode-level modulator golden snapshots. |
@@ -123,8 +123,8 @@ git commit -m "Add modes module skeleton to omnimodem-dsp"
 ### Task 0.2: Extend the daemon `ModeConfig` parser to the five mode labels
 
 **Files:**
-- Modify: `crates/omnimodemd/src/mode/mod.rs:24-29`
-- Test: `crates/omnimodemd/src/mode/mod.rs` (inline `#[cfg(test)]`)
+- Modify: `crates/omnimodem/src/mode/mod.rs:24-29`
+- Test: `crates/omnimodem/src/mode/mod.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -145,7 +145,7 @@ Replace the body of `parse_is_strict` and add a new test in the inline `mod test
 
 - [ ] **Step 2: Run it to confirm it fails**
 
-Run: `cargo test -p omnimodemd mode::tests::parse_resolves_phase4_modes_with_defaults`
+Run: `cargo test -p omnimodem mode::tests::parse_resolves_phase4_modes_with_defaults`
 Expected: FAIL (parser returns `None` for the five labels).
 
 - [ ] **Step 3: Implement the parser arms**
@@ -174,13 +174,13 @@ Delete the now-stale `parse_is_strict` test (its `assert_eq!(ModeConfig::parse("
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p omnimodemd mode::`
+Run: `cargo test -p omnimodem mode::`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/mod.rs
+git add crates/omnimodem/src/mode/mod.rs
 git commit -m "Resolve Phase-4 mode labels to parametric ModeConfig defaults"
 ```
 
@@ -1681,9 +1681,9 @@ Today `LiveBindings.captures` holds a `CaptureHandle` that **no code consumes** 
 ### Task F.1: RX worker struct driving a streaming demod
 
 **Files:**
-- Create: `crates/omnimodemd/src/core/rx_worker.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs` (add `pub mod rx_worker;`)
-- Test: `crates/omnimodemd/src/core/rx_worker.rs` (inline)
+- Create: `crates/omnimodem/src/core/rx_worker.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs` (add `pub mod rx_worker;`)
+- Test: `crates/omnimodem/src/core/rx_worker.rs` (inline)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1824,9 +1824,9 @@ mod tests {
 
 - [ ] **Step 2: Register the module + run**
 
-In `crates/omnimodemd/src/core/mod.rs`, add `pub mod rx_worker;` near the top with the other `pub mod` lines (after `pub mod event;`).
+In `crates/omnimodem/src/core/mod.rs`, add `pub mod rx_worker;` near the top with the other `pub mod` lines (after `pub mod event;`).
 
-Run: `cargo test -p omnimodemd core::rx_worker`
+Run: `cargo test -p omnimodem core::rx_worker`
 Expected: PASS. The `FileBackend` replays the i16 buffer in ~20 ms chunks then closes the sender (EOF), so the worker thread exits and `join()` returns.
 
 > If the assertion fails, the most likely cause is the demod needs the *whole* signal to be contiguous across chunk boundaries — which it is, since the worker feeds each chunk into the same persistent demod instance. Confirm `Afsk1200Demod::ensemble` accumulates `bit_levels` across `feed` calls (it does — state lives in the struct).
@@ -1834,14 +1834,14 @@ Expected: PASS. The `FileBackend` replays the i16 buffer in ~20 ms chunks then c
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/rx_worker.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/rx_worker.rs crates/omnimodem/src/core/mod.rs
 git commit -m "Add per-channel RX worker driving a streaming demod"
 ```
 
 ### Task F.2: RX worker windowed-demod path (FT8)
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/rx_worker.rs`
+- Modify: `crates/omnimodem/src/core/rx_worker.rs`
 - Test: inline
 
 - [ ] **Step 1: Failing test**
@@ -1879,7 +1879,7 @@ git commit -m "Add per-channel RX worker driving a streaming demod"
 
 - [ ] **Step 2: Confirm fail**
 
-Run: `cargo test -p omnimodemd core::rx_worker::tests::rx_worker_decodes_a_windowed_ft8`
+Run: `cargo test -p omnimodem core::rx_worker::tests::rx_worker_decodes_a_windowed_ft8`
 Expected: FAIL — `spawn_windowed` undefined.
 
 - [ ] **Step 3: Implement the windowed spawner**
@@ -1954,21 +1954,21 @@ impl RxWorker {
 
 - [ ] **Step 4: Run**
 
-Run: `cargo test -p omnimodemd core::rx_worker`
+Run: `cargo test -p omnimodem core::rx_worker`
 Expected: PASS (both streaming and windowed tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/rx_worker.rs
+git add crates/omnimodem/src/core/rx_worker.rs
 git commit -m "Add windowed (FT8) RX worker path"
 ```
 
 ### Task F.3: Wire RX workers into the core lifecycle
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/mod.rs`
-- Test: `crates/omnimodemd/tests/` integration (see Task I) + inline via the existing `core::tests`
+- Modify: `crates/omnimodem/src/core/mod.rs`
+- Test: `crates/omnimodem/tests/` integration (see Task I) + inline via the existing `core::tests`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2016,7 +2016,7 @@ Add the two small async helpers `configure_channel` and `configure_audio_ch` to 
 
 - [ ] **Step 2: Confirm fail**
 
-Run: `cargo test -p omnimodemd core::tests::configuring_an_afsk_channel_spawns_rx`
+Run: `cargo test -p omnimodem core::tests::configuring_an_afsk_channel_spawns_rx`
 Expected: FAIL — no RX worker is spawned, so no frame arrives (timeout).
 
 - [ ] **Step 3: Spawn the worker in `configure_audio`**
@@ -2055,21 +2055,21 @@ This requires:
 
 Add `Supervisor::channel_mode`, thread `frames`/`interlock` through `configure_audio`, and on `DeviceDeparted`/eviction also drop `live.rx_workers.remove(&c)` so a hotplug tears down the worker.
 
-Run: `cargo test -p omnimodemd core::tests::configuring_an_afsk_channel_spawns_rx`
+Run: `cargo test -p omnimodem core::tests::configuring_an_afsk_channel_spawns_rx`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/mod.rs crates/omnimodemd/src/supervisor/mod.rs
+git add crates/omnimodem/src/core/mod.rs crates/omnimodem/src/supervisor/mod.rs
 git commit -m "Spawn/teardown per-channel RX workers in the core lifecycle"
 ```
 
 ### Task F.4: Registry `demod_kind` builder
 
 **Files:**
-- Modify: `crates/omnimodemd/src/mode/registry.rs`
-- Test: `crates/omnimodemd/src/mode/registry.rs` (inline)
+- Modify: `crates/omnimodem/src/mode/registry.rs`
+- Test: `crates/omnimodem/src/mode/registry.rs` (inline)
 
 - [ ] **Step 1: Failing test**
 
@@ -2086,7 +2086,7 @@ git commit -m "Spawn/teardown per-channel RX workers in the core lifecycle"
 
 - [ ] **Step 2: Confirm fail**
 
-Run: `cargo test -p omnimodemd mode::registry::tests::demod_kind_classifies_modes`
+Run: `cargo test -p omnimodem mode::registry::tests::demod_kind_classifies_modes`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -2145,13 +2145,13 @@ Note: `Afsk1200Ensemble`, `CwDemod`, `RttyDemod`, `Psk31Demod` implement `Demodu
 
 - [ ] **Step 4: Run**
 
-Run: `cargo test -p omnimodemd mode::registry`
+Run: `cargo test -p omnimodem mode::registry`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/mode/registry.rs
+git add crates/omnimodem/src/mode/registry.rs
 git commit -m "Add registry demod_kind builder mapping ModeConfig to RX demods"
 ```
 
@@ -2164,8 +2164,8 @@ Today `Transmit` synchronously plays raw PCM bytes inside the command handler (`
 ### Task G.1: TX worker with a cooperative frame queue
 
 **Files:**
-- Create: `crates/omnimodemd/src/core/tx_worker.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs` (`pub mod tx_worker;`)
+- Create: `crates/omnimodem/src/core/tx_worker.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs` (`pub mod tx_worker;`)
 - Test: inline
 
 - [ ] **Step 1: Failing test**
@@ -2341,22 +2341,22 @@ mod tests {
 
 In `core/mod.rs` add `pub mod tx_worker;`.
 
-Run: `cargo test -p omnimodemd core::tx_worker`
+Run: `cargo test -p omnimodem core::tx_worker`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/tx_worker.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/tx_worker.rs crates/omnimodem/src/core/mod.rs
 git commit -m "Add per-channel TX worker with cooperative frame queue"
 ```
 
 ### Task G.2: Time-slot-aligned scheduling for windowed modes
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/tx_worker.rs` (`wait_for_slot`)
-- Create: `crates/omnimodemd/src/core/clock.rs` (`SlotClock`)
-- Test: `crates/omnimodemd/src/core/clock.rs` (inline)
+- Modify: `crates/omnimodem/src/core/tx_worker.rs` (`wait_for_slot`)
+- Create: `crates/omnimodem/src/core/clock.rs` (`SlotClock`)
+- Test: `crates/omnimodem/src/core/clock.rs` (inline)
 
 - [ ] **Step 1: Failing test for `SlotClock`**
 
@@ -2414,7 +2414,7 @@ mod tests {
 
 `core/mod.rs`: `pub mod clock;`
 
-Run: `cargo test -p omnimodemd core::clock`
+Run: `cargo test -p omnimodem core::clock`
 Expected: PASS.
 
 - [ ] **Step 3: Use `SlotClock` in `wait_for_slot`**
@@ -2432,20 +2432,20 @@ fn wait_for_slot(slot_s: f32) {
 
 - [ ] **Step 4: Run the tx_worker suite (still green; slot=None in the test)**
 
-Run: `cargo test -p omnimodemd core::tx_worker core::clock`
+Run: `cargo test -p omnimodem core::tx_worker core::clock`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/clock.rs crates/omnimodemd/src/core/tx_worker.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/clock.rs crates/omnimodem/src/core/tx_worker.rs crates/omnimodem/src/core/mod.rs
 git commit -m "Add SlotClock and wire FT8 time-slot-aligned TX scheduling"
 ```
 
 ### Task G.3: Route `Transmit` through the TX worker
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/mod.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs`
 - Test: `core::tests` inline (extend the existing transmit test)
 
 - [ ] **Step 1: Failing test**
@@ -2466,7 +2466,7 @@ Fill in the body following `configured_audio_ptt_transmit_runs_real_cycle` (mode
 
 - [ ] **Step 2: Confirm fail**
 
-Run: `cargo test -p omnimodemd core::tests::transmit_on_moded_channel_enqueues`
+Run: `cargo test -p omnimodem core::tests::transmit_on_moded_channel_enqueues`
 Expected: FAIL — `transmit()` still treats payload as raw PCM, producing garbled audio and no mode framing.
 
 - [ ] **Step 3: Spawn the TX worker and route to it**
@@ -2493,13 +2493,13 @@ Building the `TxWorker` requires moving the `PlaybackHandle` and `PttDriver` int
 
 - [ ] **Step 4: Run**
 
-Run: `cargo test -p omnimodemd core::tests`
+Run: `cargo test -p omnimodem core::tests`
 Expected: PASS (new test plus the existing transmit tests — the legacy `configure_then_transmit_emits_events` uses mode `"none"`, which still takes the legacy path).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/mod.rs
 git commit -m "Route Transmit on moded channels through the per-channel TX worker"
 ```
 
@@ -2512,7 +2512,7 @@ Surface the host clock offset so operators can tell a time-sync problem from a s
 ### Task H.1: `ClockSource` reading the host NTP offset
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/clock.rs`
+- Modify: `crates/omnimodem/src/core/clock.rs`
 - Test: inline
 
 - [ ] **Step 1: Failing test**
@@ -2531,7 +2531,7 @@ Surface the host clock offset so operators can tell a time-sync problem from a s
 
 - [ ] **Step 2: Confirm fail**
 
-Run: `cargo test -p omnimodemd core::clock::tests::clock_source_reports`
+Run: `cargo test -p omnimodem core::clock::tests::clock_source_reports`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement via `libc::ntp_adjtime`**
@@ -2589,21 +2589,21 @@ impl Default for ClockSource {
 
 - [ ] **Step 4: Run**
 
-Run: `cargo test -p omnimodemd core::clock`
+Run: `cargo test -p omnimodem core::clock`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/clock.rs
+git add crates/omnimodem/src/core/clock.rs
 git commit -m "Add ClockSource reading host NTP offset via ntp_adjtime"
 ```
 
 ### Task H.2: Emit `ClockOffset` telemetry from the core idle tick
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/event.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs`
+- Modify: `crates/omnimodem/src/core/event.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs`
 - Test: `core::tests` inline
 
 - [ ] **Step 1: Add the event variant + failing test**
@@ -2639,7 +2639,7 @@ In `core::tests`, add a test that spawns a core, waits one `HOTPLUG_POLL` tick, 
 
 - [ ] **Step 2: Confirm fail**
 
-Run: `cargo test -p omnimodemd core::tests::core_emits_clock_offset`
+Run: `cargo test -p omnimodem core::tests::core_emits_clock_offset`
 Expected: FAIL — nothing emits it.
 
 - [ ] **Step 3: Emit on the idle tick**
@@ -2662,13 +2662,13 @@ In `run()`'s `RecvTimeoutError::Timeout` arm (where `poll_hotplug` runs), also r
 
 - [ ] **Step 4: Run**
 
-Run: `cargo test -p omnimodemd core::tests::core_emits_clock_offset`
+Run: `cargo test -p omnimodem core::tests::core_emits_clock_offset`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/event.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/event.rs crates/omnimodem/src/core/mod.rs
 git commit -m "Emit ClockOffset telemetry from the core idle tick"
 ```
 

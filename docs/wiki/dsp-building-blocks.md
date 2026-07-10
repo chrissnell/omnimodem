@@ -58,7 +58,7 @@ trait Modulator {            // symmetric TX
 
 ### Registering a mode (daemon side)
 
-[`../../crates/omnimodemd/src/mode/`](../../crates/omnimodemd/src/mode/):
+[`../../crates/omnimodem/src/mode/`](../../crates/omnimodem/src/mode/):
 
 1. `mode/mod.rs::ModeConfig` — a parametric enum, one variant per mode family, with
    `ModeConfig::parse(mode_string)` handling bare labels (`"ft8"`) and parametric

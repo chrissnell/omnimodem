@@ -132,9 +132,9 @@ not required for the modes in scope.
 
 ### T6 — Daemon registration
 - `crates/dsp/src/modes/mod.rs`: `pub mod hell;`.
-- `crates/omnimodemd/src/mode/mod.rs`: `ModeConfig::Hell { variant, center_hz }`
+- `crates/omnimodem/src/mode/mod.rs`: `ModeConfig::Hell { variant, center_hz }`
   + `parse`/`to_mode_string`/`label` arms (mirror `DominoEx`).
-- `crates/omnimodemd/src/mode/registry.rs`: `demod_kind` + `build_modulator` arms.
+- `crates/omnimodem/src/mode/registry.rs`: `demod_kind` + `build_modulator` arms.
 - Registry unit test.
 
 ### T7 — Raster/Image wire format (the deferred-from-P0 half)
@@ -144,7 +144,7 @@ not required for the modes in scope.
   framing to append columns incrementally (e.g. a `column_start`/`is_delta` or a
   running row offset). Add it to `RxFrame` (typed field) and replace the interim
   `frame_bytes` 2-byte-BE-width flatten in
-  `crates/omnimodemd/src/core/rx_worker.rs` with it. `HellParams { variant,
+  `crates/omnimodem/src/core/rx_worker.rs` with it. `HellParams { variant,
   center_hz }` in the `ModeParams` oneof.
 - Keep `FramePayload::Image` (P0) as the DSP-side type; the proto message is the
   wire representation.

@@ -31,7 +31,7 @@
 ## File Structure
 
 ```
-crates/omnimodemd/
+crates/omnimodem/
   Cargo.toml                          + target-gated windows/jni/ndk-context/android_logger; android-test-stub feature
   src/
     ids.rs                            (unchanged; DeviceId::Usb already exists)
@@ -70,8 +70,8 @@ crates/omnimodemd/
 Today `registry.rs`'s `RealOpener` inlines `#[cfg(unix)]` arms. Refactor to Graywolf's pattern (`graywolf-modem/src/tx/ptt.rs:99-130`): each platform adapter is a `#[cfg]`-gated module aliased to one neutral type, so the factory names a single type regardless of OS. This is purely structural and keeps Linux behavior identical.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/ptt/serial.rs`
-- Modify: `crates/omnimodemd/src/ptt/mod.rs`
+- Modify: `crates/omnimodem/src/ptt/serial.rs`
+- Modify: `crates/omnimodem/src/ptt/mod.rs`
 
 - [ ] **Step 1: In `ptt/serial.rs`, keep `pub mod unix` as-is and add a platform alias at the bottom**
 
@@ -86,13 +86,13 @@ pub use super::serial_win::WinSerialLines as PlatformSerialLines;
 
 - [ ] **Step 2: Run the existing serial tests to confirm no behavior change**
 
-Run: `cargo test -p omnimodemd ptt::serial::`
+Run: `cargo test -p omnimodem ptt::serial::`
 Expected: PASS (3 tests) — the alias is additive; Linux still uses `UnixSerialLines`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/serial.rs crates/omnimodemd/src/ptt/mod.rs
+git add crates/omnimodem/src/ptt/serial.rs crates/omnimodem/src/ptt/mod.rs
 git commit -m "Introduce platform-aliased serial adapter type"
 ```
 
@@ -104,8 +104,8 @@ git commit -m "Introduce platform-aliased serial adapter type"
 
 **Files:**
 - Modify: `proto/omnimodem.proto`
-- Modify: `crates/omnimodemd/src/ptt/registry.rs`
-- Modify: `crates/omnimodemd/src/grpc/convert.rs`
+- Modify: `crates/omnimodem/src/ptt/registry.rs`
+- Modify: `crates/omnimodem/src/grpc/convert.rs`
 
 - [ ] **Step 1: Add the proto enum value (new tag only; nothing renumbered)**
 
@@ -117,7 +117,7 @@ In `proto/omnimodem.proto`, in `enum PttMethod`, after `PTT_METHOD_GPIO = 6;`:
 
 - [ ] **Step 2: Add the domain variant**
 
-In `crates/omnimodemd/src/ptt/registry.rs`, in `pub enum PttMethod`, add:
+In `crates/omnimodem/src/ptt/registry.rs`, in `pub enum PttMethod`, add:
 
 ```rust
     /// Hamlib `rigctld` over TCP. `addr` is `host:port` (e.g. "127.0.0.1:4532").
@@ -126,7 +126,7 @@ In `crates/omnimodemd/src/ptt/registry.rs`, in `pub enum PttMethod`, add:
 
 - [ ] **Step 3: Map it in `proto_ptt_to_config`**
 
-In `crates/omnimodemd/src/grpc/convert.rs`, add a match arm alongside the others:
+In `crates/omnimodem/src/grpc/convert.rs`, add a match arm alongside the others:
 
 ```rust
         Ok(proto::PttMethod::Rigctld) => PttMethod::Rigctld { addr: req.node.clone() },
@@ -134,13 +134,13 @@ In `crates/omnimodemd/src/grpc/convert.rs`, add a match arm alongside the others
 
 - [ ] **Step 4: Build (codegen) and run the proto smoke test**
 
-Run: `cargo build -p omnimodemd && cargo test -p omnimodemd proto::tests::phase2_types_are_constructible`
+Run: `cargo build -p omnimodem && cargo test -p omnimodem proto::tests::phase2_types_are_constructible`
 Expected: PASS — `PttMethod::Rigctld as i32 == 7` is constructible; the service still compiles.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add proto/omnimodem.proto crates/omnimodemd/src/ptt/registry.rs crates/omnimodemd/src/grpc/convert.rs
+git add proto/omnimodem.proto crates/omnimodem/src/ptt/registry.rs crates/omnimodem/src/grpc/convert.rs
 git commit -m "Add rigctld PTT method (additive within v1)"
 ```
 
@@ -153,12 +153,12 @@ git commit -m "Add rigctld PTT method (additive within v1)"
 The highest-ROI cross-platform task: one pure-`std::net` driver that keys a radio on Linux, macOS, and Windows identically — no per-OS adapter. Lifted from Graywolf `tx/ptt_rigctld.rs`, but with `[IMPROVEMENT] #1/#5`: it returns structured `PttError` (not `Result<(),String>`) and has no `-9999` sentinel. The line-protocol parsing is pure and fully unit-tested; the socket path is exercised against an in-test fake rigctld server.
 
 **Files:**
-- Create: `crates/omnimodemd/src/ptt/rigctld.rs`
-- Modify: `crates/omnimodemd/src/ptt/mod.rs` (declare `pub mod rigctld;`)
+- Create: `crates/omnimodem/src/ptt/rigctld.rs`
+- Modify: `crates/omnimodem/src/ptt/mod.rs` (declare `pub mod rigctld;`)
 
 - [ ] **Step 1: Write the protocol parser with failing tests**
 
-Create `crates/omnimodemd/src/ptt/rigctld.rs`:
+Create `crates/omnimodem/src/ptt/rigctld.rs`:
 
 ```rust
 //! Hamlib `rigctld` PTT over TCP. Portable on every OS (pure std::net). The
@@ -231,12 +231,12 @@ mod parse_tests {
 
 - [ ] **Step 2: Run the parser tests (verify they pass)**
 
-Run: `cargo test -p omnimodemd ptt::rigctld::parse_tests`
+Run: `cargo test -p omnimodem ptt::rigctld::parse_tests`
 Expected: PASS (4 tests).
 
 - [ ] **Step 3: Add the `RigctldPtt` driver over the connection**
 
-Append to `crates/omnimodemd/src/ptt/rigctld.rs`:
+Append to `crates/omnimodem/src/ptt/rigctld.rs`:
 
 ```rust
 /// A rigctld connection. `key`/`unkey` send `T 1`/`T 0`. Unkey is safety-retried
@@ -320,7 +320,7 @@ impl FirstSocketAddr for str {
 
 - [ ] **Step 4: Add an integration test against a fake rigctld server**
 
-Append to `crates/omnimodemd/src/ptt/rigctld.rs`:
+Append to `crates/omnimodem/src/ptt/rigctld.rs`:
 
 ```rust
 #[cfg(test)]
@@ -368,15 +368,15 @@ mod server_tests {
 
 - [ ] **Step 5: Declare the module and run the tests**
 
-Add `pub mod rigctld;` to `crates/omnimodemd/src/ptt/mod.rs`. Run:
+Add `pub mod rigctld;` to `crates/omnimodem/src/ptt/mod.rs`. Run:
 
-Run: `cargo test -p omnimodemd ptt::rigctld::`
+Run: `cargo test -p omnimodem ptt::rigctld::`
 Expected: PASS (parser 4 + server 1) — connect/key/unkey round-trip against the fake server, startup-unkey observed.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/rigctld.rs crates/omnimodemd/src/ptt/mod.rs
+git add crates/omnimodem/src/ptt/rigctld.rs crates/omnimodem/src/ptt/mod.rs
 git commit -m "Add portable rigctld PTT driver with structured errors"
 ```
 
@@ -385,7 +385,7 @@ git commit -m "Add portable rigctld PTT driver with structured errors"
 ## Task 4: Wire `Rigctld` into `RealOpener`
 
 **Files:**
-- Modify: `crates/omnimodemd/src/ptt/registry.rs`
+- Modify: `crates/omnimodem/src/ptt/registry.rs`
 
 - [ ] **Step 1: Add the match arm (no cfg gate — portable)**
 
@@ -404,11 +404,11 @@ In `registry.rs` `mod tests`, add a test that starts the same fake rigctld (fact
 
 - [ ] **Step 3: Run and commit**
 
-Run: `cargo test -p omnimodemd ptt::registry::`
+Run: `cargo test -p omnimodem ptt::registry::`
 Expected: PASS — including the new rigctld-opens test.
 
 ```bash
-git add crates/omnimodemd/src/ptt/registry.rs
+git add crates/omnimodem/src/ptt/registry.rs
 git commit -m "Wire rigctld into the PTT driver factory"
 ```
 
@@ -423,12 +423,12 @@ git commit -m "Wire rigctld into the PTT driver factory"
 Implements the existing `ModemControlLines` seam with the Windows mechanism (Graywolf `tx/ptt_win.rs`): `CreateFileW` in shared mode + stateless `EscapeCommFunction(SETRTS/CLRRTS/SETDTR/CLRDTR)`. No termios analog. `[IMPROVEMENT] #1`: maps `CreateFileW`/`EscapeCommFunction` failures to `PttError`.
 
 **Files:**
-- Create: `crates/omnimodemd/src/ptt/serial_win.rs`
-- Modify: `crates/omnimodemd/src/ptt/mod.rs` (add `#[cfg(windows)] pub mod serial_win;`)
+- Create: `crates/omnimodem/src/ptt/serial_win.rs`
+- Modify: `crates/omnimodem/src/ptt/mod.rs` (add `#[cfg(windows)] pub mod serial_win;`)
 
 - [ ] **Step 1: Write the Windows adapter**
 
-Create `crates/omnimodemd/src/ptt/serial_win.rs`:
+Create `crates/omnimodem/src/ptt/serial_win.rs`:
 
 ```rust
 //! Windows serial RTS/DTR via CreateFileW + EscapeCommFunction. Implements the
@@ -521,17 +521,17 @@ fn map_win(device: &str, e: windows::core::Error) -> PttError {
 
 - [ ] **Step 3: Compile-gate for Windows**
 
-Run: `cargo build -p omnimodemd --target x86_64-pc-windows-msvc` (native Windows runner or `cargo check` on a Windows box; the `windows` crate does not cross-compile cleanly from Linux without the MSVC toolchain — document this as a CI-on-Windows step).
+Run: `cargo build -p omnimodem --target x86_64-pc-windows-msvc` (native Windows runner or `cargo check` on a Windows box; the `windows` crate does not cross-compile cleanly from Linux without the MSVC toolchain — document this as a CI-on-Windows step).
 Expected: compiles; `WinSerialLines` satisfies `ModemControlLines`.
 
 - [ ] **Step 4: Manual hardware gate (Windows host with a USB serial CAT/PTT cable)**
 
-Document in the task: run `omnimodemd`, `ConfigurePtt { method: SERIAL_RTS, node: "COM5" }`, `KeyPtt { keyed: true }` → rig TX LED lights; `keyed: false` drops it. Confirm a `PttState{keyed}` event each way.
+Document in the task: run `omnimodem`, `ConfigurePtt { method: SERIAL_RTS, node: "COM5" }`, `KeyPtt { keyed: true }` → rig TX LED lights; `keyed: false` drops it. Confirm a `PttState{keyed}` event each way.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/serial_win.rs crates/omnimodemd/src/ptt/mod.rs crates/omnimodemd/src/ptt/registry.rs
+git add crates/omnimodem/src/ptt/serial_win.rs crates/omnimodem/src/ptt/mod.rs crates/omnimodem/src/ptt/registry.rs
 git commit -m "Add Windows serial RTS/DTR PTT adapter"
 ```
 
@@ -542,12 +542,12 @@ git commit -m "Add Windows serial RTS/DTR PTT adapter"
 Linux writes the 5-byte HID report to `/dev/hidrawN` directly (already implemented). macOS has no `/dev/hidraw` and Windows needs `WriteFile`; both are served by the cross-platform `hidapi` crate (Graywolf `tx/ptt_cm108_macos.rs` + `ptt_cm108_win.rs`). One adapter covers both. The report layout is identical to the Linux path (it's already in `Cm108Ptt::set`), so this only implements the `Cm108Hid` *transport* seam.
 
 **Files:**
-- Create: `crates/omnimodemd/src/ptt/cm108_hidapi.rs`
-- Modify: `crates/omnimodemd/src/ptt/mod.rs`, `crates/omnimodemd/src/ptt/registry.rs`
+- Create: `crates/omnimodem/src/ptt/cm108_hidapi.rs`
+- Modify: `crates/omnimodem/src/ptt/mod.rs`, `crates/omnimodem/src/ptt/registry.rs`
 
 - [ ] **Step 1: Write the hidapi adapter**
 
-Create `crates/omnimodemd/src/ptt/cm108_hidapi.rs`:
+Create `crates/omnimodem/src/ptt/cm108_hidapi.rs`:
 
 ```rust
 //! CM108 HID transport via the `hidapi` crate (macOS IOKit, Windows HID). The
@@ -621,7 +621,7 @@ Replace the CM108 arm so Linux keeps `UnixCm108Hid` and other unix/windows use `
 
 - [ ] **Step 3: Compile gates**
 
-Run: `cargo build -p omnimodemd --target x86_64-apple-darwin` (macOS runner) and `--target x86_64-pc-windows-msvc` (Windows runner).
+Run: `cargo build -p omnimodem --target x86_64-apple-darwin` (macOS runner) and `--target x86_64-pc-windows-msvc` (Windows runner).
 Expected: compiles; `HidApiCm108` satisfies `Cm108Hid` on both.
 
 - [ ] **Step 4: Manual hardware gate (macOS + Windows, CM108 dongle e.g. DigiRig/AIOC)**
@@ -631,7 +631,7 @@ Document: `--list-devices` / OS HID enumeration to find the CM108 path; `Configu
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/cm108_hidapi.rs crates/omnimodemd/src/ptt/mod.rs crates/omnimodemd/src/ptt/registry.rs
+git add crates/omnimodem/src/ptt/cm108_hidapi.rs crates/omnimodem/src/ptt/mod.rs crates/omnimodem/src/ptt/registry.rs
 git commit -m "Add macOS/Windows CM108 PTT adapter via hidapi"
 ```
 
@@ -644,14 +644,14 @@ git commit -m "Add macOS/Windows CM108 PTT adapter via hidapi"
 `[IMPROVEMENT] #3`. Today `cpal_backend::open_playback` hardcodes `build_output_stream::<i16>`; on macOS/Windows the device commonly only offers F32, so the stream fails to build and playback (hence `Transmit`) is dead there. Generalize the capture-side format selection to playback, mirroring `build_input`.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/audio/alsa.rs` (rename for symmetry)
-- Modify: `crates/omnimodemd/src/audio/cpal_backend.rs`
+- Modify: `crates/omnimodem/src/audio/alsa.rs` (rename for symmetry)
+- Modify: `crates/omnimodem/src/audio/cpal_backend.rs`
 
 - [ ] **Step 1: Generalize the format picker name**
 
 In `audio/alsa.rs`, rename `pick_input_sample_format` → `pick_sample_format` (it is direction-agnostic), and update its one caller in `cpal_backend.rs` capture. Keep the existing tests, renaming references. Run:
 
-Run: `cargo test -p omnimodemd audio::alsa::`
+Run: `cargo test -p omnimodem audio::alsa::`
 Expected: PASS (7 tests) after the rename.
 
 - [ ] **Step 2: Add `output_configs` + a format-matched `build_output` to `cpal_backend.rs`**
@@ -677,7 +677,7 @@ Then in `open_playback`, after choosing `rate`, pick the output format and build
 
 - [ ] **Step 3: Compile gate + Linux regression**
 
-Run: `cargo build -p omnimodemd` and `cargo test -p omnimodemd` (Linux: all existing audio tests still pass; the file/null backends are unaffected). Then `cargo build --target x86_64-apple-darwin` / `x86_64-pc-windows-msvc`.
+Run: `cargo build -p omnimodem` and `cargo test -p omnimodem` (Linux: all existing audio tests still pass; the file/null backends are unaffected). Then `cargo build --target x86_64-apple-darwin` / `x86_64-pc-windows-msvc`.
 Expected: builds on all three; Linux suite green.
 
 - [ ] **Step 4: Manual gate (macOS + Windows sound card)**
@@ -687,7 +687,7 @@ Document: `ConfigureAudio` + `Transmit` a PCM buffer; confirm audio plays out an
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/alsa.rs crates/omnimodemd/src/audio/cpal_backend.rs
+git add crates/omnimodem/src/audio/alsa.rs crates/omnimodem/src/audio/cpal_backend.rs
 git commit -m "Select playback sample format per device (fix I16-only output)"
 ```
 
@@ -698,12 +698,12 @@ git commit -m "Select playback sample format per device (fix I16-only output)"
 `[IMPROVEMENT] #2`. `nusb` is a declared dependency but unused; `RealEnumerator` derives ids only from the ALSA pcm name. Add a pure `audio::identity` module that, given a cpal device's reported name (and on Windows its `Device::id()`), and a `nusb` device scan, returns the most durable `DeviceId` — preferring `DeviceId::Usb { vid, pid, serial }`. This makes config replug-stable across OSes (better than Graywolf, which only displays the serial).
 
 **Files:**
-- Create: `crates/omnimodemd/src/audio/identity.rs`
-- Modify: `crates/omnimodemd/src/audio/mod.rs`, `crates/omnimodemd/src/audio/cpal_backend.rs`, `crates/omnimodemd/src/device/mod.rs`
+- Create: `crates/omnimodem/src/audio/identity.rs`
+- Modify: `crates/omnimodem/src/audio/mod.rs`, `crates/omnimodem/src/audio/cpal_backend.rs`, `crates/omnimodem/src/device/mod.rs`
 
 - [ ] **Step 1: Pure identity-ranking with failing tests**
 
-Create `crates/omnimodemd/src/audio/identity.rs` with a pure function:
+Create `crates/omnimodem/src/audio/identity.rs` with a pure function:
 
 ```rust
 //! Derive the most durable `DeviceId` for an audio device. Preference order
@@ -777,7 +777,7 @@ mod tests {
 
 - [ ] **Step 2: Run the pure tests**
 
-Add `pub mod identity;` to `audio/mod.rs`. Run: `cargo test -p omnimodemd audio::identity::`
+Add `pub mod identity;` to `audio/mod.rs`. Run: `cargo test -p omnimodem audio::identity::`
 Expected: PASS (4 tests).
 
 - [ ] **Step 3: Wire the real nusb scan into enumeration**
@@ -786,7 +786,7 @@ In `cpal_backend::enumerate_default_host` (or a new helper called by `RealEnumer
 
 - [ ] **Step 4: Build gate (Linux + cross targets)**
 
-Run: `cargo build -p omnimodemd` then `cargo build --target aarch64-unknown-linux-gnu` (via cross, see Part F). The `nusb` path compiles on all non-Android targets.
+Run: `cargo build -p omnimodem` then `cargo build --target aarch64-unknown-linux-gnu` (via cross, see Part F). The `nusb` path compiles on all non-Android targets.
 Expected: builds; Linux unit suite still green.
 
 - [ ] **Step 5: Manual gate**
@@ -796,7 +796,7 @@ Document: plug a USB sound card, `ListDevices` → expect a `usb:VVVV:PPPP:<seri
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/identity.rs crates/omnimodemd/src/audio/mod.rs crates/omnimodemd/src/audio/cpal_backend.rs crates/omnimodemd/src/device/mod.rs
+git add crates/omnimodem/src/audio/identity.rs crates/omnimodem/src/audio/mod.rs crates/omnimodem/src/audio/cpal_backend.rs crates/omnimodem/src/device/mod.rs
 git commit -m "Derive USB-durable DeviceId via nusb (replug-stable identity)"
 ```
 
@@ -811,8 +811,8 @@ git commit -m "Derive USB-durable DeviceId via nusb (replug-stable identity)"
 `[IMPROVEMENT] #6`. Lift Graywolf's pattern (`lib.rs:111-130`, `tx/ptt_android.rs`, `android/upcall.rs`): keep the JNI upcall behind a thin `jni_ptt_set(method, keyed)` function with two impls — a real `#[cfg(target_os="android")]` one and a host stub under `feature = "android-test-stub"` — so `AndroidPtt` dispatch is unit-tested on Linux.
 
 **Files:**
-- Create: `crates/omnimodemd/src/android/mod.rs`, `crates/omnimodemd/src/android/upcall.rs`, `crates/omnimodemd/src/ptt/android.rs`
-- Modify: `crates/omnimodemd/Cargo.toml` (feature + android deps), `crates/omnimodemd/src/lib.rs`, `crates/omnimodemd/src/ptt/registry.rs`
+- Create: `crates/omnimodem/src/android/mod.rs`, `crates/omnimodem/src/android/upcall.rs`, `crates/omnimodem/src/ptt/android.rs`
+- Modify: `crates/omnimodem/Cargo.toml` (feature + android deps), `crates/omnimodem/src/lib.rs`, `crates/omnimodem/src/ptt/registry.rs`
 
 - [ ] **Step 1: Add the feature and android deps to `Cargo.toml`**
 
@@ -830,7 +830,7 @@ android_logger = "0.15"
 
 - [ ] **Step 2: Write `upcall.rs` with a stub impl + test**
 
-Create `crates/omnimodemd/src/android/upcall.rs` with `pub fn jni_ptt_set(method: i32, keyed: bool) -> Result<(), String>`: a real impl (`#[cfg(target_os="android")]`) that pulls a cached `GlobalRef` to the Kotlin `UsbPttCallback` from `ndk_context` and calls `pttSet(int,boolean)`, and a stub (`#[cfg(all(not(target_os="android"), feature="android-test-stub"))]`) that records calls into a `thread_local`/`Mutex<Vec<(i32,bool)>>` a test can read. Add a test asserting a key then unkey is recorded.
+Create `crates/omnimodem/src/android/upcall.rs` with `pub fn jni_ptt_set(method: i32, keyed: bool) -> Result<(), String>`: a real impl (`#[cfg(target_os="android")]`) that pulls a cached `GlobalRef` to the Kotlin `UsbPttCallback` from `ndk_context` and calls `pttSet(int,boolean)`, and a stub (`#[cfg(all(not(target_os="android"), feature="android-test-stub"))]`) that records calls into a `thread_local`/`Mutex<Vec<(i32,bool)>>` a test can read. Add a test asserting a key then unkey is recorded.
 
 - [ ] **Step 3: Write `ptt/android.rs` (`AndroidPtt`)**
 
@@ -874,13 +874,13 @@ mod tests {
 
 In `lib.rs`, add the cfg-gated module wiring (mirror Graywolf `lib.rs:111-130`): `#[cfg(target_os="android")] pub mod android;` plus a `#[cfg(all(not(target_os="android"), feature="android-test-stub"))]` `#[path]` include of `android/upcall.rs` so the stub compiles on the host. Add the `Android { method: i32 }` arm to `PttMethod` + `RealOpener` under `#[cfg(any(target_os="android", feature="android-test-stub"))]`.
 
-Run: `cargo test -p omnimodemd --features android-test-stub ptt::android::`
+Run: `cargo test -p omnimodem --features android-test-stub ptt::android::`
 Expected: PASS — dispatch forwards to the stub, recorded as (method, keyed).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/Cargo.toml crates/omnimodemd/src/android/ crates/omnimodemd/src/ptt/android.rs crates/omnimodemd/src/lib.rs crates/omnimodemd/src/ptt/registry.rs
+git add crates/omnimodem/Cargo.toml crates/omnimodem/src/android/ crates/omnimodem/src/ptt/android.rs crates/omnimodem/src/lib.rs crates/omnimodem/src/ptt/registry.rs
 git commit -m "Add Android PTT JNI dispatch with host-testable stub"
 ```
 
@@ -891,8 +891,8 @@ git commit -m "Add Android PTT JNI dispatch with host-testable stub"
 The Rust-side audio bridge: a JNI `modemPushSamples(short[], len)` entry that ingests Kotlin-captured PCM into the existing capture path, and an `AudioBackend`/sink that pushes TX PCM up to Kotlin's `AudioTrack` via a cached callback (Graywolf `android/mod.rs` + `android/audio_tx.rs`). On Android the `AudioBackend` factory returns this JNI-backed backend instead of cpal.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/android/mod.rs`, add `crates/omnimodemd/src/android/audio.rs`
-- Modify: `crates/omnimodemd/src/lib.rs` (`production_core` audio factory on Android)
+- Modify: `crates/omnimodem/src/android/mod.rs`, add `crates/omnimodem/src/android/audio.rs`
+- Modify: `crates/omnimodem/src/lib.rs` (`production_core` audio factory on Android)
 
 - [ ] **Step 1: JNI capture ingest**
 
@@ -904,8 +904,8 @@ Add an `AndroidBackend` implementing `AudioBackend`: `open_capture` returns a ha
 
 - [ ] **Step 3: Compile gate via cargo-ndk**
 
-Run: `cargo ndk -t arm64-v8a -t x86_64 -P 26 build -p omnimodemd --release` (requires the Android NDK + `cargo-ndk`; see Part F).
-Expected: produces `libomnimodemd.so` per ABI; JNI symbols exported.
+Run: `cargo ndk -t arm64-v8a -t x86_64 -P 26 build -p omnimodem --release` (requires the Android NDK + `cargo-ndk`; see Part F).
+Expected: produces `libomnimodem.so` per ABI; JNI symbols exported.
 
 - [ ] **Step 4: Document the Kotlin contract (follow-on app)**
 
@@ -914,7 +914,7 @@ In `docs/`, record the JNI method signatures Kotlin must provide (`UsbPttCallbac
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/android/ crates/omnimodemd/src/lib.rs docs/
+git add crates/omnimodem/src/android/ crates/omnimodem/src/lib.rs docs/
 git commit -m "Add Android audio JNI bridge (capture ingest + AudioTrack TX sink)"
 ```
 
@@ -928,7 +928,7 @@ Lift Graywolf's hard-won build recipe (`Cross.toml`, `.cargo/config.toml`, the p
 
 **Files:**
 - Modify: root `Cargo.toml` (workspace deps for `windows`)
-- Modify: `crates/omnimodemd/Cargo.toml` (target-gated `windows`; android deps from Task 9)
+- Modify: `crates/omnimodem/Cargo.toml` (target-gated `windows`; android deps from Task 9)
 - Create: `Cross.toml`, `.cargo/config.toml`
 
 - [ ] **Step 1: Add the `windows` workspace dep + target gate**
@@ -937,7 +937,7 @@ Root `[workspace.dependencies]`:
 ```toml
 windows = { version = "0.59", features = ["Win32_Devices_Communication", "Win32_Foundation", "Win32_Storage_FileSystem"] }
 ```
-`crates/omnimodemd/Cargo.toml`:
+`crates/omnimodem/Cargo.toml`:
 ```toml
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
@@ -960,8 +960,8 @@ passthrough = ["PKG_CONFIG_ALLOW_CROSS=1"]
 
 Run (Linux host with `cross` + docker):
 ```bash
-cross build -p omnimodemd --target aarch64-unknown-linux-gnu
-cargo build -p omnimodemd            # x86_64 linux (native)
+cross build -p omnimodem --target aarch64-unknown-linux-gnu
+cargo build -p omnimodem            # x86_64 linux (native)
 ```
 Expected: both succeed. (macOS/Windows/Android targets build on their respective runners / via cargo-ndk, per Tasks 5–10.)
 
@@ -972,7 +972,7 @@ Document in the task the target→runner matrix: `x86_64/aarch64-unknown-linux-g
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml crates/omnimodemd/Cargo.toml Cross.toml .cargo/config.toml
+git add Cargo.toml crates/omnimodem/Cargo.toml Cross.toml .cargo/config.toml
 git commit -m "Add cross-compile build recipe and target-gated platform deps"
 ```
 
@@ -983,8 +983,8 @@ git commit -m "Add cross-compile build recipe and target-gated platform deps"
 The gate proving the work. Extends the Phase-2 exit-criterion e2e (`tests/e2e_hardware.rs`) and adds a rigctld e2e that runs on the Linux CI host (so a *real cross-platform PTT method* is exercised end-to-end in CI), plus a documented per-OS manual matrix.
 
 **Files:**
-- Create: `crates/omnimodemd/tests/rigctld_e2e.rs`
-- Modify: `crates/omnimodemd/src/lib.rs` (a test-server variant whose `MockOpener` is replaced by `RealOpener` so a `Rigctld` config builds a real `RigctldPtt` against a fake server)
+- Create: `crates/omnimodem/tests/rigctld_e2e.rs`
+- Modify: `crates/omnimodem/src/lib.rs` (a test-server variant whose `MockOpener` is replaced by `RealOpener` so a `Rigctld` config builds a real `RigctldPtt` against a fake server)
 
 - [ ] **Step 1: Fake-rigctld e2e over the gRPC surface**
 
@@ -992,7 +992,7 @@ Create `tests/rigctld_e2e.rs`: start an in-test fake rigctld TCP server (the Tas
 
 - [ ] **Step 2: Run it**
 
-Run: `cargo test -p omnimodemd --test rigctld_e2e`
+Run: `cargo test -p omnimodem --test rigctld_e2e`
 Expected: PASS — full RPC sequence with rigctld keying observed.
 
 - [ ] **Step 3: Document the per-OS manual matrix**
@@ -1001,13 +1001,13 @@ Append to the test file a manual-gate block: for each of {Linux, macOS, Windows}
 
 - [ ] **Step 4: Full suite**
 
-Run: `cargo test -p omnimodemd && cargo test -p omnimodemd --features android-test-stub`
+Run: `cargo test -p omnimodem && cargo test -p omnimodem --features android-test-stub`
 Expected: every test passes on Linux, including the new rigctld e2e and the Android dispatch stub test.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/tests/rigctld_e2e.rs crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/tests/rigctld_e2e.rs crates/omnimodem/src/lib.rs
 git commit -m "Add cross-platform exit-criterion: rigctld e2e + per-OS manual matrix"
 ```
 

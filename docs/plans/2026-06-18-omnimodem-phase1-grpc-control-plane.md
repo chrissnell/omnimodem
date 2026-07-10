@@ -33,7 +33,7 @@ omnimodem/
     omnimodem.proto                  the ModemControl service + messages
     VERSIONING.md                    proto stability/versioning policy
   crates/
-    omnimodemd/
+    omnimodem/
       Cargo.toml                     binary crate manifest
       build.rs                       tonic-build codegen
       src/
@@ -76,9 +76,9 @@ omnimodem/
 
 **Files:**
 - Create: `Cargo.toml`
-- Create: `crates/omnimodemd/Cargo.toml`
-- Create: `crates/omnimodemd/src/lib.rs`
-- Create: `crates/omnimodemd/src/main.rs`
+- Create: `crates/omnimodem/Cargo.toml`
+- Create: `crates/omnimodem/src/lib.rs`
+- Create: `crates/omnimodem/src/main.rs`
 - Create: `.gitignore`
 
 - [ ] **Step 1: Write the workspace manifest**
@@ -87,7 +87,7 @@ Create `Cargo.toml`:
 
 ```toml
 [workspace]
-members = ["crates/omnimodemd"]
+members = ["crates/omnimodem"]
 resolver = "2"
 
 [workspace.package]
@@ -113,18 +113,18 @@ tonic-build = "0.12"
 
 - [ ] **Step 2: Write the crate manifest**
 
-Create `crates/omnimodemd/Cargo.toml`:
+Create `crates/omnimodem/Cargo.toml`:
 
 ```toml
 [package]
-name = "omnimodemd"
+name = "omnimodem"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "omnimodemd"
+name = "omnimodem"
 path = "src/main.rs"
 
 [dependencies]
@@ -145,7 +145,7 @@ tonic-build.workspace = true
 
 - [ ] **Step 3: Write a placeholder lib + main so the crate builds**
 
-Create `crates/omnimodemd/src/lib.rs`:
+Create `crates/omnimodem/src/lib.rs`:
 
 ```rust
 //! Omnimodem daemon library surface.
@@ -157,11 +157,11 @@ Create `crates/omnimodemd/src/lib.rs`:
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 ```
 
-Create `crates/omnimodemd/src/main.rs`:
+Create `crates/omnimodem/src/main.rs`:
 
 ```rust
 fn main() {
-    println!("omnimodemd {}", omnimodemd::VERSION);
+    println!("omnimodem {}", omnimodem::VERSION);
 }
 ```
 
@@ -176,18 +176,18 @@ Create `.gitignore`:
 - [ ] **Step 4: Verify it compiles**
 
 Run: `cargo build`
-Expected: success; produces `target/debug/omnimodemd`.
+Expected: success; produces `target/debug/omnimodem`.
 
 - [ ] **Step 5: Smoke-run the binary**
 
-Run: `cargo run -p omnimodemd`
-Expected: prints `omnimodemd 0.1.0`.
+Run: `cargo run -p omnimodem`
+Expected: prints `omnimodem 0.1.0`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml crates/omnimodemd/Cargo.toml crates/omnimodemd/src/lib.rs crates/omnimodemd/src/main.rs .gitignore
-git commit -m "Scaffold omnimodem workspace and omnimodemd crate"
+git add Cargo.toml crates/omnimodem/Cargo.toml crates/omnimodem/src/lib.rs crates/omnimodem/src/main.rs .gitignore
+git commit -m "Scaffold omnimodem workspace and omnimodem crate"
 ```
 
 ---
@@ -198,10 +198,10 @@ The `ModemControl` service: unary command-and-control plus server-streaming `Sub
 
 **Files:**
 - Create: `proto/omnimodem.proto`
-- Create: `crates/omnimodemd/build.rs`
-- Create: `crates/omnimodemd/src/proto.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
-- Test: `crates/omnimodemd/src/proto.rs` (inline `#[cfg(test)]`)
+- Create: `crates/omnimodem/build.rs`
+- Create: `crates/omnimodem/src/proto.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
+- Test: `crates/omnimodem/src/proto.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the proto**
 
@@ -329,7 +329,7 @@ message Status {
 
 - [ ] **Step 2: Write the build script**
 
-Create `crates/omnimodemd/build.rs`:
+Create `crates/omnimodem/build.rs`:
 
 ```rust
 fn main() {
@@ -343,7 +343,7 @@ fn main() {
 
 - [ ] **Step 3: Write the proto module with version constants and a test**
 
-Create `crates/omnimodemd/src/proto.rs`:
+Create `crates/omnimodem/src/proto.rs`:
 
 ```rust
 //! Generated gRPC types for the omnimodem.v1 package.
@@ -380,7 +380,7 @@ mod tests {
 
 - [ ] **Step 4: Expose the proto module from the crate**
 
-In `crates/omnimodemd/src/lib.rs`, add below the `VERSION` const:
+In `crates/omnimodem/src/lib.rs`, add below the `VERSION` const:
 
 ```rust
 pub mod proto;
@@ -388,13 +388,13 @@ pub mod proto;
 
 - [ ] **Step 5: Run the test to verify codegen works**
 
-Run: `cargo test -p omnimodemd proto::tests::generated_types_are_constructible`
+Run: `cargo test -p omnimodem proto::tests::generated_types_are_constructible`
 Expected: PASS (codegen ran, types exist, oneof variant names match).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add proto/omnimodem.proto crates/omnimodemd/build.rs crates/omnimodemd/src/proto.rs crates/omnimodemd/src/lib.rs
+git add proto/omnimodem.proto crates/omnimodem/build.rs crates/omnimodem/src/proto.rs crates/omnimodem/src/lib.rs
 git commit -m "Add ModemControl proto and tonic codegen"
 ```
 
@@ -460,12 +460,12 @@ git commit -m "Document proto versioning policy"
 Typed ids prevent mixing a channel id with a transmit id, and pin the placeholder device identity that config is keyed on.
 
 **Files:**
-- Create: `crates/omnimodemd/src/ids.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
+- Create: `crates/omnimodem/src/ids.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/omnimodemd/src/ids.rs`:
+Create `crates/omnimodem/src/ids.rs`:
 
 ```rust
 //! Strongly-typed identifiers used across the core/supervisor.
@@ -513,7 +513,7 @@ mod tests {
 
 - [ ] **Step 2: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod ids;
@@ -521,13 +521,13 @@ pub mod ids;
 
 - [ ] **Step 3: Run the tests to verify they pass**
 
-Run: `cargo test -p omnimodemd ids::`
+Run: `cargo test -p omnimodem ids::`
 Expected: PASS (2 tests).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ids.rs crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/ids.rs crates/omnimodem/src/lib.rs
 git commit -m "Add ChannelId/TransmitId/DeviceId newtypes"
 ```
 
@@ -538,12 +538,12 @@ git commit -m "Add ChannelId/TransmitId/DeviceId newtypes"
 Config is persisted to a SQLite file owned by the modem, keyed on the stable `DeviceId` (design: "Key config on the stable `DeviceId`, never on the volatile `/dev` path"). Writes stay off any DSP hot path — in Phase 1 there is no audio pump, so the core thread performs them directly; a comment records that this moves to the control edge / a dedicated thread once DSP lands.
 
 **Files:**
-- Create: `crates/omnimodemd/src/persist/mod.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
+- Create: `crates/omnimodem/src/persist/mod.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/omnimodemd/src/persist/mod.rs`:
+Create `crates/omnimodem/src/persist/mod.rs`:
 
 ```rust
 //! SQLite-backed configuration store.
@@ -676,7 +676,7 @@ mod tests {
 
 - [ ] **Step 2: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod persist;
@@ -684,13 +684,13 @@ pub mod persist;
 
 - [ ] **Step 3: Run the tests (after Task 6 Step 1 defines ChannelConfig)**
 
-Run: `cargo test -p omnimodemd persist::`
+Run: `cargo test -p omnimodem persist::`
 Expected: PASS (2 tests).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/persist/mod.rs crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/persist/mod.rs crates/omnimodem/src/lib.rs
 git commit -m "Add SQLite config store keyed on DeviceId"
 ```
 
@@ -701,15 +701,15 @@ git commit -m "Add SQLite config store keyed on DeviceId"
 The Supervisor owns the live channels, the (placeholder) device cache, the (placeholder) PTT registry, and produces the state snapshot. This is the evolution of Graywolf's `struct Modem` in-memory-state role, restructured behind a clean snapshot interface.
 
 **Files:**
-- Create: `crates/omnimodemd/src/supervisor/channel.rs`
-- Create: `crates/omnimodemd/src/supervisor/device.rs`
-- Create: `crates/omnimodemd/src/supervisor/ptt.rs`
-- Create: `crates/omnimodemd/src/supervisor/mod.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
+- Create: `crates/omnimodem/src/supervisor/channel.rs`
+- Create: `crates/omnimodem/src/supervisor/device.rs`
+- Create: `crates/omnimodem/src/supervisor/ptt.rs`
+- Create: `crates/omnimodem/src/supervisor/mod.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
 
 - [ ] **Step 1: Define channel types**
 
-Create `crates/omnimodemd/src/supervisor/channel.rs`:
+Create `crates/omnimodem/src/supervisor/channel.rs`:
 
 ```rust
 //! Channel configuration and runtime state.
@@ -746,7 +746,7 @@ impl ChannelState {
 
 - [ ] **Step 2: Define the placeholder device cache**
 
-Create `crates/omnimodemd/src/supervisor/device.rs`:
+Create `crates/omnimodem/src/supervisor/device.rs`:
 
 ```rust
 //! Placeholder device cache.
@@ -775,7 +775,7 @@ impl DeviceCache {
 
 - [ ] **Step 3: Define the placeholder PTT registry**
 
-Create `crates/omnimodemd/src/supervisor/ptt.rs`:
+Create `crates/omnimodem/src/supervisor/ptt.rs`:
 
 ```rust
 //! Placeholder PTT registry.
@@ -817,7 +817,7 @@ impl PttRegistry {
 
 - [ ] **Step 4: Write the Supervisor with a failing snapshot test**
 
-Create `crates/omnimodemd/src/supervisor/mod.rs`:
+Create `crates/omnimodem/src/supervisor/mod.rs`:
 
 ```rust
 //! The Supervisor: owns live channels, the device cache, the PTT registry, and
@@ -957,7 +957,7 @@ mod tests {
 
 - [ ] **Step 5: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod supervisor;
@@ -965,13 +965,13 @@ pub mod supervisor;
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p omnimodemd supervisor:: persist::`
+Run: `cargo test -p omnimodem supervisor:: persist::`
 Expected: PASS (Supervisor's 3 tests + persistence's 2 tests; `ChannelConfig` now resolves).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/omnimodemd/src/supervisor/ crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/supervisor/ crates/omnimodem/src/lib.rs
 git commit -m "Add Supervisor skeleton with snapshot and persistence restore"
 ```
 
@@ -982,15 +982,15 @@ git commit -m "Add Supervisor skeleton with snapshot and persistence restore"
 This is the heart of Phase 1: the async/sync boundary. Commands arrive over a bounded `std::sync::mpsc::SyncSender` (chosen because `SyncSender` is `Sync`, so the tonic service can hold it, and bounded gives command-side backpressure). Replies go back over a `tokio::sync::oneshot` (its `send` is callable from the sync thread). Events flow out over two `tokio::broadcast` channels — one lossless, one lossy. The core is a plain `std::thread`; no tokio runs inside it.
 
 **Files:**
-- Create: `crates/omnimodemd/src/core/error.rs`
-- Create: `crates/omnimodemd/src/core/event.rs`
-- Create: `crates/omnimodemd/src/core/command.rs`
-- Create: `crates/omnimodemd/src/core/mod.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
+- Create: `crates/omnimodem/src/core/error.rs`
+- Create: `crates/omnimodem/src/core/event.rs`
+- Create: `crates/omnimodem/src/core/command.rs`
+- Create: `crates/omnimodem/src/core/mod.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
 
 - [ ] **Step 1: Define core errors**
 
-Create `crates/omnimodemd/src/core/error.rs`:
+Create `crates/omnimodem/src/core/error.rs`:
 
 ```rust
 //! Errors surfaced by the sync core to the async control edge.
@@ -1016,7 +1016,7 @@ impl From<crate::persist::StoreError> for CoreError {
 
 - [ ] **Step 2: Define the two event classes**
 
-Create `crates/omnimodemd/src/core/event.rs`:
+Create `crates/omnimodem/src/core/event.rs`:
 
 ```rust
 //! Events emitted by the core, split into two backpressure classes.
@@ -1052,7 +1052,7 @@ pub enum TelemetryEvent {
 
 - [ ] **Step 3: Define commands**
 
-Create `crates/omnimodemd/src/core/command.rs`:
+Create `crates/omnimodem/src/core/command.rs`:
 
 ```rust
 //! Commands sent from the async control edge into the sync core.
@@ -1087,7 +1087,7 @@ pub enum Command {
 
 - [ ] **Step 4: Write the core thread with a failing test**
 
-Create `crates/omnimodemd/src/core/mod.rs`:
+Create `crates/omnimodem/src/core/mod.rs`:
 
 ```rust
 //! The synchronous core. Owns the Supervisor; runs on a plain `std::thread`
@@ -1280,7 +1280,7 @@ mod tests {
 
 - [ ] **Step 5: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod core;
@@ -1288,13 +1288,13 @@ pub mod core;
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p omnimodemd core::`
+Run: `cargo test -p omnimodem core::`
 Expected: PASS (2 tests). Events flow over broadcast, transmit ack returns `TransmitId(1)`, unknown-channel transmit errors.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/ crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/core/ crates/omnimodem/src/lib.rs
 git commit -m "Add command/event spine and stub sync core thread"
 ```
 
@@ -1305,15 +1305,15 @@ git commit -m "Add command/event spine and stub sync core thread"
 The async edge. `convert.rs` is the single place domain types become proto and back, keeping tonic out of `core/`/`supervisor/`. `service.rs` implements the three unary RPCs by sending a `Command` + awaiting its oneshot reply.
 
 **Files:**
-- Create: `crates/omnimodemd/src/grpc/convert.rs`
-- Create: `crates/omnimodemd/src/grpc/service.rs`
-- Create: `crates/omnimodemd/src/grpc/mod.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
-- Test: `crates/omnimodemd/tests/unary.rs`
+- Create: `crates/omnimodem/src/grpc/convert.rs`
+- Create: `crates/omnimodem/src/grpc/service.rs`
+- Create: `crates/omnimodem/src/grpc/mod.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
+- Test: `crates/omnimodem/tests/unary.rs`
 
 - [ ] **Step 1: Write conversions**
 
-Create `crates/omnimodemd/src/grpc/convert.rs`:
+Create `crates/omnimodem/src/grpc/convert.rs`:
 
 ```rust
 //! Domain <-> proto conversions. The only module that bridges the two.
@@ -1396,7 +1396,7 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
 
 - [ ] **Step 2: Write the unary service**
 
-Create `crates/omnimodemd/src/grpc/service.rs`:
+Create `crates/omnimodem/src/grpc/service.rs`:
 
 ```rust
 //! The `ModemControl` gRPC service implementation (unary handlers here;
@@ -1501,7 +1501,7 @@ impl ModemControl for ControlService {
 
 - [ ] **Step 3: Write the grpc module root**
 
-Create `crates/omnimodemd/src/grpc/mod.rs`:
+Create `crates/omnimodem/src/grpc/mod.rs`:
 
 ```rust
 pub mod convert;
@@ -1511,7 +1511,7 @@ pub mod subscribe;
 pub use service::ControlService;
 ```
 
-Create an empty placeholder so the module resolves until Task 9 fills it — `crates/omnimodemd/src/grpc/subscribe.rs`:
+Create an empty placeholder so the module resolves until Task 9 fills it — `crates/omnimodem/src/grpc/subscribe.rs`:
 
 ```rust
 //! SubscribeEvents fan-out — implemented in Task 9.
@@ -1519,7 +1519,7 @@ Create an empty placeholder so the module resolves until Task 9 fills it — `cr
 
 - [ ] **Step 4: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod grpc;
@@ -1527,7 +1527,7 @@ pub mod grpc;
 
 - [ ] **Step 5: Add a helper to spawn an in-process server over UDS (for tests)**
 
-In `crates/omnimodemd/src/lib.rs`, add a test-support function below the module declarations:
+In `crates/omnimodem/src/lib.rs`, add a test-support function below the module declarations:
 
 ```rust
 use std::path::Path;
@@ -1563,13 +1563,13 @@ pub async fn serve_uds_no_authz(
 
 - [ ] **Step 6: Write the failing integration test**
 
-Create `crates/omnimodemd/tests/unary.rs`:
+Create `crates/omnimodem/tests/unary.rs`:
 
 ```rust
 //! Integration: unary RPCs over an in-process UDS server (no authz).
 
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{ConfigureChannelRequest, GetStateRequest, TransmitRequest};
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{ConfigureChannelRequest, GetStateRequest, TransmitRequest};
 use tokio::net::UnixStream;
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
@@ -1595,7 +1595,7 @@ async fn configure_get_transmit_roundtrip() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
     });
     // Give the server a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1639,7 +1639,7 @@ async fn configure_get_transmit_roundtrip() {
 
 - [ ] **Step 7: Add dev-dependencies for the integration tests**
 
-In `crates/omnimodemd/Cargo.toml`, append:
+In `crates/omnimodem/Cargo.toml`, append:
 
 ```toml
 [dev-dependencies]
@@ -1650,13 +1650,13 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 
 - [ ] **Step 8: Run the test to verify it fails, then passes**
 
-Run: `cargo test -p omnimodemd --test unary`
+Run: `cargo test -p omnimodem --test unary`
 Expected: PASS — configure/get/transmit round-trip works over UDS; empty name rejected with `InvalidArgument`.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/omnimodemd/src/grpc/ crates/omnimodemd/src/lib.rs crates/omnimodemd/Cargo.toml crates/omnimodemd/tests/unary.rs
+git add crates/omnimodem/src/grpc/ crates/omnimodem/src/lib.rs crates/omnimodem/Cargo.toml crates/omnimodem/tests/unary.rs
 git commit -m "Add unary gRPC handlers bridging to the sync core over UDS"
 ```
 
@@ -1667,13 +1667,13 @@ git commit -m "Add unary gRPC handlers bridging to the sync core over UDS"
 This replaces the stub `subscribe_events` with the real implementation and locks down the backpressure policy: the subscriber task subscribes to **both** broadcasts *before* requesting the snapshot (so no event between subscribe and snapshot is lost — at-least-once), emits the snapshot first, then merges live frames (lossless: lag ⇒ disconnect with `resource_exhausted`) and telemetry (lossy: lag ⇒ skip and continue) into the single outbound stream.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/grpc/service.rs` (remove stub `subscribe_events` + associated type; delegate to `subscribe.rs`)
-- Create/replace: `crates/omnimodemd/src/grpc/subscribe.rs`
-- Test: `crates/omnimodemd/tests/subscribe.rs`
+- Modify: `crates/omnimodem/src/grpc/service.rs` (remove stub `subscribe_events` + associated type; delegate to `subscribe.rs`)
+- Create/replace: `crates/omnimodem/src/grpc/subscribe.rs`
+- Test: `crates/omnimodem/tests/subscribe.rs`
 
 - [ ] **Step 1: Replace the stub in service.rs**
 
-In `crates/omnimodemd/src/grpc/service.rs`, delete the `type SubscribeEventsStream = ...;` line and the entire stub `async fn subscribe_events(...)` body, replacing both with a delegation:
+In `crates/omnimodem/src/grpc/service.rs`, delete the `type SubscribeEventsStream = ...;` line and the entire stub `async fn subscribe_events(...)` body, replacing both with a delegation:
 
 ```rust
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
@@ -1688,7 +1688,7 @@ In `crates/omnimodemd/src/grpc/service.rs`, delete the `type SubscribeEventsStre
 
 - [ ] **Step 2: Write the subscribe implementation**
 
-Replace `crates/omnimodemd/src/grpc/subscribe.rs` with:
+Replace `crates/omnimodem/src/grpc/subscribe.rs` with:
 
 ```rust
 //! SubscribeEvents: snapshot-on-subscribe + dual-class backpressure fan-out.
@@ -1767,14 +1767,14 @@ pub async fn subscribe(
 
 - [ ] **Step 3: Write the failing integration test**
 
-Create `crates/omnimodemd/tests/subscribe.rs`:
+Create `crates/omnimodem/tests/subscribe.rs`:
 
 ```rust
 //! Integration: snapshot-on-subscribe + live event delivery.
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
 use tokio::net::UnixStream;
 use tokio_stream::StreamExt;
 use tonic::transport::{Endpoint, Uri};
@@ -1800,7 +1800,7 @@ async fn snapshot_then_live_events() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_no_authz(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -1843,18 +1843,18 @@ async fn snapshot_then_live_events() {
 
 - [ ] **Step 4: Run the test**
 
-Run: `cargo test -p omnimodemd --test subscribe`
+Run: `cargo test -p omnimodem --test subscribe`
 Expected: PASS — snapshot arrives first, then live `TransmitStarted`/`TransmitComplete`.
 
 - [ ] **Step 5: Re-run the full suite to confirm nothing regressed**
 
-Run: `cargo test -p omnimodemd`
+Run: `cargo test -p omnimodem`
 Expected: all unit + integration tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/grpc/service.rs crates/omnimodemd/src/grpc/subscribe.rs crates/omnimodemd/tests/subscribe.rs
+git add crates/omnimodem/src/grpc/service.rs crates/omnimodem/src/grpc/subscribe.rs crates/omnimodem/tests/subscribe.rs
 git commit -m "Implement SubscribeEvents with snapshot and dual-class backpressure"
 ```
 
@@ -1865,14 +1865,14 @@ git commit -m "Implement SubscribeEvents with snapshot and dual-class backpressu
 Opening the control socket means the ability to key a transmitter under the operator's license, so authz is required even on the default local transport. On UDS: restrict the socket file mode to `0600` and reject any peer whose uid differs from the server's via `SO_PEERCRED` (Linux). tonic exposes per-connection `UdsConnectInfo` carrying `peer_cred`; an interceptor reads it and returns `unauthenticated` on mismatch.
 
 **Files:**
-- Create: `crates/omnimodemd/src/authz/uds.rs`
-- Create: `crates/omnimodemd/src/authz/mod.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
-- Test: `crates/omnimodemd/src/authz/uds.rs` (inline unit test for the policy check)
+- Create: `crates/omnimodem/src/authz/uds.rs`
+- Create: `crates/omnimodem/src/authz/mod.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
+- Test: `crates/omnimodem/src/authz/uds.rs` (inline unit test for the policy check)
 
 - [ ] **Step 1: Write the peer-uid policy + a failing unit test**
 
-Create `crates/omnimodemd/src/authz/uds.rs`:
+Create `crates/omnimodem/src/authz/uds.rs`:
 
 ```rust
 //! UDS authorization: socket-file mode hardening + SO_PEERCRED peer-uid check.
@@ -1914,7 +1914,7 @@ mod tests {
 
 - [ ] **Step 2: Write the authz module with the tonic interceptor and serve helper**
 
-Create `crates/omnimodemd/src/authz/mod.rs`:
+Create `crates/omnimodem/src/authz/mod.rs`:
 
 ```rust
 //! Transport selection and authorization for the control plane.
@@ -1980,7 +1980,7 @@ pub async fn serve_uds(
 
 - [ ] **Step 3: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod authz;
@@ -1988,7 +1988,7 @@ pub mod authz;
 
 - [ ] **Step 4: Run the unit test**
 
-Run: `cargo test -p omnimodemd authz::uds::tests`
+Run: `cargo test -p omnimodem authz::uds::tests`
 Expected: PASS — same-uid allowed, differing uid denied.
 
 > Note on the SO_PEERCRED happy path: it is exercised end-to-end in Task 13 (the e2e test connects as the same uid that runs the test, so the interceptor admits it). A negative end-to-end test (connecting as a different uid) requires a second OS user and is out of scope for CI; the policy function `peer_uid_allowed` is unit-tested here in isolation, and the interceptor wiring is covered by the passing e2e connection.
@@ -1996,7 +1996,7 @@ Expected: PASS — same-uid allowed, differing uid denied.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/authz/uds.rs crates/omnimodemd/src/authz/mod.rs crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/authz/uds.rs crates/omnimodem/src/authz/mod.rs crates/omnimodem/src/lib.rs
 git commit -m "Add UDS authz: socket mode hardening and SO_PEERCRED peer-uid check"
 ```
 
@@ -2007,12 +2007,12 @@ git commit -m "Add UDS authz: socket mode hardening and SO_PEERCRED peer-uid che
 The mTLS path is mandatory before any routable bind but not implemented in Phase 1 — it must exist as a hook that fails closed, so a future routable bind cannot silently run unauthenticated. Transport selection makes the loopback-TCP exposure explicit and refuses routable binds outright.
 
 **Files:**
-- Create: `crates/omnimodemd/src/authz/tls.rs`
-- Modify: `crates/omnimodemd/src/authz/mod.rs` (add `select` + test)
+- Create: `crates/omnimodem/src/authz/tls.rs`
+- Modify: `crates/omnimodem/src/authz/mod.rs` (add `select` + test)
 
 - [ ] **Step 1: Write the mTLS hook stub**
 
-Create `crates/omnimodemd/src/authz/tls.rs`:
+Create `crates/omnimodem/src/authz/tls.rs`:
 
 ```rust
 //! mTLS hook for routable binds.
@@ -2037,7 +2037,7 @@ pub fn routable_tls_config() -> Result<(), TlsError> {
 
 - [ ] **Step 2: Add transport selection with a failing test**
 
-In `crates/omnimodemd/src/authz/mod.rs`, append:
+In `crates/omnimodem/src/authz/mod.rs`, append:
 
 ```rust
 /// Validate a chosen transport before binding. Returns a warning string for
@@ -2083,13 +2083,13 @@ mod tests {
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo test -p omnimodemd authz::`
+Run: `cargo test -p omnimodem authz::`
 Expected: PASS — UDS clean, loopback warns, routable fails closed.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/authz/tls.rs crates/omnimodemd/src/authz/mod.rs
+git add crates/omnimodem/src/authz/tls.rs crates/omnimodem/src/authz/mod.rs
 git commit -m "Add mTLS hook stub and fail-closed transport selection"
 ```
 
@@ -2100,20 +2100,20 @@ git commit -m "Add mTLS hook stub and fail-closed transport selection"
 Wire everything: parse a socket path and db path, build the store + supervisor + core, validate the transport, log any warning, and serve over the authorized UDS until SIGINT.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/main.rs`
+- Modify: `crates/omnimodem/src/main.rs`
 
 - [ ] **Step 1: Replace main with the full wiring**
 
-Replace `crates/omnimodemd/src/main.rs` with:
+Replace `crates/omnimodem/src/main.rs` with:
 
 ```rust
-//! omnimodemd entrypoint: wire the sync core to the authorized gRPC edge.
+//! omnimodem entrypoint: wire the sync core to the authorized gRPC edge.
 
-use omnimodemd::authz::{self, Transport};
-use omnimodemd::core;
-use omnimodemd::grpc::ControlService;
-use omnimodemd::persist::Store;
-use omnimodemd::supervisor::Supervisor;
+use omnimodem::authz::{self, Transport};
+use omnimodem::core;
+use omnimodem::grpc::ControlService;
+use omnimodem::persist::Store;
+use omnimodem::supervisor::Supervisor;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -2143,7 +2143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (core_handle, _join) = core::spawn(supervisor);
     let svc = ControlService::new(core_handle);
 
-    tracing::info!(socket = %sock_path.display(), "omnimodemd {} serving", omnimodemd::VERSION);
+    tracing::info!(socket = %sock_path.display(), "omnimodem {} serving", omnimodem::VERSION);
 
     // serve_uds runs until the process is signalled; Ctrl-C tears it down.
     tokio::select! {
@@ -2160,19 +2160,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - [ ] **Step 2: Verify the whole crate builds (binary + lib + tests)**
 
-Run: `cargo build -p omnimodemd && cargo test -p omnimodemd --no-run`
+Run: `cargo build -p omnimodem && cargo test -p omnimodem --no-run`
 Expected: success; binary and all test harnesses compile.
 
 - [ ] **Step 3: Manually smoke-test the running daemon**
 
-Run (terminal 1): `OMNIMODEM_RUNTIME_DIR=/tmp/omni-smoke cargo run -p omnimodemd`
-Expected: logs `omnimodemd 0.1.0 serving` with the socket path; `ls -l /tmp/omni-smoke/omnimodem.sock` shows mode `srw-------` (0600). Ctrl-C exits cleanly and removes the socket.
+Run (terminal 1): `OMNIMODEM_RUNTIME_DIR=/tmp/omni-smoke cargo run -p omnimodem`
+Expected: logs `omnimodem 0.1.0 serving` with the socket path; `ls -l /tmp/omni-smoke/omnimodem.sock` shows mode `srw-------` (0600). Ctrl-C exits cleanly and removes the socket.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/main.rs
-git commit -m "Wire omnimodemd main: core + authorized UDS gRPC edge with graceful shutdown"
+git add crates/omnimodem/src/main.rs
+git commit -m "Wire omnimodem main: core + authorized UDS gRPC edge with graceful shutdown"
 ```
 
 ---
@@ -2182,12 +2182,12 @@ git commit -m "Wire omnimodemd main: core + authorized UDS gRPC edge with gracef
 The gate. Over a **real UDS with authz enabled** (`serve_uds`, not the no-authz helper), a client configures a channel, subscribes and receives a snapshot, and drives a fake transmit round-trip — unary ack **and** streamed `TransmitStarted`/`TransmitComplete` — with no audio or DSP present. Connecting as the same uid that runs the test exercises the SO_PEERCRED happy path.
 
 **Files:**
-- Create: `crates/omnimodemd/src/lib.rs` helper `serve_uds_authz_for_test` (thin wrapper around `authz::serve_uds`)
-- Test: `crates/omnimodemd/tests/e2e.rs`
+- Create: `crates/omnimodem/src/lib.rs` helper `serve_uds_authz_for_test` (thin wrapper around `authz::serve_uds`)
+- Test: `crates/omnimodem/tests/e2e.rs`
 
 - [ ] **Step 1: Add a server-spawn helper that uses the authorized path**
 
-In `crates/omnimodemd/src/lib.rs`, below `serve_uds_no_authz`, add:
+In `crates/omnimodem/src/lib.rs`, below `serve_uds_no_authz`, add:
 
 ```rust
 /// Spawn the control plane over an AUTHORIZED UDS (SO_PEERCRED enforced).
@@ -2207,7 +2207,7 @@ pub async fn serve_uds_authz_for_test(
 
 - [ ] **Step 2: Write the exit-criterion test**
 
-Create `crates/omnimodemd/tests/e2e.rs`:
+Create `crates/omnimodem/tests/e2e.rs`:
 
 ```rust
 //! Phase 1 EXIT CRITERION (design doc): over gRPC, a client configures a
@@ -2215,9 +2215,9 @@ Create `crates/omnimodemd/tests/e2e.rs`:
 //! a fake transmit round-trip end-to-end — with no audio devices or DSP, over
 //! the authorized UDS transport.
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
 use tokio::net::UnixStream;
 use tokio_stream::StreamExt;
 use tonic::transport::{Endpoint, Uri};
@@ -2243,7 +2243,7 @@ async fn phase1_exit_criterion_roundtrip() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_authz_for_test(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_authz_for_test(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -2294,18 +2294,18 @@ async fn phase1_exit_criterion_roundtrip() {
 
 - [ ] **Step 3: Run the exit-criterion test**
 
-Run: `cargo test -p omnimodemd --test e2e`
+Run: `cargo test -p omnimodem --test e2e`
 Expected: PASS — the full configure → subscribe(snapshot) → transmit(ack + Started + Complete) round-trip succeeds over the authorized UDS.
 
 - [ ] **Step 4: Run the entire suite once more**
 
-Run: `cargo test -p omnimodemd`
+Run: `cargo test -p omnimodem`
 Expected: every unit + integration test passes (`proto`, `ids`, `persist`, `supervisor`, `core`, `authz`, `unary`, `subscribe`, `e2e`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/lib.rs crates/omnimodemd/tests/e2e.rs
+git add crates/omnimodem/src/lib.rs crates/omnimodem/tests/e2e.rs
 git commit -m "Add Phase 1 exit-criterion end-to-end test over authorized UDS"
 ```
 
