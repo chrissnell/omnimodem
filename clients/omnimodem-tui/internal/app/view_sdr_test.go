@@ -178,16 +178,17 @@ func TestSdrPpm(t *testing.T) {
 	}
 }
 
-// Selecting a Phase-B demod mode (UNIMPLEMENTED daemon-side) surfaces an error
-// and doesn't stick: the ConfigureSdr failure yields an rpcErrMsg that the Model
-// turns into a toast, and the picker label (read from chanLive) stays on NBFM.
-func TestSdrDemodUnimplemented(t *testing.T) {
+// A ConfigureSdr rejection surfaces an error and doesn't stick: the failure yields
+// an rpcErrMsg that the Model turns into a toast, and the picker label (read from
+// chanLive) stays on NBFM. (Bias-tee remains UNIMPLEMENTED daemon-side; demod modes
+// themselves are all implemented as of Phase B.)
+func TestSdrConfigRejectionDoesNotStick(t *testing.T) {
 	f := &client.Fake{}
 	v := sdrTestView(f)
-	f.Err = status.Error(codes.Unimplemented, "demod mode AM lands in Phase B")
+	f.Err = status.Error(codes.Unimplemented, "bias_tee is deferred to Phase C")
 	msg := run(t, v, keyRunes("m")) // cycle NBFM -> AM, daemon rejects
 	if _, ok := msg.(rpcErrMsg); !ok {
-		t.Fatalf("UNIMPLEMENTED demod should yield rpcErrMsg, got %T", msg)
+		t.Fatalf("rejected ConfigureSdr should yield rpcErrMsg, got %T", msg)
 	}
 	if got := demodLabel(v.demod(v.live())); got != "NBFM" {
 		t.Fatalf("rejected demod must not stick; label = %s", got)

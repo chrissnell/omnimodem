@@ -564,9 +564,10 @@ fn set_sdr_gain(
     Ok(SdrGainOk { actual_gain_db: applied })
 }
 
-/// Configure an SDR channel's source parameters. Rejects unimplemented Phase-A
-/// features (non-NBFM demod modes, bias-tee, direct-sampling) with `Unimplemented`;
-/// applies capture rate / squelch / ppm and echoes the effective capture rate.
+/// Configure an SDR channel's source parameters. All demod modes are supported;
+/// bias-tee and direct-sampling remain deferred to Phase C and still reject with
+/// `Unimplemented`. Applies capture rate / demod mode / squelch / ppm and echoes
+/// the effective capture rate.
 #[allow(clippy::too_many_arguments)]
 fn configure_sdr(
     live: &mut LiveBindings,
@@ -581,13 +582,9 @@ fn configure_sdr(
 ) -> Result<ConfigureSdrOk, CoreError> {
     let control = sdr_control(live, channel)?;
 
-    // Phase A implements only NBFM; the enum ships complete but the rest defer.
+    // Every demod mode (NBFM/AM/WFM/SSB) is implemented; the capture thread
+    // dispatches on the mode via `SdrDemod`.
     let mode = DemodMode::from_u8(demod_mode);
-    if mode != DemodMode::Nbfm {
-        return Err(CoreError::Unimplemented(format!(
-            "demod mode {mode:?} lands in Phase B; only NBFM is implemented"
-        )));
-    }
     // Bias-tee / direct-sampling are Phase C: accepted in the message but not yet
     // wired. Requesting either errors; leaving them false is a no-op.
     if bias_tee {

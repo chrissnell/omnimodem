@@ -145,9 +145,12 @@ auto).
 Source-wide SDR config. `capture_rate` sets the dongle sample rate (`0` = unchanged;
 must be one of `GetSdrCaps.sample_rates`); `squelch_db` is the power-squelch open
 threshold in dBFS (`<= -200` disables it); `ppm` is the frequency correction.
-`demod_mode` is the `DemodMode` enum — **only `DEMOD_NBFM` is implemented in Phase
-A**; `DEMOD_AM`/`DEMOD_WFM`/`DEMOD_USB`/`DEMOD_LSB` return `UNIMPLEMENTED` until Phase
-B. `bias_tee`/`direct_sampling` are Phase C: requesting either returns
+`demod_mode` is the `DemodMode` enum — all modes are implemented
+(`DEMOD_NBFM`/`DEMOD_AM`/`DEMOD_WFM`/`DEMOD_USB`/`DEMOD_LSB`) and selectable at
+runtime. FM audio is currently **flat** (no de-emphasis): the NBFM path keeps
+AFSK/APRS twist intact, and `DEMOD_WFM` broadcast audio is not yet de-emphasized —
+a de-emphasis control is deferred to a later phase. `bias_tee`/`direct_sampling`
+are Phase C: requesting either returns
 `UNIMPLEMENTED`, leaving them `false` is a no-op. The response echoes
 `actual_capture_rate`.
 

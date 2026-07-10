@@ -24,5 +24,6 @@ pub mod limiter;
 pub mod detector;
 pub mod squelch;
 pub mod nbfm;
+pub mod sdr_demod;
 pub mod noise;
 pub mod modulate;

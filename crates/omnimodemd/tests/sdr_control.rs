@@ -1,7 +1,8 @@
 //! Integration: the SDR (rtl_tcp) control RPCs over an in-process UDS server,
 //! driven against a fake `rtl_tcp` endpoint. Covers the full wiring — proto →
-//! Command → core → SdrControl — plus the `SdrState` broadcast and the
-//! Phase-A `UNIMPLEMENTED` boundaries (non-NBFM demod, bias-tee).
+//! Command → core → SdrControl — plus the `SdrState` broadcast, per-mode demod
+//! selectability (Phase B), and the remaining `UNIMPLEMENTED` boundary (bias-tee,
+//! deferred to Phase C).
 
 use omnimodemd::proto::event::Kind;
 use omnimodemd::proto::modem_control_client::ModemControlClient;
@@ -155,20 +156,29 @@ async fn sdr_control_roundtrip() {
         .into_inner();
     assert_eq!(cfg.actual_capture_rate, 240_000);
 
-    // A non-NBFM demod mode is UNIMPLEMENTED in Phase A.
-    let err = client
-        .configure_sdr(ConfigureSdrRequest {
-            channel: 0,
-            capture_rate: 0,
-            demod_mode: DemodMode::DemodAm as i32,
-            squelch_db: -30.0,
-            ppm: 0,
-            bias_tee: false,
-            direct_sampling: false,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    // Every demod mode is now selectable end-to-end (Phase B): AM/WFM/USB/LSB each
+    // round-trip through configure_sdr and echo the effective capture rate.
+    for mode in [
+        DemodMode::DemodAm,
+        DemodMode::DemodWfm,
+        DemodMode::DemodUsb,
+        DemodMode::DemodLsb,
+    ] {
+        let cfg = client
+            .configure_sdr(ConfigureSdrRequest {
+                channel: 0,
+                capture_rate: 0,
+                demod_mode: mode as i32,
+                squelch_db: -30.0,
+                ppm: 0,
+                bias_tee: false,
+                direct_sampling: false,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{mode:?} should be selectable, got {e:?}"))
+            .into_inner();
+        assert_eq!(cfg.actual_capture_rate, 240_000, "{mode:?}");
+    }
 
     // Bias-tee is deferred to Phase C — requesting it is UNIMPLEMENTED.
     let err = client
