@@ -58,7 +58,12 @@ rtl_tcp IQ (Cplx @2MHz) ──|·|──► AdsbDemod.feed(&[f32]) ──► Fra
 ## Plan
 
 - **Phase 1 — DSP mode (DONE).** `adsb` mode in `omnimodem-dsp`, KAT-tested,
-  clippy-clean. Not yet daemon-registered.
+  clippy-clean. Not yet daemon-registered. The streaming demod fixes
+  `require_crc = true`, so only frames whose CRC clears to zero (DF17/18
+  extended squitter) are emitted; address-overlaid formats (DF0/4/5/11/20/21),
+  whose parity can only be checked against a known aircraft address, are dropped
+  in Phase 1. Tracking those is a later enhancement (Roster-based address
+  validation), not required for the ADS-B position/identity broadcast path.
 - **Phase 2 — daemon wideband path.** A capture→mode binding that feeds full-rate
   magnitude to a mode whose `native_rate == capture_rate` (no `sdr_demod`
   channelization); register `ModeConfig::Adsb` in `mode::registry`. Depends on

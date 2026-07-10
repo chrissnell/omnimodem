@@ -80,10 +80,11 @@ impl AdsbDemod {
     }
 
     fn emit(&self, raw: ppm::RawFrame) -> Frame {
+        let crc_ok = raw.crc_ok();
         Frame {
             payload: FramePayload::Packet(raw.bytes),
             meta: FrameMeta {
-                crc_ok: raw.crc_residual == 0,
+                crc_ok,
                 sample_offset: self.base + raw.offset as u64,
                 decoder: Some("adsb".to_string()),
                 ..Default::default()
