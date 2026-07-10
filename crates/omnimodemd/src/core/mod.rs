@@ -485,10 +485,10 @@ fn configure_spectrum(
 
 /// The channel's SDR control cell, or `SdrRequired` when the channel is not bound
 /// to an `rtl_tcp` source (the cell exists only for SDR-bound channels).
-fn sdr_control<'a>(
-    live: &'a LiveBindings,
+fn sdr_control(
+    live: &LiveBindings,
     channel: ChannelId,
-) -> Result<&'a SdrControl, CoreError> {
+) -> Result<&SdrControl, CoreError> {
     live.sdr_controls.get(&channel).ok_or(CoreError::SdrRequired(channel))
 }
 
