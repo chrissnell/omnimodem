@@ -12,7 +12,7 @@ works unmodified.
 **Depends on:** Plan 1 (merged, #100) — consumes `u8_iq_to_cplx`,
 `NbfmReceiver`, `ComplexStft`, `full_spectrum_dbfs`, `SpectrumPlan::new_centered`.
 
-**Build/test:** `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo test -p omnimodemd`.
+**Build/test:** `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo test -p omnimodem`.
 Never run `cargo fmt`. Commit as `chrissnell` only, no AI attribution.
 
 ---
@@ -52,7 +52,7 @@ audio→core module reference, which Rust permits within one crate.
 
 ### Task 1: `DeviceId::RtlTcp` variant
 
-**Files:** `crates/omnimodemd/src/ids.rs`
+**Files:** `crates/omnimodem/src/ids.rs`
 
 - [ ] Add `RtlTcp { host: String, port: u16 }` to `DeviceId`.
 - [ ] `to_canonical_string` → `rtltcp:<host>:<port>`.
@@ -64,7 +64,7 @@ audio→core module reference, which Rust permits within one crate.
 
 ### Task 2: `rtl_tcp` header parser
 
-**Files:** `crates/omnimodemd/src/audio/rtlsdr.rs` (new), `audio/mod.rs` (`pub mod rtlsdr;`)
+**Files:** `crates/omnimodem/src/audio/rtlsdr.rs` (new), `audio/mod.rs` (`pub mod rtlsdr;`)
 
 - [ ] `struct RtlHeader { tuner_type: u32, tuner_gain_count: u32 }`.
 - [ ] `fn parse_header(buf: &[u8; 12]) -> Result<RtlHeader, AudioError>`: validate
@@ -138,7 +138,7 @@ audio→core module reference, which Rust permits within one crate.
 
 ### Task 7: integration test — fake `rtl_tcp` → APRS decode (closing gate)
 
-**Files:** `crates/omnimodemd/tests/rtl_tcp_sdr.rs` (new)
+**Files:** `crates/omnimodem/tests/rtl_tcp_sdr.rs` (new)
 
 - [ ] In-process fake `rtl_tcp` server: TCP listener writes the 12-byte header,
       drains client commands, then streams u8 IQ of an **FM-modulated AFSK1200

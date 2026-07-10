@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make omnimodemd talk to real radio hardware reliably — enumerate audio devices under a stable cross-platform `DeviceId`, open capture/playback, and key/unkey a real transmitter — all driven over the Phase-1 gRPC surface, with **no DSP and no mode attached**.
+**Goal:** Make omnimodem talk to real radio hardware reliably — enumerate audio devices under a stable cross-platform `DeviceId`, open capture/playback, and key/unkey a real transmitter — all driven over the Phase-1 gRPC surface, with **no DSP and no mode attached**.
 
 **Architecture:** Two subsystems share one spine. A durable `DeviceId` (built from USB `idVendor:idProduct`+serial, ALSA stable card name, or `/dev/serial/by-id` topology — never a volatile `/dev` path) keys both audio config and PTT config. A `trait AudioBackend` (cpal / file / stdin) replaces Graywolf's ad-hoc spawn-by-`match`; a `trait PttDriver` + `PortRegistry` (with **DeviceId-keyed hotplug eviction**, the gap Graywolf never closed) replaces its stringly-typed PTT layer. The sync core gains a **per-channel TX worker** that runs the no-sleep key→audio→drain→unkey cycle and an explicit **RX/TX interlock** that mutes capture on a shared device while it is keyed. Everything hardware-touching sits behind a trait with a deterministic test double, so the logic is unit-tested in CI and only a thin manual smoke step needs a real radio.
 
@@ -40,7 +40,7 @@ This plan covers **only Phase 2** from `docs/design/2026-06-17-omnimodem-design.
 Phase 2 adds two modules (`audio/`, `ptt/`) and a `device/` module beside the Phase-1 layout, and expands `DeviceId` in `ids.rs`. New/changed files:
 
 ```
-crates/omnimodemd/
+crates/omnimodem/
   Cargo.toml                         + cpal, nix, hidapi, gpiocdev, nusb (target-gated)
   src/
     ids.rs                           DeviceId becomes a durable enum (was placeholder string)
@@ -101,7 +101,7 @@ crates/omnimodemd/
 
 **Files:**
 - Modify: `Cargo.toml` (workspace `[workspace.dependencies]`)
-- Modify: `crates/omnimodemd/Cargo.toml`
+- Modify: `crates/omnimodem/Cargo.toml`
 
 - [ ] **Step 1: Add the hardware crates to the workspace manifest**
 
@@ -118,7 +118,7 @@ gpiocdev = "0.7"
 
 - [ ] **Step 2: Reference them from the crate manifest (target-gated where needed)**
 
-In `crates/omnimodemd/Cargo.toml`, under `[dependencies]`, add:
+In `crates/omnimodem/Cargo.toml`, under `[dependencies]`, add:
 
 ```toml
 cpal.workspace = true
@@ -146,7 +146,7 @@ Expected: success; the new crates resolve and compile (no code uses them yet).
 - [ ] **Step 4: Commit**
 
 ```bash
-git add Cargo.toml crates/omnimodemd/Cargo.toml
+git add Cargo.toml crates/omnimodem/Cargo.toml
 git commit -m "Add Phase 2 audio and PTT hardware dependencies"
 ```
 
@@ -157,12 +157,12 @@ git commit -m "Add Phase 2 audio and PTT hardware dependencies"
 The single most important retrofit-proofing in Phase 2: collapse Graywolf's two diverging identity paths (cpal/ALSA names vs nusb USB topology) into **one** stable identity derived from durable attributes, never a volatile `/dev` path. This replaces the Phase-1 placeholder `DeviceId(String)`. Config (audio + PTT) keys on it, so a TNC that jumps `ttyUSB0 → ttyUSB1` still binds. This task is **pure** — no hardware — so it is fully test-driven.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/ids.rs` (replace the `DeviceId` definition; keep `ChannelId`/`TransmitId`)
-- Modify: `crates/omnimodemd/src/persist/mod.rs` (store/load via canonical string)
+- Modify: `crates/omnimodem/src/ids.rs` (replace the `DeviceId` definition; keep `ChannelId`/`TransmitId`)
+- Modify: `crates/omnimodem/src/persist/mod.rs` (store/load via canonical string)
 
 - [ ] **Step 1: Write the failing tests + the new `DeviceId`**
 
-In `crates/omnimodemd/src/ids.rs`, replace the entire `DeviceId` block (the `pub struct DeviceId(pub String);` through its `impl`) with:
+In `crates/omnimodem/src/ids.rs`, replace the entire `DeviceId` block (the `pub struct DeviceId(pub String);` through its `impl`) with:
 
 ```rust
 /// Stable, cross-platform device identity.
@@ -282,7 +282,7 @@ mod device_id_tests {
 
 - [ ] **Step 2: Update persistence to use the canonical string**
 
-In `crates/omnimodemd/src/persist/mod.rs`, change the `upsert_channel` write of `device_id` from `cfg.device_id.0` to `cfg.device_id.to_canonical_string()`, and change the `load_channels` row mapping of `device_id` from `DeviceId(row.get::<_, String>(3)?)` to:
+In `crates/omnimodem/src/persist/mod.rs`, change the `upsert_channel` write of `device_id` from `cfg.device_id.0` to `cfg.device_id.to_canonical_string()`, and change the `load_channels` row mapping of `device_id` from `DeviceId(row.get::<_, String>(3)?)` to:
 
 ```rust
                 device_id: DeviceId::parse(&row.get::<_, String>(3)?)
@@ -293,13 +293,13 @@ In `crates/omnimodemd/src/persist/mod.rs`, change the `upsert_channel` write of 
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo test -p omnimodemd device_id_tests:: persist::`
+Run: `cargo test -p omnimodem device_id_tests:: persist::`
 Expected: PASS — all `DeviceId` round-trips, and the persistence tests still pass against the canonical-string key.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ids.rs crates/omnimodemd/src/persist/mod.rs
+git add crates/omnimodem/src/ids.rs crates/omnimodem/src/persist/mod.rs
 git commit -m "Replace placeholder DeviceId with a durable cross-platform identity"
 ```
 
@@ -312,13 +312,13 @@ git commit -m "Replace placeholder DeviceId with a durable cross-platform identi
 The trait that replaces Graywolf's spawn-by-`match` (`modem/mod.rs:449-480`). It is deliberately small: open a capture, open a playback, report the working sample rate. Capture delivers `Vec<i16>` chunks over a bounded channel (Graywolf's `AudioChunk`, i16 throughout); playback exposes the submitted/drained watermark contract that the no-sleep TX cycle (Task 13) depends on. A `NullBackend` (silence in, discard out) lets the trait and every consumer be tested without hardware.
 
 **Files:**
-- Create: `crates/omnimodemd/src/audio/mod.rs`
-- Create: `crates/omnimodemd/src/audio/backend.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
+- Create: `crates/omnimodem/src/audio/mod.rs`
+- Create: `crates/omnimodem/src/audio/backend.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
 
 - [ ] **Step 1: Define the shared audio types**
 
-Create `crates/omnimodemd/src/audio/mod.rs`:
+Create `crates/omnimodem/src/audio/mod.rs`:
 
 ```rust
 //! Audio subsystem: a pluggable `AudioBackend` over cpal / file / stdin, a
@@ -367,7 +367,7 @@ pub enum AudioError {
 
 - [ ] **Step 2: Write the trait, handles, and `NullBackend` with failing tests**
 
-Create `crates/omnimodemd/src/audio/backend.rs`:
+Create `crates/omnimodem/src/audio/backend.rs`:
 
 ```rust
 //! The `AudioBackend` trait and its handles. Hardware backends (cpal) and
@@ -517,7 +517,7 @@ mod tests {
 
 - [ ] **Step 3: Wire the module in**
 
-In `crates/omnimodemd/src/lib.rs`, add below the existing `pub mod` lines:
+In `crates/omnimodem/src/lib.rs`, add below the existing `pub mod` lines:
 
 ```rust
 pub mod audio;
@@ -525,23 +525,23 @@ pub mod audio;
 
 > Note: `audio/mod.rs` declares `alsa`, `file`, `fanout`, `resample`, `stdin`, and (non-test) `cpal_backend`. Create empty placeholder files for the not-yet-written modules so the crate compiles now, then fill them in their tasks:
 > ```bash
-> printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/audio/alsa.rs
-> printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/audio/file.rs
-> printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/audio/fanout.rs
-> printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/audio/resample.rs
-> printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/audio/stdin.rs
-> printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/audio/cpal_backend.rs
+> printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/audio/alsa.rs
+> printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/audio/file.rs
+> printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/audio/fanout.rs
+> printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/audio/resample.rs
+> printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/audio/stdin.rs
+> printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/audio/cpal_backend.rs
 > ```
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p omnimodemd audio::backend::`
+Run: `cargo test -p omnimodem audio::backend::`
 Expected: PASS (2 tests) — null capture is EOF, null playback honors the watermark.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/ crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/audio/ crates/omnimodem/src/lib.rs
 git commit -m "Add AudioBackend trait, watermark handles, and NullBackend"
 ```
 
@@ -552,12 +552,12 @@ git commit -m "Add AudioBackend trait, watermark handles, and NullBackend"
 Deterministic backends are the foundation of the design's record/replay corpus *and* of every CI test that needs real samples without a sound card. The file backend replays raw little-endian i16 PCM at a declared rate; the stdin backend is the same over `stdin`. Both are fully test-driven because they touch no hardware.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/audio/file.rs`
-- Create/replace: `crates/omnimodemd/src/audio/stdin.rs`
+- Create/replace: `crates/omnimodem/src/audio/file.rs`
+- Create/replace: `crates/omnimodem/src/audio/stdin.rs`
 
 - [ ] **Step 1: Write the file backend with failing tests**
 
-Replace `crates/omnimodemd/src/audio/file.rs` with:
+Replace `crates/omnimodem/src/audio/file.rs` with:
 
 ```rust
 //! File audio backend: replay raw little-endian i16 mono PCM deterministically,
@@ -674,7 +674,7 @@ mod tests {
 
 - [ ] **Step 2: Write the stdin backend**
 
-Replace `crates/omnimodemd/src/audio/stdin.rs` with:
+Replace `crates/omnimodem/src/audio/stdin.rs` with:
 
 ```rust
 //! Stdin audio backend: raw little-endian i16 mono PCM on stdin. Capture only
@@ -736,13 +736,13 @@ impl AudioBackend for StdinBackend {
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo test -p omnimodemd audio::file::`
+Run: `cargo test -p omnimodem audio::file::`
 Expected: PASS (2 tests) — capture replays every sample then EOFs; playback collects submitted samples and honors the watermark.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/file.rs crates/omnimodemd/src/audio/stdin.rs
+git add crates/omnimodem/src/audio/file.rs crates/omnimodem/src/audio/stdin.rs
 git commit -m "Add deterministic file and stdin audio backends"
 ```
 
@@ -753,11 +753,11 @@ git commit -m "Add deterministic file and stdin audio backends"
 These are the load-bearing defensive functions from Graywolf `audio/soundcard.rs`, extracted as **pure functions** so they are fully unit-tested here and reused unchanged by the cpal backend in Task 6. They encode three hard-won lessons: collapse cpal's per-card aliases to one physical card, never open above the 48 kHz ceiling or accept a synthetic plughw range, and never trust cpal's default format (prefer I16, which the cheap USB codecs actually deliver without POLLERR-looping).
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/audio/alsa.rs`
+- Create/replace: `crates/omnimodem/src/audio/alsa.rs`
 
 - [ ] **Step 1: Write the pure functions with failing tests**
 
-Replace `crates/omnimodemd/src/audio/alsa.rs` with:
+Replace `crates/omnimodem/src/audio/alsa.rs` with:
 
 ```rust
 //! ALSA canonicalization + defensive rate/format selection. All pure; the cpal
@@ -917,13 +917,13 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p omnimodemd audio::alsa::`
+Run: `cargo test -p omnimodem audio::alsa::`
 Expected: PASS (7 tests).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/alsa.rs
+git add crates/omnimodem/src/audio/alsa.rs
 git commit -m "Add pure ALSA canonicalization, rate-ceiling, and format-selection helpers"
 ```
 
@@ -934,11 +934,11 @@ git commit -m "Add pure ALSA canonicalization, rate-ceiling, and format-selectio
 The real hardware backend. It enumerates cpal devices into `DeviceId`s (using nusb to attach USB identity), opens capture/playback through the Task-5 pure pickers, runs a capture thread with the stream-rebuild-with-backoff loop, and drives playback through the submitted/drained watermark ledger. Hardware streams cannot be unit-tested deterministically, so this task verifies by `cargo build` plus a **manual smoke step** against a real sound card; the *decision logic* it depends on is already proven in Task 5.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/audio/cpal_backend.rs`
+- Create/replace: `crates/omnimodem/src/audio/cpal_backend.rs`
 
 - [ ] **Step 1: Write the cpal backend**
 
-Replace `crates/omnimodemd/src/audio/cpal_backend.rs` with the implementation below. It lifts Graywolf `audio/soundcard.rs`: the `REBUILD_BACKOFF` schedule (`soundcard.rs:26-39`), the never-trust-default format pick (`soundcard.rs:223-251`), the held-thread rebuild loop (`soundcard.rs:254-372`), and the output drain ledger (`soundcard.rs:1280-1348`).
+Replace `crates/omnimodem/src/audio/cpal_backend.rs` with the implementation below. It lifts Graywolf `audio/soundcard.rs`: the `REBUILD_BACKOFF` schedule (`soundcard.rs:26-39`), the never-trust-default format pick (`soundcard.rs:223-251`), the held-thread rebuild loop (`soundcard.rs:254-372`), and the output drain ledger (`soundcard.rs:1280-1348`).
 
 ```rust
 //! cpal audio backend. The only audio code that calls cpal. Decision logic
@@ -1229,7 +1229,7 @@ fn id_clone(_out: &[(DeviceId, CpalBackend)], name: &str) -> DeviceId {
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cargo build -p omnimodemd`
+Run: `cargo build -p omnimodem`
 Expected: success. (No deterministic unit test — hardware streams are exercised in the manual smoke step and by the loopback integration test in Task 19 via the file backend.)
 
 - [ ] **Step 3: Manual smoke test against a real sound card**
@@ -1237,7 +1237,7 @@ Expected: success. (No deterministic unit test — hardware streams are exercise
 This step needs a host with a sound card (the operator's Linux machine, not CI). Add a tiny throwaway example or use the daemon once Task 17 lands. For now, verify enumeration directly:
 
 ```bash
-cargo test -p omnimodemd --no-run    # ensure it links
+cargo test -p omnimodem --no-run    # ensure it links
 ```
 
 Then, on a machine with audio hardware, confirm `cpal::default_host().input_devices()` lists the expected card and that `alsa_card_token` extracts a stable name from its pcm id. Full open/capture/playback is smoke-tested end-to-end in Task 19's manual procedure.
@@ -1245,7 +1245,7 @@ Then, on a machine with audio hardware, confirm `cpal::default_host().input_devi
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/cpal_backend.rs
+git add crates/omnimodem/src/audio/cpal_backend.rs
 git commit -m "Add cpal audio backend with rebuild-backoff and drain watermarks"
 ```
 
@@ -1256,11 +1256,11 @@ git commit -m "Add cpal audio backend with rebuild-backoff and drain watermarks"
 Resampling makes a source rate independent of the demod working rate (design: "a source rate need not match the demod rate"). It is **additive** — it runs *after* the 48 kHz-capped capture, never replacing the ALSA hardening. Phase 2 needs correct, deterministic plumbing, not yet the best-quality polyphase filter (that is a Phase-3 front-end-DSP battery); a band-limited linear fractional resampler is enough to carry samples between rates and is fully testable.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/audio/resample.rs`
+- Create/replace: `crates/omnimodem/src/audio/resample.rs`
 
 - [ ] **Step 1: Write the resampler with failing tests**
 
-Replace `crates/omnimodemd/src/audio/resample.rs` with:
+Replace `crates/omnimodem/src/audio/resample.rs` with:
 
 ```rust
 //! Rational sample-rate conversion. Linear-interpolation fractional resampler:
@@ -1389,13 +1389,13 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p omnimodemd audio::resample::`
+Run: `cargo test -p omnimodem audio::resample::`
 Expected: PASS (5 tests) — passthrough identity, 2× up/down length, DC preservation, streaming continuity.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/resample.rs
+git add crates/omnimodem/src/audio/resample.rs
 git commit -m "Add deterministic rational resampler (additive to rate-capped capture)"
 ```
 
@@ -1406,11 +1406,11 @@ git commit -m "Add deterministic rational resampler (additive to rate-capped cap
 One capture stream can feed several consumers (1200 + 9600 on the same audio, or SDR slices). It is **opt-in**; 1:1 is the default. Graywolf's `extra_demods` proves the pattern; here it is a clean broadcast over a capture's `Receiver`. Fully test-driven over the file backend.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/audio/fanout.rs`
+- Create/replace: `crates/omnimodem/src/audio/fanout.rs`
 
 - [ ] **Step 1: Write the fan-out with failing tests**
 
-Replace `crates/omnimodemd/src/audio/fanout.rs` with:
+Replace `crates/omnimodem/src/audio/fanout.rs` with:
 
 ```rust
 //! Capture fan-out: one capture `Receiver` -> N independent consumers. Opt-in;
@@ -1497,13 +1497,13 @@ mod tests {
 
 Apply the `retain` form from the worker note (the deterministic tests pass with either, but the clean form is what ships). Then run:
 
-Run: `cargo test -p omnimodemd audio::fanout::`
+Run: `cargo test -p omnimodem audio::fanout::`
 Expected: PASS (2 tests) — 1 consumer is passthrough, 2 consumers each receive every sample.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/audio/fanout.rs
+git add crates/omnimodem/src/audio/fanout.rs
 git commit -m "Add opt-in capture fan-out (one capture to N consumers)"
 ```
 
@@ -1514,16 +1514,16 @@ git commit -m "Add opt-in capture fan-out (one capture to N consumers)"
 The cache resolves a stored `DeviceId` to a live device and detects hotplug by diffing enumeration snapshots, emitting `Arrived`/`Departed` keyed on `DeviceId` — the mechanism the design demands so config keyed on identity rebinds across renames. Enumeration sits behind a `DeviceEnumerator` trait with a `FakeEnumerator`, so the cache and hotplug diff are fully unit-tested.
 
 **Files:**
-- Create: `crates/omnimodemd/src/device/mod.rs`
-- Create: `crates/omnimodemd/src/device/enumerate.rs`
-- Create: `crates/omnimodemd/src/device/cache.rs`
-- Create: `crates/omnimodemd/src/device/hotplug.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
-- Delete: `crates/omnimodemd/src/supervisor/device.rs` (placeholder folds in here)
+- Create: `crates/omnimodem/src/device/mod.rs`
+- Create: `crates/omnimodem/src/device/enumerate.rs`
+- Create: `crates/omnimodem/src/device/cache.rs`
+- Create: `crates/omnimodem/src/device/hotplug.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
+- Delete: `crates/omnimodem/src/supervisor/device.rs` (placeholder folds in here)
 
 - [ ] **Step 1: Define the descriptor and enumerator trait**
 
-Create `crates/omnimodemd/src/device/enumerate.rs`:
+Create `crates/omnimodem/src/device/enumerate.rs`:
 
 ```rust
 //! Device enumeration behind a trait, so the cache and hotplug logic are
@@ -1570,7 +1570,7 @@ impl DeviceEnumerator for FakeEnumerator {
 
 - [ ] **Step 2: Write the cache with failing tests**
 
-Create `crates/omnimodemd/src/device/cache.rs`:
+Create `crates/omnimodem/src/device/cache.rs`:
 
 ```rust
 //! Resolves a durable `DeviceId` to a live device and caches the present set.
@@ -1661,7 +1661,7 @@ mod tests {
 
 - [ ] **Step 3: Write the hotplug diff with failing tests**
 
-Create `crates/omnimodemd/src/device/hotplug.rs`:
+Create `crates/omnimodem/src/device/hotplug.rs`:
 
 ```rust
 //! Hotplug detection by diffing enumeration snapshots. Emits arrivals and
@@ -1770,7 +1770,7 @@ mod tests {
 
 - [ ] **Step 4: Write the module root and the real enumerator seam**
 
-Create `crates/omnimodemd/src/device/mod.rs`:
+Create `crates/omnimodem/src/device/mod.rs`:
 
 ```rust
 //! Device identity, enumeration, caching, and hotplug — the spine both the
@@ -1811,7 +1811,7 @@ impl DeviceEnumerator for RealEnumerator {
 
 - [ ] **Step 5: Wire the module in and remove the placeholder**
 
-In `crates/omnimodemd/src/lib.rs`, add (before `pub mod supervisor;`):
+In `crates/omnimodem/src/lib.rs`, add (before `pub mod supervisor;`):
 
 ```rust
 pub mod device;
@@ -1820,22 +1820,22 @@ pub mod device;
 Delete the placeholder file and its module declaration:
 
 ```bash
-git rm crates/omnimodemd/src/supervisor/device.rs
+git rm crates/omnimodem/src/supervisor/device.rs
 ```
 
-In `crates/omnimodemd/src/supervisor/mod.rs`, remove the `pub mod device;` line and the `use device::DeviceCache;` line — they are replaced by `use crate::device::DeviceCache;` (wired fully in Task 16).
+In `crates/omnimodem/src/supervisor/mod.rs`, remove the `pub mod device;` line and the `use device::DeviceCache;` line — they are replaced by `use crate::device::DeviceCache;` (wired fully in Task 16).
 
 > Note: `supervisor/mod.rs` still references `DeviceCache` in its struct/`new`. Until Task 16 rewires the Supervisor, temporarily change its `devices: DeviceCache` field initializer to `crate::device::DeviceCache::new()` and its `default_device()` call site. If executing strictly in order, the minimal edit is: replace `use device::DeviceCache;` with `use crate::device::DeviceCache;`, and replace the body of the old `configure_channel`'s `device_id: self.devices.default_device()` with `device_id: DeviceId::placeholder()` for now (Task 16 gives it the real binding). This keeps the crate compiling between tasks.
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p omnimodemd device::`
+Run: `cargo test -p omnimodem device::`
 Expected: PASS — cache resolve/unplug (2) + hotplug diff (4).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/omnimodemd/src/device/ crates/omnimodemd/src/lib.rs crates/omnimodemd/src/supervisor/mod.rs
+git add crates/omnimodem/src/device/ crates/omnimodem/src/lib.rs crates/omnimodem/src/supervisor/mod.rs
 git commit -m "Add device cache and hotplug detection keyed on DeviceId"
 ```
 
@@ -1848,13 +1848,13 @@ git commit -m "Add device cache and hotplug detection keyed on DeviceId"
 The structured error type that replaces Graywolf's stringly-typed `Result<(), String>` (`ptt.rs:184-189`), so callers distinguish device-went-away vs permission-denied vs busy — the prerequisite for hotplug eviction (Task 12). Plus the `PttDriver` trait, the `NonePtt` no-op (VOX/none), and a `MockPtt` test double that records key/unkey calls and can be told to fail. Fully test-driven.
 
 **Files:**
-- Create: `crates/omnimodemd/src/ptt/mod.rs`
-- Create: `crates/omnimodemd/src/ptt/none.rs`
-- Modify: `crates/omnimodemd/src/lib.rs`
+- Create: `crates/omnimodem/src/ptt/mod.rs`
+- Create: `crates/omnimodem/src/ptt/none.rs`
+- Modify: `crates/omnimodem/src/lib.rs`
 
 - [ ] **Step 1: Define the error, trait, and module root**
 
-Create `crates/omnimodemd/src/ptt/mod.rs`:
+Create `crates/omnimodem/src/ptt/mod.rs`:
 
 ```rust
 //! PTT subsystem: a `PttDriver` trait, structured errors, per-OS drivers
@@ -1904,7 +1904,7 @@ pub trait PttDriver: Send {
 
 - [ ] **Step 2: Write `NonePtt` and `MockPtt` with failing tests**
 
-Create `crates/omnimodemd/src/ptt/none.rs`:
+Create `crates/omnimodem/src/ptt/none.rs`:
 
 ```rust
 //! The no-op driver (VOX / none) and the test double.
@@ -2024,7 +2024,7 @@ mod tests {
 
 - [ ] **Step 3: Wire the module in (with placeholders for the unwritten files)**
 
-In `crates/omnimodemd/src/lib.rs`, add:
+In `crates/omnimodem/src/lib.rs`, add:
 
 ```rust
 pub mod ptt;
@@ -2033,24 +2033,24 @@ pub mod ptt;
 `ptt/mod.rs` declares `interlock`, `registry`, `sequence`, `udev`, and the unix/linux driver modules. Create placeholders so the crate compiles now; later tasks fill them:
 
 ```bash
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/interlock.rs
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/registry.rs
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/sequence.rs
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/udev.rs
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/serial.rs
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/cm108.rs
-printf '//! filled in a later Phase 2 task\n' > crates/omnimodemd/src/ptt/gpio.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/interlock.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/registry.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/sequence.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/udev.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/serial.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/cm108.rs
+printf '//! filled in a later Phase 2 task\n' > crates/omnimodem/src/ptt/gpio.rs
 ```
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p omnimodemd ptt::none::`
+Run: `cargo test -p omnimodem ptt::none::`
 Expected: PASS (4 tests) — None no-op, Mock records, Mock fails on demand, drop-while-keyed unkeys.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/ crates/omnimodemd/src/lib.rs
+git add crates/omnimodem/src/ptt/ crates/omnimodem/src/lib.rs
 git commit -m "Add PttError, PttDriver trait, and None/Mock drivers"
 ```
 
@@ -2061,13 +2061,13 @@ git commit -m "Add PttError, PttDriver trait, and None/Mock drivers"
 The real drivers: serial RTS/DTR (nix `TIOCMSET` ioctl), CM108 HID GPIO (hidraw 5-byte report), and Linux gpiochip (gpiocdev). Each sits behind a tiny hardware-seam trait so the **driver logic** (invert handling, structured-error mapping, unkey-on-Drop, startup unkey) is unit-tested with a mock seam, while the **adapter** that calls nix/hidapi/gpiocdev is verified by `cargo build` + a manual smoke step. Lifted from Graywolf `tx/ptt.rs` and its `ppt_*` platform files.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/ptt/serial.rs`
-- Create/replace: `crates/omnimodemd/src/ptt/cm108.rs`
-- Create/replace: `crates/omnimodemd/src/ptt/gpio.rs`
+- Create/replace: `crates/omnimodem/src/ptt/serial.rs`
+- Create/replace: `crates/omnimodem/src/ptt/cm108.rs`
+- Create/replace: `crates/omnimodem/src/ptt/gpio.rs`
 
 - [ ] **Step 1: Serial driver — seam trait + logic test + real adapter**
 
-Replace `crates/omnimodemd/src/ptt/serial.rs` with:
+Replace `crates/omnimodem/src/ptt/serial.rs` with:
 
 ```rust
 //! Serial RTS/DTR PTT. The most common cheap interface. Logic (which line,
@@ -2281,7 +2281,7 @@ mod tests {
 
 - [ ] **Step 2: CM108 driver — seam + logic test + real adapter**
 
-Replace `crates/omnimodemd/src/ptt/cm108.rs` with:
+Replace `crates/omnimodem/src/ptt/cm108.rs` with:
 
 ```rust
 //! CM108/CM119 HID GPIO PTT. Writes a 5-byte HID output report to /dev/hidrawN.
@@ -2433,7 +2433,7 @@ mod tests {
 
 - [ ] **Step 3: GPIO driver — seam + logic test + real adapter with eviction signal**
 
-Replace `crates/omnimodemd/src/ptt/gpio.rs` with:
+Replace `crates/omnimodem/src/ptt/gpio.rs` with:
 
 ```rust
 //! Linux gpiochip v2 PTT via gpiocdev. A `LineGone` on set means the chip was
@@ -2572,13 +2572,13 @@ mod tests {
 
 - [ ] **Step 4: Build and run the driver-logic tests**
 
-Run: `cargo build -p omnimodemd && cargo test -p omnimodemd ptt::serial:: ptt::cm108::`
-Expected: build succeeds (real adapters compile); serial (3) + cm108 (3) tests pass. On a Linux host, also run `cargo test -p omnimodemd ptt::gpio::` (2 tests).
+Run: `cargo build -p omnimodem && cargo test -p omnimodem ptt::serial:: ptt::cm108::`
+Expected: build succeeds (real adapters compile); serial (3) + cm108 (3) tests pass. On a Linux host, also run `cargo test -p omnimodem ptt::gpio::` (2 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/serial.rs crates/omnimodemd/src/ptt/cm108.rs crates/omnimodemd/src/ptt/gpio.rs
+git add crates/omnimodem/src/ptt/serial.rs crates/omnimodem/src/ptt/cm108.rs crates/omnimodem/src/ptt/gpio.rs
 git commit -m "Add Linux serial, CM108, and gpiochip PTT drivers behind hardware seams"
 ```
 
@@ -2589,11 +2589,11 @@ git commit -m "Add Linux serial, CM108, and gpiochip PTT drivers behind hardware
 The registry is the factory that turns a `PttConfig` into a `Box<dyn PttDriver>`, and — the fix the design demands — it **evicts a cached driver by `DeviceId` on disappearance/hotplug** instead of caching fds by path forever (Graywolf `ptt.rs:484-487` never evicts serial fds). Drivers are constructed through an injectable opener so the registry's caching/eviction logic is unit-tested with `MockPtt`, no hardware.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/ptt/registry.rs`
+- Create/replace: `crates/omnimodem/src/ptt/registry.rs`
 
 - [ ] **Step 1: Write the registry with failing tests**
 
-Replace `crates/omnimodemd/src/ptt/registry.rs` with:
+Replace `crates/omnimodem/src/ptt/registry.rs` with:
 
 ```rust
 //! PortRegistry: build PTT drivers from config and cache them by DeviceId, with
@@ -2758,13 +2758,13 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p omnimodemd ptt::registry::`
+Run: `cargo test -p omnimodem ptt::registry::`
 Expected: PASS (3 tests) — build records identity, evict forgets it, rebuild-after-eviction reopens (proving the fix).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/registry.rs
+git add crates/omnimodem/src/ptt/registry.rs
 git commit -m "Add PortRegistry with DeviceId-keyed hotplug eviction"
 ```
 
@@ -2775,11 +2775,11 @@ git commit -m "Add PortRegistry with DeviceId-keyed hotplug eviction"
 The on-air cycle, timed by the audio drain watermark rather than sleeps (Graywolf `tx_worker.rs:408-481`): key → submit audio → wait until both the DAC has drained the submitted watermark *and* the expected wall-clock duration has elapsed → unkey. Failures unkey before returning so a rig is never stuck keyed. Deterministic: tested with `MockPtt` + the file/null backend's real watermark.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/ptt/sequence.rs`
+- Create/replace: `crates/omnimodem/src/ptt/sequence.rs`
 
 - [ ] **Step 1: Write the sequence with failing tests**
 
-Replace `crates/omnimodemd/src/ptt/sequence.rs` with:
+Replace `crates/omnimodem/src/ptt/sequence.rs` with:
 
 ```rust
 //! No-sleep TX sequencing. Times PTT off the playback drain watermark, not a
@@ -2906,13 +2906,13 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p omnimodemd ptt::sequence::`
+Run: `cargo test -p omnimodem ptt::sequence::`
 Expected: PASS (4 tests) — full cycle plays + releases, key-failure short-circuits, unkey-failure reported, empty buffer is instant (no sleeps).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/sequence.rs
+git add crates/omnimodem/src/ptt/sequence.rs
 git commit -m "Add no-sleep TX sequencing timed by drain watermark"
 ```
 
@@ -2923,11 +2923,11 @@ git commit -m "Add no-sleep TX sequencing timed by drain watermark"
 When a channel keys PTT on a device, RX decode on that device must be muted to avoid decoding our own transmission/feedback. Graywolf handled this implicitly on its single thread; the per-channel-thread model must make it explicit. The interlock is a per-device keyed-count gate: capture chunks are dropped while the device is keyed. Pure state machine, fully test-driven.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/ptt/interlock.rs`
+- Create/replace: `crates/omnimodem/src/ptt/interlock.rs`
 
 - [ ] **Step 1: Write the interlock with failing tests**
 
-Replace `crates/omnimodemd/src/ptt/interlock.rs` with:
+Replace `crates/omnimodem/src/ptt/interlock.rs` with:
 
 ```rust
 //! RX/TX interlock. While any channel keys a physical device, RX on that device
@@ -3025,13 +3025,13 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p omnimodemd ptt::interlock::`
+Run: `cargo test -p omnimodem ptt::interlock::`
 Expected: PASS (5 tests) — idle unmuted, key/unkey toggles, isolation per device, nested keys, underflow-safe.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/interlock.rs
+git add crates/omnimodem/src/ptt/interlock.rs
 git commit -m "Add per-rig RX/TX interlock"
 ```
 
@@ -3044,7 +3044,7 @@ git commit -m "Add per-rig RX/TX interlock"
 Add the device/audio/PTT control surface and the new events. Every change is **additive** per `proto/VERSIONING.md` — new messages, new RPCs, new `Event.kind` oneof variants with fresh tags; nothing renumbered. `Transmit` already exists from Phase 1; it gains real meaning (play the payload as PCM).
 
 **Files:**
-- Modify: `crates/omnimodemd/proto/omnimodem.proto`
+- Modify: `crates/omnimodem/proto/omnimodem.proto`
 
 - [ ] **Step 1: Add the new RPCs and messages**
 
@@ -3164,12 +3164,12 @@ message PttState {
 
 - [ ] **Step 2: Verify codegen compiles**
 
-Run: `cargo build -p omnimodemd`
+Run: `cargo build -p omnimodem`
 Expected: success; tonic-build regenerates the expanded service and message types.
 
 - [ ] **Step 3: Add a generated-types smoke test**
 
-In `crates/omnimodemd/src/proto.rs`, add inside `mod tests`:
+In `crates/omnimodem/src/proto.rs`, add inside `mod tests`:
 
 ```rust
     #[test]
@@ -3185,13 +3185,13 @@ In `crates/omnimodemd/src/proto.rs`, add inside `mod tests`:
     }
 ```
 
-Run: `cargo test -p omnimodemd proto::tests::phase2_types_are_constructible`
+Run: `cargo test -p omnimodem proto::tests::phase2_types_are_constructible`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/proto/omnimodem.proto crates/omnimodemd/src/proto.rs
+git add crates/omnimodem/proto/omnimodem.proto crates/omnimodem/src/proto.rs
 git commit -m "Extend omnimodem.v1 proto with device, audio, and PTT control"
 ```
 
@@ -3204,17 +3204,17 @@ git commit -m "Extend omnimodem.v1 proto with device, audio, and PTT control"
 Replace the Phase-1 placeholders: the Supervisor now owns a real `DeviceCache`, a `PortRegistry`, the `RxTxInterlock`, and per-channel audio/PTT bindings. The core gains commands for audio/PTT config and a **per-channel TX worker** that runs `drive_tx_cycle`, drives the interlock around each cycle, and the hotplug pump that evicts on `Departed`.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/supervisor/channel.rs`
-- Modify: `crates/omnimodemd/src/supervisor/mod.rs`
-- Delete: `crates/omnimodemd/src/supervisor/ptt.rs`
-- Modify: `crates/omnimodemd/src/core/command.rs`
-- Modify: `crates/omnimodemd/src/core/event.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs`
-- Modify: `crates/omnimodemd/src/persist/mod.rs`
+- Modify: `crates/omnimodem/src/supervisor/channel.rs`
+- Modify: `crates/omnimodem/src/supervisor/mod.rs`
+- Delete: `crates/omnimodem/src/supervisor/ptt.rs`
+- Modify: `crates/omnimodem/src/core/command.rs`
+- Modify: `crates/omnimodem/src/core/event.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs`
+- Modify: `crates/omnimodem/src/persist/mod.rs`
 
 - [ ] **Step 1: Extend `ChannelConfig` with audio + PTT bindings**
 
-In `crates/omnimodemd/src/supervisor/channel.rs`, extend `ChannelConfig` (keep `id`, `name`, `mode`, `device_id`) with optional bindings:
+In `crates/omnimodem/src/supervisor/channel.rs`, extend `ChannelConfig` (keep `id`, `name`, `mode`, `device_id`) with optional bindings:
 
 ```rust
 use crate::ptt::registry::{PttConfig, PttMethod};
@@ -3242,7 +3242,7 @@ Update `ChannelState::new` callers accordingly (it already wraps a `ChannelConfi
 
 - [ ] **Step 2: Rewrite the Supervisor to own the real subsystems**
 
-In `crates/omnimodemd/src/supervisor/mod.rs`: remove `pub mod device;` and `pub mod ptt;` and their placeholders; `git rm crates/omnimodemd/src/supervisor/ptt.rs`. Replace the struct and methods so the Supervisor holds:
+In `crates/omnimodem/src/supervisor/mod.rs`: remove `pub mod device;` and `pub mod ptt;` and their placeholders; `git rm crates/omnimodem/src/supervisor/ptt.rs`. Replace the struct and methods so the Supervisor holds:
 
 ```rust
 use crate::device::DeviceCache;
@@ -3281,7 +3281,7 @@ Keep `snapshot()`; it already exposes channels. Update the Phase-1 `configure_ch
 
 - [ ] **Step 3: Add the new commands and events**
 
-In `crates/omnimodemd/src/core/command.rs`, add variants to `Command` (each with a `oneshot` reply where an ack is needed):
+In `crates/omnimodem/src/core/command.rs`, add variants to `Command` (each with a `oneshot` reply where an ack is needed):
 
 ```rust
     ConfigureAudio {
@@ -3310,11 +3310,11 @@ In `crates/omnimodemd/src/core/command.rs`, add variants to `Command` (each with
     },
 ```
 
-In `crates/omnimodemd/src/core/event.rs`, add to `TelemetryEvent` (lossy class): `DeviceArrived { device_id: DeviceId, label: String }`, `DeviceDeparted { device_id: DeviceId }`, `PttKeyed { channel: ChannelId, keyed: bool }`. Add a `CoreError::Audio(String)` and `CoreError::Ptt(String)` variant in `core/error.rs` with `From<AudioError>`/`From<PttError>` impls.
+In `crates/omnimodem/src/core/event.rs`, add to `TelemetryEvent` (lossy class): `DeviceArrived { device_id: DeviceId, label: String }`, `DeviceDeparted { device_id: DeviceId }`, `PttKeyed { channel: ChannelId, keyed: bool }`. Add a `CoreError::Audio(String)` and `CoreError::Ptt(String)` variant in `core/error.rs` with `From<AudioError>`/`From<PttError>` impls.
 
 - [ ] **Step 4: Implement the per-channel TX worker + handlers in the core loop**
 
-In `crates/omnimodemd/src/core/mod.rs`, in `run`'s `match cmd`:
+In `crates/omnimodem/src/core/mod.rs`, in `run`'s `match cmd`:
 
 - `ConfigureAudio` → `supervisor.configure_audio(...)`; open the real capture/playback via a backend resolved from `supervisor.device_cache_mut().resolve(&device_id)` (cpal backend in production, injected backend in tests — see note); reply with the actual rate; emit nothing lossless.
 - `ConfigurePtt` → `supervisor.configure_ptt(...)`; build the driver via `supervisor.ptt_registry_mut().build_driver(&ptt)` and **store it in a per-channel `HashMap<ChannelId, Box<dyn PttDriver>>` owned by the core loop**; reply ok.
@@ -3333,14 +3333,14 @@ The Phase-1 `core::tests` call `spawn(sup)`. Update `fresh_core()` to pass a `Fa
 
 - [ ] **Step 6: Run the affected tests**
 
-Run: `cargo test -p omnimodemd core:: supervisor:: persist::`
+Run: `cargo test -p omnimodem core:: supervisor:: persist::`
 Expected: PASS — Phase-1 tests still green under the new signature; new audio-transmit test passes; persistence round-trips the new columns.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/omnimodemd/src/supervisor/ crates/omnimodemd/src/core/ crates/omnimodemd/src/persist/mod.rs
-git rm crates/omnimodemd/src/supervisor/ptt.rs
+git add crates/omnimodem/src/supervisor/ crates/omnimodem/src/core/ crates/omnimodem/src/persist/mod.rs
+git rm crates/omnimodem/src/supervisor/ptt.rs
 git commit -m "Wire real device cache, PTT registry, interlock, and per-channel TX into the core"
 ```
 
@@ -3351,12 +3351,12 @@ git commit -m "Wire real device cache, PTT registry, interlock, and per-channel 
 Bridge the new proto RPCs to the core commands, mirroring the Phase-1 unary pattern (send `Command` + await its `oneshot`). All new conversions live in `convert.rs`.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/grpc/convert.rs`
-- Modify: `crates/omnimodemd/src/grpc/service.rs`
+- Modify: `crates/omnimodem/src/grpc/convert.rs`
+- Modify: `crates/omnimodem/src/grpc/service.rs`
 
 - [ ] **Step 1: Add conversions**
 
-In `crates/omnimodemd/src/grpc/convert.rs`, add:
+In `crates/omnimodem/src/grpc/convert.rs`, add:
 - `device_descriptor_to_proto(&DeviceDescriptor) -> proto::DeviceInfo`,
 - `proto_ptt_to_config(&proto::ConfigurePttRequest) -> Result<PttConfig, Status>` (map the `PttMethod` enum + `node`/`pin_or_line` to the domain `PttMethod`; reject `PTT_METHOD_UNSPECIFIED` with `invalid_argument`),
 - extend `telemetry_event_to_proto` with the three new variants (`DeviceArrived`/`DeviceDeparted`/`PttKeyed` → `device_arrived`/`device_departed`/`ptt_state`),
@@ -3364,7 +3364,7 @@ In `crates/omnimodemd/src/grpc/convert.rs`, add:
 
 - [ ] **Step 2: Implement the handlers**
 
-In `crates/omnimodemd/src/grpc/service.rs`, add the five new methods to the `impl ModemControl for ControlService` block. Each: validate, build a `oneshot`, `self.send_command(...)`, await, map. For example `list_devices`:
+In `crates/omnimodem/src/grpc/service.rs`, add the five new methods to the `impl ModemControl for ControlService` block. Each: validate, build a `oneshot`, `self.send_command(...)`, await, map. For example `list_devices`:
 
 ```rust
     async fn list_devices(
@@ -3384,13 +3384,13 @@ Implement `configure_audio`, `configure_ptt`, `key_ptt`, and `suggest_udev_rule`
 
 - [ ] **Step 3: Build and run the unary integration test**
 
-Run: `cargo build -p omnimodemd && cargo test -p omnimodemd --test unary`
+Run: `cargo build -p omnimodem && cargo test -p omnimodem --test unary`
 Expected: existing unary test still passes; the service compiles with the five new handlers. (A dedicated device/ptt integration test is the e2e in Task 19.)
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/grpc/convert.rs crates/omnimodemd/src/grpc/service.rs
+git add crates/omnimodem/src/grpc/convert.rs crates/omnimodem/src/grpc/service.rs
 git commit -m "Add gRPC handlers for ListDevices, ConfigureAudio, ConfigurePtt, KeyPtt"
 ```
 
@@ -3401,11 +3401,11 @@ git commit -m "Add gRPC handlers for ListDevices, ConfigureAudio, ConfigurePtt, 
 The RPC returns ready-to-install udev rule text plus instructions — useful for two identical adapters that `by-id` can't disambiguate. The modem only *suggests*; it never writes `/etc/udev` (root-owned; operator stays in control). Pure string generation, fully test-driven.
 
 **Files:**
-- Create/replace: `crates/omnimodemd/src/ptt/udev.rs`
+- Create/replace: `crates/omnimodem/src/ptt/udev.rs`
 
 - [ ] **Step 1: Write the generator with failing tests**
 
-Replace `crates/omnimodemd/src/ptt/udev.rs` with:
+Replace `crates/omnimodem/src/ptt/udev.rs` with:
 
 ```rust
 //! udev rule suggestion. Produces a rule that creates a stable
@@ -3488,13 +3488,13 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p omnimodemd ptt::udev::`
+Run: `cargo test -p omnimodem ptt::udev::`
 Expected: PASS (4 tests).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/omnimodemd/src/ptt/udev.rs
+git add crates/omnimodem/src/ptt/udev.rs
 git commit -m "Add SuggestUdevRule text generator"
 ```
 
@@ -3505,12 +3505,12 @@ git commit -m "Add SuggestUdevRule text generator"
 The gate. Over the Phase-1 authorized UDS gRPC surface, a client runs the full Phase-2 sequence — `ListDevices` → `ConfigureAudio` → `ConfigurePtt` → `Transmit` — and observes PTT key/unkey around audio that actually plays, **with no mode attached.** CI uses the deterministic file/loopback backend and a `MockPtt` opener (so the gate runs without hardware); a documented manual procedure runs the identical RPC sequence against a real sound card and radio.
 
 **Files:**
-- Modify: `crates/omnimodemd/src/lib.rs` (a test-server helper that injects the deterministic backends)
-- Create: `crates/omnimodemd/tests/e2e_hardware.rs`
+- Modify: `crates/omnimodem/src/lib.rs` (a test-server helper that injects the deterministic backends)
+- Create: `crates/omnimodem/tests/e2e_hardware.rs`
 
 - [ ] **Step 1: Add a deterministic-backend server helper**
 
-In `crates/omnimodemd/src/lib.rs`, below `serve_uds_authz_for_test`, add a variant that injects a `FakeEnumerator` (advertising one loopback device), a `FileBackend` audio factory whose `played` buffer is observable, and a `MockPtt` `DriverOpener`. Wire these into `core::spawn` (the injected signature from Task 16). Expose the shared `MockPtt` keyed-state and the playback `played` buffer to the test via returned `Arc`s so the test can assert PTT toggled and audio reached the sink.
+In `crates/omnimodem/src/lib.rs`, below `serve_uds_authz_for_test`, add a variant that injects a `FakeEnumerator` (advertising one loopback device), a `FileBackend` audio factory whose `played` buffer is observable, and a `MockPtt` `DriverOpener`. Wire these into `core::spawn` (the injected signature from Task 16). Expose the shared `MockPtt` keyed-state and the playback `played` buffer to the test via returned `Arc`s so the test can assert PTT toggled and audio reached the sink.
 
 ```rust
 /// Spawn the control plane with deterministic audio + PTT backends for the
@@ -3531,7 +3531,7 @@ pub async fn serve_uds_phase2_for_test(
 
 - [ ] **Step 2: Write the exit-criterion test**
 
-Create `crates/omnimodemd/tests/e2e_hardware.rs`:
+Create `crates/omnimodem/tests/e2e_hardware.rs`:
 
 ```rust
 //! Phase 2 EXIT CRITERION: over gRPC, list a device, configure audio + PTT on
@@ -3540,9 +3540,9 @@ Create `crates/omnimodemd/tests/e2e_hardware.rs`:
 //! MockPtt), so this runs in CI; the manual procedure below runs the identical
 //! RPC sequence against real hardware.
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{
     ConfigureAudioRequest, ConfigureChannelRequest, ConfigurePttRequest, ListDevicesRequest,
     PttMethod, SubscribeRequest, TransmitRequest,
 };
@@ -3575,7 +3575,7 @@ async fn phase2_exit_criterion_roundtrip() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_phase2_for_test(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_phase2_for_test(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let mut client = connect(sock).await;
@@ -3638,16 +3638,16 @@ async fn phase2_exit_criterion_roundtrip() {
 
 - [ ] **Step 3: Run the exit-criterion test**
 
-Run: `cargo test -p omnimodemd --test e2e_hardware`
+Run: `cargo test -p omnimodem --test e2e_hardware`
 Expected: PASS — list → configure audio → configure ptt → transmit, with PTT keyed-then-released and Started/Complete observed, no mode attached.
 
 - [ ] **Step 4: Document the manual real-hardware procedure**
 
-Append to the new file `crates/omnimodemd/tests/e2e_hardware.rs` a top-level doc-comment block (or a sibling `docs/` note) describing the manual gate. The procedure runs the **same RPC sequence** against real hardware on the operator's Linux host:
+Append to the new file `crates/omnimodem/tests/e2e_hardware.rs` a top-level doc-comment block (or a sibling `docs/` note) describing the manual gate. The procedure runs the **same RPC sequence** against real hardware on the operator's Linux host:
 
 ```text
 MANUAL REAL-HARDWARE GATE (run on a host with a sound card + radio):
-  1. cargo run -p omnimodemd   (Phase-1 daemon over UDS)
+  1. cargo run -p omnimodem   (Phase-1 daemon over UDS)
   2. With grpcurl or the reference client:
        a. ListDevices -> confirm the USB sound card appears with a stable
           DeviceId (usb:VVVV:PPPP:serial or alsa:<card>).
@@ -3668,13 +3668,13 @@ hotplug eviction fires -- all over gRPC, with no DSP mode attached.
 
 - [ ] **Step 5: Run the entire suite**
 
-Run: `cargo test -p omnimodemd`
+Run: `cargo test -p omnimodem`
 Expected: every unit + integration test passes (`device_id`, `audio::*`, `device::*`, `ptt::*`, `core`, `supervisor`, `persist`, `grpc`, `unary`, `subscribe`, `e2e`, `e2e_hardware`).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/lib.rs crates/omnimodemd/tests/e2e_hardware.rs
+git add crates/omnimodem/src/lib.rs crates/omnimodem/tests/e2e_hardware.rs
 git commit -m "Add Phase 2 exit-criterion e2e test and manual hardware gate"
 ```
 

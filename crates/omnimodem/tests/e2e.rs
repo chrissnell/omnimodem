@@ -3,9 +3,9 @@
 //! a fake transmit round-trip end-to-end — with no audio devices or DSP, over
 //! the authorized UDS transport.
 
-use omnimodemd::proto::event::Kind;
-use omnimodemd::proto::modem_control_client::ModemControlClient;
-use omnimodemd::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
+use omnimodem::proto::event::Kind;
+use omnimodem::proto::modem_control_client::ModemControlClient;
+use omnimodem::proto::{ConfigureChannelRequest, SubscribeRequest, TransmitRequest};
 use tokio::net::UnixStream;
 use tokio_stream::StreamExt;
 use tonic::transport::{Endpoint, Uri};
@@ -31,7 +31,7 @@ async fn phase1_exit_criterion_roundtrip() {
 
     let sock_srv = sock.clone();
     tokio::spawn(async move {
-        omnimodemd::serve_uds_authz_for_test(&db, &sock_srv).await.unwrap();
+        omnimodem::serve_uds_authz_for_test(&db, &sock_srv).await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 

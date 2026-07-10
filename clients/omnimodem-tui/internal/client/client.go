@@ -49,7 +49,7 @@ type grpcClient struct {
 	c    pb.ModemControlClient
 }
 
-// Dial connects to omnimodemd over UDS (path) or TCP (host:port). mTLS is out of
+// Dial connects to omnimodem over UDS (path) or TCP (host:port). mTLS is out of
 // scope for the MVP; local UDS relies on socket-mode + SO_PEERCRED authz.
 func Dial(addr string) (ModemClient, error) {
 	conn, err := grpc.NewClient(dialTarget(addr), grpc.WithTransportCredentials(insecure.NewCredentials()))

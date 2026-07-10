@@ -38,8 +38,8 @@ The message/framing layer `crates/dsp/src/framing/js8_message.rs` ports the 75-b
 | `crates/dsp/src/fec/mod.rs` | `pub mod ldpc_js8; pub mod js8_tables;`. |
 | `crates/dsp/src/framing/mod.rs` | `pub mod jsc; pub mod jsc_data; pub mod js8_message;`. |
 | `crates/dsp/src/modes/mod.rs` | `pub mod js8;`. |
-| `crates/omnimodemd/src/mode/mod.rs` | `ModeConfig::Js8 { submode }` variant; `parse`/`to_mode_string`/`label` arms. |
-| `crates/omnimodemd/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`native_rate`/`tx_slot_s` arms (windowed, parametric period per submode). |
+| `crates/omnimodem/src/mode/mod.rs` | `ModeConfig::Js8 { submode }` variant; `parse`/`to_mode_string`/`label` arms. |
+| `crates/omnimodem/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`native_rate`/`tx_slot_s` arms (windowed, parametric period per submode). |
 | `clients/omnimodem-tui/internal/app/modes.go` | `js8` rows (one per submode, or one row + submode param) + `modeParamsFor` arm + a new **`directed`** interaction shape view. |
 | `proto/*.proto` | `Js8Params { submode }` message + oneof arm (if the submode selector is carried as a param rather than a label tail — decision in T6). |
 | `crates/dsp/tests/kat.rs` | JS8 KATs (JSC bit-exact; LDPC codeword/itone bit-exact; audio FP-tolerance) + `#[ignore]` cross-decode gate. |
@@ -94,7 +94,7 @@ Pinned from `js8call/` at the workspace commit (record the exact hash — `a7ff1
 - ✅ **Task 0 — LDPC(174,87) + CRC-12** landed & gated (`fec/{js8_tables,ldpc_js8}.rs`): `encode174` bit-exact vs the authoritative Fortran encoder, generator/`Nm` agreement, `Mn`/`Nm` consistency, BP+OSD message recovery. CRC-12 transcribed (on-air authority deferred to the Task-5 cross-decode gate — boost unavailable to capture a native golden CRC).
 - ✅ **Task 2.1 — base 87-bit message pack** landed & gated (`framing/js8_message.rs`): `genjs8`'s 12-char/6-bit alphabet + i3bit + CRC-12, self-consistent round-trip.
 - ✅ **Task 3 — modem** landed & gated (`modes/js8.rs`): `js8_symbols` bit-exact vs `genjs8` (both Costas variants); `Js8Mod` (GFSK) + `Js8Demod` (Goertzel spectrogram → JS8 Costas sync → plain-binary soft demap `fec::llr::demap_fsk_identity` → LDPC BP+OSD → CRC-12 → unpack), parametric over the submode grid. **End-to-end loopback** gated: Normal + Fast, AWGN, offset subcarrier.
-- ✅ **Task 4 — daemon registry** landed & gated (`omnimodemd/src/mode/{mod,registry}.rs`): `ModeConfig::Js8 { submode }`, parse/round-trip, windowed demod + modulator per submode. JS8 is a selectable daemon mode.
+- ✅ **Task 4 — daemon registry** landed & gated (`omnimodem/src/mode/{mod,registry}.rs`): `ModeConfig::Js8 { submode }`, parse/round-trip, windowed demod + modulator per submode. JS8 is a selectable daemon mode.
 - ✅ **Task 6 (initial) — TUI** landed & gated (`clients/omnimodem-tui`): `js8` selectable in the operate screen as a free-text/chat surface (Normal submode), daemon-parity guard test updated. The submode selector + full `directed` view are follow-on (mirrors how FST4 shipped its default T/R period first).
 - ✅ **Task 5 (partial) — conformance sweep** (`ber.rs`): full-grid loopback (Normal/Fast/Turbo/Slow) + AWGN decode-rate floors (Normal ≥0.85 @σ=0.3, Fast ≥0.80 @σ=0.2; both observed 100%).
 - ✅ **Task 2.2 (data transport) — JSC FrameData** (`framing/js8_message.rs`): `packCompressedMessage`/`unpackFastDataMessage` ported — text is JSC-compressed into 72-bit fast-data frames (i3bit `JS8_DATA`/`FIRST`/`LAST` + 0-then-1s pad), split across frames and reassembled. `Js8Mod` now sends real JS8 text; `Js8Demod` routes by frame type. Gated by single/multi-frame JSC round-trip **and a full multi-frame audio loopback** (message split → modulated → decoded → reassembled).
@@ -197,7 +197,7 @@ Drivers: `scratch/refvectors/js8/{crc,jscqt,framesqt,refwave}/`. **Every bit our
 
 ## Task 4 — Registration (T6)
 
-**Files:** `crates/omnimodemd/src/mode/mod.rs`, `registry.rs`, `proto/*.proto`, `crates/dsp/src/modes/mod.rs`, registry unit test.
+**Files:** `crates/omnimodem/src/mode/mod.rs`, `registry.rs`, `proto/*.proto`, `crates/dsp/src/modes/mod.rs`, registry unit test.
 
 - [ ] `ModeConfig::Js8 { submode: Js8Submode }` + `parse` (`"js8"`→Normal default; `"js8:submode=fast"` or bare `"js8-fast"` — pick one, match the existing `cw:wpm=` convention) + `to_mode_string`/`label`. `registry.rs`: `demod_kind` (windowed, `window_s=period_s=txSec`) + `build_modulator` + `native_rate=12000` + `tx_slot_s=txSec` arms. **Proto decision:** carry `submode` as a `Js8Params` proto message (regenerate Go proto at T8) *or* as a label tail (no proto) — record the choice here mirroring how W1 handled the FST4 T/R period. Registry unit test asserting each submode round-trips through `parse`/`to_mode_string`.
 

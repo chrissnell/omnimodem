@@ -30,7 +30,7 @@ design doc, the plan files, and the proto keep their existing roles.
 
 ## The shape of the system, in three sentences
 
-The daemon (`omnimodemd`, Rust) is a hard split between an **async gRPC control
+The daemon (`omnimodem`, Rust) is a hard split between an **async gRPC control
 edge** and a **synchronous DSP/audio/PTT core**, bridged by an `mpsc` command queue
 and two `tokio::broadcast` event rings (lossless frames, lossy telemetry). The DSP
 itself is a pure, daemon-independent crate (`omnimodem-dsp`) built from composable,

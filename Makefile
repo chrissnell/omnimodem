@@ -1,7 +1,7 @@
 # Omnimodem build orchestration.
 #
 #   make            build both the modem daemon and the TUI client (release)
-#   make modem      build omnimodemd  → target/release/omnimodemd
+#   make modem      build omnimodem  → target/release/omnimodem
 #   make tui        build the TUI     → bin/omnimodem-tui
 #   make proto      regenerate the TUI's Go gRPC bindings (needs protoc + plugins)
 #   make test       run Rust + Go test suites
@@ -16,14 +16,14 @@
 
 TUI_DIR := clients/omnimodem-tui
 TUI_BIN := bin/omnimodem-tui
-MODEM_BIN := target/release/omnimodemd
+MODEM_BIN := target/release/omnimodem
 
 .PHONY: all modem tui proto test test-modem test-tui run-modem run-tui clean help
 
 all: modem tui ## Build the daemon and the TUI
 
-modem: ## Build omnimodemd (release) → target/release/omnimodemd
-	cargo build --release -p omnimodemd
+modem: ## Build omnimodem (release) → target/release/omnimodem
+	cargo build --release -p omnimodem
 
 tui: ## Build the TUI client → bin/omnimodem-tui
 	cd $(TUI_DIR) && go build -o $(CURDIR)/$(TUI_BIN) ./cmd/omnimodem-tui

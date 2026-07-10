@@ -13,12 +13,12 @@
 ## File Structure
 
 - `proto/omnimodem.proto` — add `SetAudioGain` RPC + request/response (additive, per `proto/VERSIONING.md`).
-- `crates/omnimodemd/src/core/gain.rs` — **new** `AudioGain` shared-cell type (the only new file).
-- `crates/omnimodemd/src/core/command.rs` — `Command::SetAudioGain`.
-- `crates/omnimodemd/src/core/mod.rs` — own the per-channel `AudioGain` map, create at `configure_audio`, clone into workers at spawn, handle the command.
-- `crates/omnimodemd/src/core/rx_worker.rs` — apply `rx_gain` to captured samples.
-- `crates/omnimodemd/src/core/tx_worker.rs` — apply `tx_gain` before `i16` conversion.
-- `crates/omnimodemd/src/grpc/service.rs` — `set_audio_gain` handler.
+- `crates/omnimodem/src/core/gain.rs` — **new** `AudioGain` shared-cell type (the only new file).
+- `crates/omnimodem/src/core/command.rs` — `Command::SetAudioGain`.
+- `crates/omnimodem/src/core/mod.rs` — own the per-channel `AudioGain` map, create at `configure_audio`, clone into workers at spawn, handle the command.
+- `crates/omnimodem/src/core/rx_worker.rs` — apply `rx_gain` to captured samples.
+- `crates/omnimodem/src/core/tx_worker.rs` — apply `tx_gain` before `i16` conversion.
+- `crates/omnimodem/src/grpc/service.rs` — `set_audio_gain` handler.
 
 Convention note: existing phase plans live in `docs/plans/`; this plan follows that location. This plan is independent of the flexible-audio-device-binding plan; if both land, apply them in either order — the only shared file is `core/mod.rs` (`configure_audio` and `try_spawn_workers`), where the edits touch different lines.
 
@@ -27,13 +27,13 @@ Convention note: existing phase plans live in `docs/plans/`; this plan follows t
 ### Task 1: The `AudioGain` shared-cell type
 
 **Files:**
-- Create: `crates/omnimodemd/src/core/gain.rs`
-- Modify: `crates/omnimodemd/src/core/mod.rs` (add `mod gain;` / `pub(crate) use`)
-- Test: `crates/omnimodemd/src/core/gain.rs` (inline `#[cfg(test)]`)
+- Create: `crates/omnimodem/src/core/gain.rs`
+- Modify: `crates/omnimodem/src/core/mod.rs` (add `mod gain;` / `pub(crate) use`)
+- Test: `crates/omnimodem/src/core/gain.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/omnimodemd/src/core/gain.rs`:
+Create `crates/omnimodem/src/core/gain.rs`:
 
 ```rust
 //! Per-channel runtime audio gain: lock-free linear multipliers for RX and TX,
@@ -119,7 +119,7 @@ mod tests {
 
 - [ ] **Step 2: Wire the module in**
 
-In `crates/omnimodemd/src/core/mod.rs`, add alongside the other `mod` declarations (near `mod command;` / `mod rx_worker;`):
+In `crates/omnimodem/src/core/mod.rs`, add alongside the other `mod` declarations (near `mod command;` / `mod rx_worker;`):
 
 ```rust
 mod gain;
@@ -128,13 +128,13 @@ pub(crate) use gain::AudioGain;
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo test -p omnimodemd core::gain 2>&1 | tail -20`
+Run: `cargo test -p omnimodem core::gain 2>&1 | tail -20`
 Expected: PASS (3 tests).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/gain.rs crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/gain.rs crates/omnimodem/src/core/mod.rs
 git commit -m "core: add AudioGain shared-cell type for runtime RX/TX gain"
 ```
 
@@ -143,8 +143,8 @@ git commit -m "core: add AudioGain shared-cell type for runtime RX/TX gain"
 ### Task 2: RX worker applies `rx_gain`
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/rx_worker.rs:46-103` (streaming) and `:111-182` (windowed)
-- Test: `crates/omnimodemd/src/core/rx_worker.rs` (tests module)
+- Modify: `crates/omnimodem/src/core/rx_worker.rs:46-103` (streaming) and `:111-182` (windowed)
+- Test: `crates/omnimodem/src/core/rx_worker.rs` (tests module)
 
 - [ ] **Step 1: Add a `gain: AudioGain` parameter to both spawners**
 
@@ -198,17 +198,17 @@ If constructing a precisely-calibrated quiet corpus is impractical in-tree, inst
 
 - [ ] **Step 4: Update all existing `spawn_streaming` / `spawn_windowed` call sites**
 
-The only production caller is `try_spawn_workers` in `core/mod.rs` (Task 4 wires the real gain there). Every existing **test** that calls `spawn_streaming`/`spawn_windowed` must pass `crate::core::AudioGain::default()` as the new argument. Find them: `rg 'spawn_streaming|spawn_windowed' crates/omnimodemd/src` and add the default to each test call.
+The only production caller is `try_spawn_workers` in `core/mod.rs` (Task 4 wires the real gain there). Every existing **test** that calls `spawn_streaming`/`spawn_windowed` must pass `crate::core::AudioGain::default()` as the new argument. Find them: `rg 'spawn_streaming|spawn_windowed' crates/omnimodem/src` and add the default to each test call.
 
 - [ ] **Step 5: Run the RX worker tests**
 
-Run: `cargo test -p omnimodemd rx_worker 2>&1 | tail -20`
+Run: `cargo test -p omnimodem rx_worker 2>&1 | tail -20`
 Expected: PASS, including the new gain test and all pre-existing decode tests (unity-gain default leaves them unchanged).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/rx_worker.rs
+git add crates/omnimodem/src/core/rx_worker.rs
 git commit -m "rx_worker: apply runtime rx_gain to captured samples"
 ```
 
@@ -217,8 +217,8 @@ git commit -m "rx_worker: apply runtime rx_gain to captured samples"
 ### Task 3: TX worker applies `tx_gain`
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/tx_worker.rs:41-55` (`TxWorkerCfg`), `:118-141` (`run`)
-- Test: `crates/omnimodemd/src/core/tx_worker.rs:226-270` (tests module)
+- Modify: `crates/omnimodem/src/core/tx_worker.rs:41-55` (`TxWorkerCfg`), `:118-141` (`run`)
+- Test: `crates/omnimodem/src/core/tx_worker.rs:226-270` (tests module)
 
 - [ ] **Step 1: Add `gain` to `TxWorkerCfg`**
 
@@ -245,7 +245,7 @@ In `run` (lines 140-141), change the PCM conversion to scale by the live TX gain
 
 - [ ] **Step 3: Update the existing TX worker test + any other constructors**
 
-The test `worker_modulates_and_plays_a_queued_text_frame` (line 226) builds a `TxWorkerCfg`. Add `gain: crate::core::AudioGain::default(),` to that literal. Search for any other `TxWorkerCfg {` construction (`rg 'TxWorkerCfg' crates/omnimodemd/src`) and add the field there too — including the real one in `core/mod.rs::try_spawn_workers` (Task 4 sets it to the channel's real gain).
+The test `worker_modulates_and_plays_a_queued_text_frame` (line 226) builds a `TxWorkerCfg`. Add `gain: crate::core::AudioGain::default(),` to that literal. Search for any other `TxWorkerCfg {` construction (`rg 'TxWorkerCfg' crates/omnimodem/src`) and add the field there too — including the real one in `core/mod.rs::try_spawn_workers` (Task 4 sets it to the channel's real gain).
 
 - [ ] **Step 4: Write the failing gain test**
 
@@ -265,13 +265,13 @@ Use the existing backend's captured-`played` buffer (the test at line 268 alread
 
 - [ ] **Step 5: Run the TX worker tests**
 
-Run: `cargo test -p omnimodemd tx_worker 2>&1 | tail -20`
+Run: `cargo test -p omnimodem tx_worker 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/tx_worker.rs
+git add crates/omnimodem/src/core/tx_worker.rs
 git commit -m "tx_worker: apply runtime tx_gain before i16 conversion"
 ```
 
@@ -280,8 +280,8 @@ git commit -m "tx_worker: apply runtime tx_gain before i16 conversion"
 ### Task 4: Core owns the per-channel gain and wires it into workers
 
 **Files:**
-- Modify: `crates/omnimodemd/src/core/mod.rs:100-115` (`LiveBindings`), `:289-327` (`configure_audio`), `:351-419` (`try_spawn_workers`)
-- Test: `crates/omnimodemd/src/core/mod.rs` (tests module)
+- Modify: `crates/omnimodem/src/core/mod.rs:100-115` (`LiveBindings`), `:289-327` (`configure_audio`), `:351-419` (`try_spawn_workers`)
+- Test: `crates/omnimodem/src/core/mod.rs` (tests module)
 
 - [ ] **Step 1: Add a gain map to `LiveBindings`**
 
@@ -314,13 +314,13 @@ Pass `gain.clone()` as the new last argument to `RxWorker::spawn_streaming(...)`
 
 - [ ] **Step 4: Run the core tests**
 
-Run: `cargo test -p omnimodemd core:: 2>&1 | tail -20`
+Run: `cargo test -p omnimodem core:: 2>&1 | tail -20`
 Expected: PASS (existing behavior unchanged at unity gain).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/omnimodemd/src/core/mod.rs
+git add crates/omnimodem/src/core/mod.rs
 git commit -m "core: own per-channel AudioGain and pass it to RX/TX workers"
 ```
 
@@ -330,10 +330,10 @@ git commit -m "core: own per-channel AudioGain and pass it to RX/TX workers"
 
 **Files:**
 - Modify: `proto/omnimodem.proto` (RPC + messages)
-- Modify: `crates/omnimodemd/src/core/command.rs:13-68`
-- Modify: `crates/omnimodemd/src/core/mod.rs` (command dispatch)
-- Modify: `crates/omnimodemd/src/grpc/service.rs`
-- Test: `crates/omnimodemd/src/core/mod.rs` and/or `grpc` tests
+- Modify: `crates/omnimodem/src/core/command.rs:13-68`
+- Modify: `crates/omnimodem/src/core/mod.rs` (command dispatch)
+- Modify: `crates/omnimodem/src/grpc/service.rs`
+- Test: `crates/omnimodem/src/core/mod.rs` and/or `grpc` tests
 
 - [ ] **Step 1: Add the proto RPC and messages**
 
@@ -433,13 +433,13 @@ Match the existing core test harness style (drive real `Command`s over the `mpsc
 
 - [ ] **Step 6: Run the build and tests**
 
-Run: `cargo build -p omnimodemd && cargo test -p omnimodemd 2>&1 | tail -30`
+Run: `cargo build -p omnimodem && cargo test -p omnimodem 2>&1 | tail -30`
 Expected: PASS across the crate.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add proto/omnimodem.proto crates/omnimodemd/src/core/command.rs crates/omnimodemd/src/core/mod.rs crates/omnimodemd/src/grpc/service.rs
+git add proto/omnimodem.proto crates/omnimodem/src/core/command.rs crates/omnimodem/src/core/mod.rs crates/omnimodem/src/grpc/service.rs
 git commit -m "feat: SetAudioGain RPC for runtime RX/TX gain control"
 ```
 
@@ -451,12 +451,12 @@ git commit -m "feat: SetAudioGain RPC for runtime RX/TX gain control"
 
 - [ ] **Step 1: Clippy the crate**
 
-Run: `cargo clippy -p omnimodemd --all-targets 2>&1 | tail -30`
+Run: `cargo clippy -p omnimodem --all-targets 2>&1 | tail -30`
 Expected: no errors. Fix any unused-import notes from the new `gain` module wiring.
 
 - [ ] **Step 2: Full test run**
 
-Run: `cargo test -p omnimodemd 2>&1 | tail -30`
+Run: `cargo test -p omnimodem 2>&1 | tail -30`
 Expected: all pass, including `core::gain`, `rx_worker`, `tx_worker`, core command, and gRPC tests.
 
 - [ ] **Step 3: Commit any fixups**

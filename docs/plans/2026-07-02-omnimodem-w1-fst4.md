@@ -29,8 +29,8 @@
 |---|---|
 | `crates/dsp/src/fec/mod.rs` | `pub mod ldpc_fst4; pub mod fst4_tables;`. |
 | `crates/dsp/src/modes/mod.rs` | `pub mod fst4;`. |
-| `crates/omnimodemd/src/mode/mod.rs` | `ModeConfig::Fst4 { tr_s }` + `Fst4w { tr_s }` variants; `parse`/`to_mode_string`/`label` arms. |
-| `crates/omnimodemd/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`native_rate`/`tx_slot_s` arms (windowed, parametric period). |
+| `crates/omnimodem/src/mode/mod.rs` | `ModeConfig::Fst4 { tr_s }` + `Fst4w { tr_s }` variants; `parse`/`to_mode_string`/`label` arms. |
+| `crates/omnimodem/src/mode/registry.rs` | `demod_kind`/`build_modulator`/`native_rate`/`tx_slot_s` arms (windowed, parametric period). |
 | `clients/omnimodem-tui/internal/app/modes.go` | `fst4` (sequencer, parametric slot) + `fst4w` (beacon) rows + `modeParamsFor` arms. |
 | `crates/dsp/tests/kat.rs` | FST4 KAT (codeword/tones bit-exact; audio FP-tolerance) + `#[ignore]` cross-decode gate. |
 | `crates/dsp/tests/ber.rs` | FST4/FST4W decode-rate sweep (AWGN + Watterson) with committed floors. |
@@ -424,7 +424,7 @@ impl BlockDemodulator for Fst4Demod {
 
 ## Task 6 — Daemon registry wiring, parametric over the T/R grid (T6)
 
-**Files:** `crates/dsp/src/modes/mod.rs`, `crates/omnimodemd/src/mode/mod.rs`, `crates/omnimodemd/src/mode/registry.rs`, (optionally `proto/*.proto`).
+**Files:** `crates/dsp/src/modes/mod.rs`, `crates/omnimodem/src/mode/mod.rs`, `crates/omnimodem/src/mode/registry.rs`, (optionally `proto/*.proto`).
 
 - [ ] **Step 1: Decide the param surface.** FST4/FST4W's only real param is the T/R period. **Decision: carry it as a bare-label tail** (`fst4:tr=60`, `fst4w:tr=120`) exactly like `cw:wpm=25` — no new proto message, matching the existing zero-param windowed modes and keeping the TUI simple (T8 uses `modeParamsFor`'s label-tail defaulting). Record this in the mode file's doc comment. (If a later review wants structured params, add `Fst4Params { tr_seconds }` to the proto and regen — noted, not done.)
 
@@ -438,7 +438,7 @@ impl BlockDemodulator for Fst4Demod {
 
 - [ ] **Step 5: Run → PASS.** Extend the existing `labels_are_distinct_and_non_empty` and `modulators_build_for_every_mode` lists with the two new variants.
 
-- [ ] **Step 6: Commit.** `feat(omnimodemd): register FST4/FST4W (parametric T/R period)`.
+- [ ] **Step 6: Commit.** `feat(omnimodem): register FST4/FST4W (parametric T/R period)`.
 
 ---
 

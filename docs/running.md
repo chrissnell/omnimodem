@@ -1,6 +1,6 @@
 # Building and running omnimodem + the TUI
 
-Two processes: the **modem daemon** (`omnimodemd`, Rust) and the **TUI client**
+Two processes: the **modem daemon** (`omnimodem`, Rust) and the **TUI client**
 (`omnimodem-tui`, Go). The TUI talks to the daemon over a gRPC Unix-domain socket.
 
 ## Prerequisites
@@ -17,7 +17,7 @@ changes.
 ## Build
 
 ```sh
-make            # builds both → target/release/omnimodemd and bin/omnimodem-tui
+make            # builds both → target/release/omnimodem and bin/omnimodem-tui
 # or individually:
 make modem
 make tui
@@ -30,7 +30,7 @@ Start the daemon first, then the TUI — in two terminals:
 ```sh
 # terminal 1 — the modem daemon
 make run-modem
-#   (or: ./target/release/omnimodemd)
+#   (or: ./target/release/omnimodem)
 # It logs the socket it bound, e.g. /tmp/omnimodem/omnimodem.sock
 
 # terminal 2 — the TUI

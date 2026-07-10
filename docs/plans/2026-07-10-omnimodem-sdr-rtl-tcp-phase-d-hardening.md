@@ -33,7 +33,7 @@ Four deliverables:
 ## Constraints
 
 - `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0`. **Never run `cargo fmt`.**
-- Keep edits localized to `crates/omnimodemd/src/audio/rtlsdr.rs` (shares the file
+- Keep edits localized to `crates/omnimodem/src/audio/rtlsdr.rs` (shares the file
   with B/C — both merged, so conflict surface is only against `main`).
 - No stubs. Docs ship in this PR.
 - TDD: fake-`rtl_tcp`-server tests (drop-mid-stream → reconnect+resume+re-apply; slow
@@ -128,6 +128,6 @@ Four deliverables:
 
 ## Verification
 
-- `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo test -p omnimodemd`
+- `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo test -p omnimodem`
 - `CARGO_TARGET_DIR=/tmp/omni-target CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings`
 - Paste output into the PR. Commit as `chrissnell`, meaningful branch name.

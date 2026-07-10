@@ -49,7 +49,7 @@ reads "no settings".
 
 A few modes (FST4, JS8, MSK144) have no typed `ModeParams` oneof variant yet, but
 the daemon still accepts their extra parameters through the **mode string's
-`:key=value` tail** (`ModeConfig::parse` in `crates/omnimodemd/src/mode/mod.rs` —
+`:key=value` tail** (`ModeConfig::parse` in `crates/omnimodem/src/mode/mod.rs` —
 e.g. `fst4:tr=300`, `js8:sub=fast`, `msk144:freq=1200`). For these, declare their
 `modeFields` as usual and add a case to `modeStringFor` (`modes.go`) that appends
 the tail from the form values; `persistAll` sends that as `ConfigureChannel.mode`.

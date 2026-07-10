@@ -2,11 +2,11 @@
 
 The "rock-solid hardware" half of the daemon: stable device identity, pluggable
 audio, robust PTT, the KISS bridge, and the authorization layer. Source under
-[`../../crates/omnimodemd/src/`](../../crates/omnimodemd/src/).
+[`../../crates/omnimodem/src/`](../../crates/omnimodem/src/).
 
 ## Stable device identity — `DeviceId`
 
-[`ids.rs`](../../crates/omnimodemd/src/ids.rs). One cross-platform identity that
+[`ids.rs`](../../crates/omnimodem/src/ids.rs). One cross-platform identity that
 survives renames and hotplug, and is the key everything (config, PTT registry,
 hotplug diff) hangs off of. Variants, in rough precedence of durability:
 
@@ -28,7 +28,7 @@ synthesizes a capture-only descriptor.
 
 ## Audio backends
 
-`trait AudioBackend` ([`audio/backend.rs`](../../crates/omnimodemd/src/audio/backend.rs))
+`trait AudioBackend` ([`audio/backend.rs`](../../crates/omnimodem/src/audio/backend.rs))
 abstracts capture + playback so the DSP path is hardware-agnostic and CI can run
 without hardware.
 
@@ -45,7 +45,7 @@ submitted/drained sample counts (the watermark the no-sleep TX cycle times off).
 
 ### `rtl_tcp` SDR backend
 
-[`audio/rtlsdr.rs`](../../crates/omnimodemd/src/audio/rtlsdr.rs) (`RtlTcpBackend`).
+[`audio/rtlsdr.rs`](../../crates/omnimodem/src/audio/rtlsdr.rs) (`RtlTcpBackend`).
 Connects to a bare `rtl_tcp` server (no gqrx/`rtl_fm`/`socat`), reads the 12-byte
 `RTL0` header, sends 5-byte `[opcode][u32 BE]` commands (center freq, rate, gain
 mode/level, ppm), and streams raw u8 IQ. The capture thread runs the Plan-1 DSP
@@ -82,17 +82,17 @@ every downstream mode (AFSK1200/APRS first) works unmodified. Playback is
 
 ### The 48 kHz ceiling
 
-[`audio/mod.rs`](../../crates/omnimodemd/src/audio/mod.rs) (`MAX_SAMPLE_RATE`) and
-[`audio/alsa.rs`](../../crates/omnimodemd/src/audio/alsa.rs). Capture never opens
+[`audio/mod.rs`](../../crates/omnimodem/src/audio/mod.rs) (`MAX_SAMPLE_RATE`) and
+[`audio/alsa.rs`](../../crates/omnimodem/src/audio/alsa.rs). Capture never opens
 above 48 kHz. ALSA `plughw` will happily advertise rates the codec can't truly honor
 (e.g. 192 kHz), silently desyncing bit timing and failing FCS on every frame.
-Resampling ([`audio/resample.rs`](../../crates/omnimodemd/src/audio/resample.rs),
+Resampling ([`audio/resample.rs`](../../crates/omnimodem/src/audio/resample.rs),
 `RationalResampler`) is **additive** — it bridges the capped capture rate to the
 mode's native rate; it does not replace the defensive rate/format selection.
 
 ### Capture fan-out
 
-[`audio/fanout.rs`](../../crates/omnimodemd/src/audio/fanout.rs). One capture stream
+[`audio/fanout.rs`](../../crates/omnimodem/src/audio/fanout.rs). One capture stream
 can feed several demods (e.g. 1200 + 9600 on the same audio, or SDR slices). Opt-in
 via `ConfigureAudio.fanout`; 1:1 is the default and bypasses it.
 
@@ -113,7 +113,7 @@ enumerations to emit `Arrived`/`Departed`; the core acts on those (see
 ## PTT
 
 `trait PttDriver` + structured `PttError`
-([`ptt/mod.rs`](../../crates/omnimodemd/src/ptt/mod.rs)). `PttError` distinguishes
+([`ptt/mod.rs`](../../crates/omnimodem/src/ptt/mod.rs)). `PttError` distinguishes
 device-gone vs permission-denied vs busy, so callers (and hotplug eviction) can
 react specifically instead of parsing strings.
 
@@ -141,7 +141,7 @@ rather than sleeping, and aborts promptly on cancel (mode change).
 
 ## KISS bridge
 
-[`kiss/`](../../crates/omnimodemd/src/kiss/). `ConfigureKissListener` starts a
+[`kiss/`](../../crates/omnimodem/src/kiss/). `ConfigureKissListener` starts a
 per-channel KISS-over-TCP listener (`kiss/listener.rs::KissRegistry`) so legacy TNC
 apps (Direwolf, APRX, pat, Xastir) can drive a **packet** channel (AFSK 1200 AX.25).
 `kiss/codec.rs` implements FEND/FESC framing: inbound KISS data frames become
@@ -150,7 +150,7 @@ modes are eligible.
 
 ## Authorization
 
-[`authz/`](../../crates/omnimodemd/src/authz/). Opening the control socket means the
+[`authz/`](../../crates/omnimodem/src/authz/). Opening the control socket means the
 ability to key a transmitter under the operator's license, so authz is enforced even
 locally.
 

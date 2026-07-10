@@ -4,7 +4,7 @@
 
 **Goal:** Bring omnimodem to full mode parity with fldigi, WSJT-X, and JS8Call by **porting each mode from its upstream reference implementation** — not clean-room reimplementing — so every mode is bit-exact-compatible on the air and cross-decodes with the reference binary in both directions.
 
-**Architecture:** Each mode is a self-contained assembly under `crates/dsp/src/modes/` that wires existing/new building blocks into a `Demodulator`/`BlockDemodulator` + `Modulator`, then one arm in `crates/omnimodemd/src/mode/registry.rs`. The **port** is verified stage-by-stage against golden vectors extracted from the reference, plus an end-to-end bidirectional cross-decode gate. This is a **program of independent phases** (per the writing-plans scope check): a shared porting/verification harness (Phase P0), then two parallel mode tracks — fldigi (Phases 7–14) and WSJT-X/JS8 (Phases W1–W5). Each phase produces shippable, tested modes on its own and gets its own bite-sized executable plan when picked up; **this document is the master plan** — it specifies P0 in full and defines the uniform per-mode port task template + per-phase scope that the phase plans instantiate.
+**Architecture:** Each mode is a self-contained assembly under `crates/dsp/src/modes/` that wires existing/new building blocks into a `Demodulator`/`BlockDemodulator` + `Modulator`, then one arm in `crates/omnimodem/src/mode/registry.rs`. The **port** is verified stage-by-stage against golden vectors extracted from the reference, plus an end-to-end bidirectional cross-decode gate. This is a **program of independent phases** (per the writing-plans scope check): a shared porting/verification harness (Phase P0), then two parallel mode tracks — fldigi (Phases 7–14) and WSJT-X/JS8 (Phases W1–W5). Each phase produces shippable, tested modes on its own and gets its own bite-sized executable plan when picked up; **this document is the master plan** — it specifies P0 in full and defines the uniform per-mode port task template + per-phase scope that the phase plans instantiate.
 
 **Tech Stack:** Rust (edition 2021, workspace). Reuses the `omnimodem-dsp` blocks (`frontend`, `sync`, `fec`, `framing`, `ensemble`) and the conformance harness in `crates/dsp/tests/` (`kat.rs`, `ber.rs`, `loopback.rs`, `roundtrip.rs`, `vectors/`, `testutil`). Reference sources are checked out in-tree: `fldigi/src/`, `wsjtx/lib/`, `js8call/`.
 
@@ -77,7 +77,7 @@ Submode grids (Olivia/Contestia/MFSK/THOR/DominoEX/PSK-rate/Q65/JS8/…) are **p
 - Create: `crates/dsp/tests/vectors/README.md` (provenance/extraction convention) — ✅
 - Create: `scratch/refvectors/` extraction driver programs that dump reference intermediates (scratch per CLAUDE.md) — per-family, authored at each phase's T1
 - Modify: `crates/dsp/src/types.rs` (add `FramePayload::Image`) — ✅
-- Modify: `crates/omnimodemd/src/core/rx_worker.rs` (`frame_bytes` Image arm) — ✅
+- Modify: `crates/omnimodem/src/core/rx_worker.rs` (`frame_bytes` Image arm) — ✅
 - Test: `crates/dsp/src/types.rs` inline tests — ✅
 
 **gRPC surfacing — deliberately deferred to Phase 10 (YAGNI).** There are zero `Image` producers until the first facsimile mode (Hell, Phase 10), and the raster semantics differ by mode (Hell emits a continuous column stream; WEFAX a full IOC-scaled frame). Adding a structured proto `Image` message now would be speculative surface with no producer. Instead `frame_bytes` flattens `Image` losslessly onto the existing opaque `RxFrame.data` (2-byte big-endian `width` prefix + row-major gray), and the structured proto message is designed alongside Phase 10 when the semantics are known.
@@ -123,12 +123,12 @@ Expected: FAIL — no `Image` variant.
 - [ ] **Step 4: Run tests, verify pass**
 
 Run: `cargo test -p omnimodem-dsp --lib types::tests`
-Expected: PASS. Then satisfy the two other exhaustive matches the new variant touches: `payload_kind` in `crates/dsp/src/modes/afsk1200.rs` (add `Image { .. } => "image"`) and `frame_bytes` in `crates/omnimodemd/src/core/rx_worker.rs` (width-prefixed encoding, see gRPC note above). `tx_worker`/`wavtool` need no change (they construct payloads or use a wildcard).
+Expected: PASS. Then satisfy the two other exhaustive matches the new variant touches: `payload_kind` in `crates/dsp/src/modes/afsk1200.rs` (add `Image { .. } => "image"`) and `frame_bytes` in `crates/omnimodem/src/core/rx_worker.rs` (width-prefixed encoding, see gRPC note above). `tx_worker`/`wavtool` need no change (they construct payloads or use a wildcard).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/dsp/src/types.rs crates/dsp/src/modes/afsk1200.rs crates/omnimodemd/src/core/rx_worker.rs
+git add crates/dsp/src/types.rs crates/dsp/src/modes/afsk1200.rs crates/omnimodem/src/core/rx_worker.rs
 git commit -m "feat(dsp): add Image raster FramePayload for facsimile/fax modes"
 ```
 
@@ -156,7 +156,7 @@ git commit -m "docs(test): reference-vector extraction convention for mode ports
 
 ## fldigi track — reference `fldigi/src/`
 
-Each phase below instantiates the **per-mode port task template** (T1–T9) for its modes. File structure is uniform: `Create: crates/dsp/src/modes/<mode>.rs`, `Modify: crates/dsp/src/modes/mod.rs`, `crates/omnimodemd/src/mode/{mod.rs,registry.rs}`, `proto/*.proto` (params message, if any), `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs,vectors/}`, **and the TUI: `clients/omnimodem-tui/internal/app/modes.go` (+ `internal/pb` regen, + a new view under `internal/app/` for any non-`chat`/`ft8` shape)**. New building blocks are listed per phase and each is KAT-gated in isolation **before** any mode uses it.
+Each phase below instantiates the **per-mode port task template** (T1–T9) for its modes. File structure is uniform: `Create: crates/dsp/src/modes/<mode>.rs`, `Modify: crates/dsp/src/modes/mod.rs`, `crates/omnimodem/src/mode/{mod.rs,registry.rs}`, `proto/*.proto` (params message, if any), `crates/dsp/tests/{kat.rs,ber.rs,loopback.rs,vectors/}`, **and the TUI: `clients/omnimodem-tui/internal/app/modes.go` (+ `internal/pb` regen, + a new view under `internal/app/` for any non-`chat`/`ft8` shape)**. New building blocks are listed per phase and each is KAT-gated in isolation **before** any mode uses it.
 
 ### Phase 7 — PSK family
 - **Reference:** `fldigi/src/psk/{psk.cxx,pskvaricode.cxx,pskcoeff.cxx,pskeval.cxx}`.

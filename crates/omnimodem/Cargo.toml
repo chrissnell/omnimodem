@@ -1,12 +1,12 @@
 [package]
-name = "omnimodemd"
+name = "omnimodem"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "omnimodemd"
+name = "omnimodem"
 path = "src/main.rs"
 
 [dependencies]

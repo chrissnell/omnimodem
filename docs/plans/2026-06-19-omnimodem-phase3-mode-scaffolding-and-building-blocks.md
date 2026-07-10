@@ -4,7 +4,7 @@
 
 **Goal:** Build the mode framework (`Demodulator`/`BlockDemodulator`/`Modulator` traits, `ModeCaps`, a parametric `ModeConfig`, a one-module mode registry, and the `ParallelDemodulator<D>` ensemble) on top of the soft-LLR contract, plus the individually-testable DSP/FEC/framing building blocks the Phase-4 modes (AFSK 1200, FT8, CW, RTTY, PSK31) need — all gated by a conformance harness, shipping **no end-user mode**.
 
-**Architecture:** A new pure library crate `crates/dsp` (`omnimodem-dsp`) holds the building blocks and the mode-API traits, with the soft-LLR (`Llr`) type as the spine between detector/demapper and FEC decoder. It has **no** dependency on `omnimodemd`, so it compiles and KAT-tests in isolation on every PR. `omnimodemd` gains a thin `mode` module that defines the parametric `ModeConfig`, the registry that maps a config to a boxed demod/mod, and the wiring from a channel's `mode` string into that registry. Phase 3 registers only a `NullMode` framework fixture — the gRPC surface still carries `mode = "none"`; real modes and their parametric proto land in Phase 4.
+**Architecture:** A new pure library crate `crates/dsp` (`omnimodem-dsp`) holds the building blocks and the mode-API traits, with the soft-LLR (`Llr`) type as the spine between detector/demapper and FEC decoder. It has **no** dependency on `omnimodem`, so it compiles and KAT-tests in isolation on every PR. `omnimodem` gains a thin `mode` module that defines the parametric `ModeConfig`, the registry that maps a config to a boxed demod/mod, and the wiring from a channel's `mode` string into that registry. Phase 3 registers only a `NullMode` framework fixture — the gRPC surface still carries `mode = "none"`; real modes and their parametric proto land in Phase 4.
 
 **Tech Stack:** Rust (edition 2021, workspace), `rustfft` + `num-complex` (STFT/FFT), `thiserror` (error types), `proptest` (property round-trips), `insta` (modulator golden snapshots). Existing crate idioms: hardware/IO behind traits for hardware-free CI; pure functions with inline `#[cfg(test)]` unit tests; integration/KAT tests under `tests/`.
 
@@ -39,7 +39,7 @@
 
 ## File Structure
 
-New crate **`crates/dsp`** (`omnimodem-dsp`) — pure, no `omnimodemd` dependency:
+New crate **`crates/dsp`** (`omnimodem-dsp`) — pure, no `omnimodem` dependency:
 
 ```
 crates/dsp/Cargo.toml                 # lib crate; rustfft, num-complex, thiserror; dev: proptest, insta
@@ -97,14 +97,14 @@ crates/dsp/tests/vectors/             # checked-in KAT vector files (hex/json) +
 crates/dsp/src/testutil.rs            # seeded AWGN source, hex helpers, Watterson stub (cfg feature "testutil")
 ```
 
-Changes to **`crates/omnimodemd`**:
+Changes to **`crates/omnimodem`**:
 
 ```
-crates/omnimodemd/Cargo.toml          # add `omnimodem-dsp = { path = "../dsp" }`
-crates/omnimodemd/src/mode/mod.rs     # ModeConfig (parametric enum), ModeKind; re-export dsp mode-api
-crates/omnimodemd/src/mode/registry.rs# build_demod / build_modulator from ModeConfig; NullMode fixture
-crates/omnimodemd/src/supervisor/channel.rs  # ChannelConfig.mode: String -> retains string, parsed via mode::parse
-crates/omnimodemd/src/lib.rs          # `pub mod mode;`
+crates/omnimodem/Cargo.toml          # add `omnimodem-dsp = { path = "../dsp" }`
+crates/omnimodem/src/mode/mod.rs     # ModeConfig (parametric enum), ModeKind; re-export dsp mode-api
+crates/omnimodem/src/mode/registry.rs# build_demod / build_modulator from ModeConfig; NullMode fixture
+crates/omnimodem/src/supervisor/channel.rs  # ChannelConfig.mode: String -> retains string, parsed via mode::parse
+crates/omnimodem/src/lib.rs          # `pub mod mode;`
 Cargo.toml (workspace)                # add "crates/dsp" member; workspace deps rustfft/num-complex/proptest/insta
 ```
 
@@ -125,7 +125,7 @@ In root `Cargo.toml`, add the crate to `members` and the new shared deps:
 
 ```toml
 [workspace]
-members = ["crates/omnimodemd", "crates/dsp"]
+members = ["crates/omnimodem", "crates/dsp"]
 resolver = "2"
 
 # ...existing [workspace.package] and [workspace.dependencies] unchanged, plus:
@@ -1535,14 +1535,14 @@ Type field, standard exchange, free text, telemetry; **28-bit callsign compressi
 ## Task 34: Parametric `ModeConfig`, registry, and the `NullMode` fixture
 
 **Files:**
-- Modify: `crates/omnimodemd/Cargo.toml` (add `omnimodem-dsp`)
-- Create: `crates/omnimodemd/src/mode/mod.rs`
-- Create: `crates/omnimodemd/src/mode/registry.rs`
-- Modify: `crates/omnimodemd/src/lib.rs` (`pub mod mode;`)
+- Modify: `crates/omnimodem/Cargo.toml` (add `omnimodem-dsp`)
+- Create: `crates/omnimodem/src/mode/mod.rs`
+- Create: `crates/omnimodem/src/mode/registry.rs`
+- Modify: `crates/omnimodem/src/lib.rs` (`pub mod mode;`)
 
 This is the design's "one-module mode registry" — adding a mode later touches **one** module, not five `match` arms. Phase 3 ships **no end-user mode**; the registry registers only a `NullMode` framework fixture (passthrough demod/mod) so the wiring is exercised end-to-end without claiming a mode.
 
-- [ ] **Step 1: Add the dependency** to `crates/omnimodemd/Cargo.toml`:
+- [ ] **Step 1: Add the dependency** to `crates/omnimodem/Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -1660,14 +1660,14 @@ mod tests {
 
 - [ ] **Step 5: Run** the daemon test suite to confirm no regression:
 
-Run: `cargo test -p omnimodemd mode::`
+Run: `cargo test -p omnimodem mode::`
 Expected: PASS (parse strictness + registry tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/omnimodemd/Cargo.toml crates/omnimodemd/src/mode/ crates/omnimodemd/src/lib.rs crates/omnimodemd/src/supervisor/
-git commit -m "omnimodemd: parametric ModeConfig + one-module registry + NullMode fixture"
+git add crates/omnimodem/Cargo.toml crates/omnimodem/src/mode/ crates/omnimodem/src/lib.rs crates/omnimodem/src/supervisor/
+git commit -m "omnimodem: parametric ModeConfig + one-module registry + NullMode fixture"
 ```
 
 ---
@@ -1768,7 +1768,7 @@ fn phase3_exit_criterion() {
 - [ ] **Step 2: Full suite green** —
 
 Run: `cargo test --workspace --features omnimodem-dsp/testutil`
-Expected: PASS across `omnimodem-dsp` (unit + kat + roundtrip + snapshots) and `omnimodemd` (existing Phase-1/2 e2e unaffected; new `mode` tests pass).
+Expected: PASS across `omnimodem-dsp` (unit + kat + roundtrip + snapshots) and `omnimodem` (existing Phase-1/2 e2e unaffected; new `mode` tests pass).
 Run: `cargo clippy --workspace --all-targets -- -D warnings`
 Expected: clean.
 
