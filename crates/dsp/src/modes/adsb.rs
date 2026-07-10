@@ -18,12 +18,14 @@
 mod crc;
 mod message;
 mod ppm;
+mod track;
 
 #[cfg(test)]
 mod tests;
 
 pub use message::{cpr_decode_airborne, encode_identification, AirbornePosition, ModeS};
 pub use ppm::RawFrame;
+pub use track::{Aircraft, AircraftTracker};
 
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
 use crate::types::{Frame, FrameMeta, FramePayload, Sample};
