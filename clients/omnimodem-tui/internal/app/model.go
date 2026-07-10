@@ -2,28 +2,48 @@ package app
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
-	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/config"
+	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 // chanLive is the per-channel live state, fed by the event stream.
 type chanLive struct {
-	name        string
-	mode        string
-	deviceID    string // RX (capture) device
-	txDeviceID  string // TX (playback) device; "" == same as RX
-	pttDeviceID string // PTT device; "" when deviceless or unset
-	pttMethod   pb.PttMethod
-	running     bool
-	rxDbfs      float32
-	txDbfs      float32
-	pttKeyed    bool
-	clockSync   bool
-	clockOff    float64
+	name         string
+	mode         string
+	deviceID     string // RX (capture) device
+	txDeviceID   string // TX (playback) device; "" == same as RX
+	pttDeviceID  string // PTT device; "" when deviceless or unset
+	pttMethod    pb.PttMethod
+	pttTxDelayMs uint32 // per-channel PTT keying lead-in
+	pttTxTailMs  uint32 // per-channel PTT keying tail/hold
+	running      bool
+	rxDbfs       float32
+	txDbfs       float32
+	pttKeyed     bool
+	clockSync    bool
+	clockOff     float64
+	rsidTx       bool   // prepend the mode's RSID burst before each TX
+	rsidRx       bool   // run the RSID detector over received audio
+	lastRsid     string // most recently identified RSID (tag @ freq), "" if none
+
+	// SDR tuner/demod state, folded from the daemon's SdrState event. The daemon
+	// is authoritative for these; the SDR view reads them each render and holds
+	// only its own editing state (step size, entry buffer, gain cursor). haveSdr
+	// is false until the first SdrState arrives (or a tune/gain/config is applied).
+	haveSdr      bool
+	sdrCenterHz  float64
+	sdrOffsetHz  float64
+	sdrFreqHz    float64 // effective demod frequency (center + offset)
+	sdrGainAuto  bool
+	sdrGainDb    float32
+	sdrDemod     pb.DemodMode
+	sdrSquelchDb float32
 }
 
 // Model is the root window manager: it owns the client, the event stream, shared
@@ -43,16 +63,50 @@ type Model struct {
 	stack     []View
 	toast     *ui.Toast
 	// Operator station identity, used by FT8 sequencing and macros. Set on the
-	// Configure screen.
-	myCall string
-	myGrid string
+	// Configure screen and persisted to the client config file (the daemon has
+	// no station-identity field). savedCall/savedGrid track the last values
+	// written so persistIdentity only touches disk on a real change.
+	myCall    string
+	myGrid    string
+	savedCall string
+	savedGrid string
+	// modeParams caches the mode settings last saved from the Configure screen,
+	// per channel. The daemon persists them but doesn't report them back in the
+	// snapshot (ChannelInfo carries only the mode label — see GRA-281), so without
+	// this cache reopening Configure would show mode defaults instead of the values
+	// just saved. Keyed by channel; only trusted when the cached label matches the
+	// channel's current mode.
+	modeParams map[uint32]savedModeParams
+}
+
+// savedModeParams is the last-persisted settings for one channel's mode.
+type savedModeParams struct {
+	label string
+	vals  map[string]float64
 }
 
 func New(c client.ModemClient, addr string) *Model {
+	id := config.Load()
 	return &Model{
 		c: c, addr: addr, version: "dev", live: map[uint32]*chanLive{},
-		myCall: "N0CALL", myGrid: "AA00",
+		myCall: id.Call, myGrid: id.Grid,
+		savedCall: id.Call, savedGrid: id.Grid,
+		modeParams: map[uint32]savedModeParams{},
 	}
+}
+
+// persistIdentity writes the operator call/grid to the client config file when
+// they've changed since the last save. Best-effort: a write failure surfaces as
+// a toast but never blocks the UI, and the values stay live for the session.
+func (m *Model) persistIdentity() {
+	if m.myCall == m.savedCall && m.myGrid == m.savedGrid {
+		return
+	}
+	if err := config.Save(config.Identity{Call: m.myCall, Grid: m.myGrid}); err != nil {
+		m.toast = ui.NewToast("could not save station identity: "+err.Error(), ui.SeverityWarn)
+		return
+	}
+	m.savedCall, m.savedGrid = m.myCall, m.myGrid
 }
 
 func (m *Model) Init() tea.Cmd { return connectCmd(m.c) }
@@ -76,7 +130,11 @@ func (m *Model) applyEvent(ev *pb.Event) {
 				name: ci.GetName(), mode: ci.GetMode(),
 				deviceID: ci.GetDeviceId(), running: ci.GetRunning(),
 				txDeviceID: ci.GetTxDeviceId(), pttDeviceID: ci.GetPttDeviceId(),
-				pttMethod: ci.GetPttMethod(),
+				pttMethod:    ci.GetPttMethod(),
+				pttTxDelayMs: ci.GetPttTxDelayMs(),
+				pttTxTailMs:  ci.GetPttTxTailMs(),
+				rsidTx:       ci.GetRsidTx(),
+				rsidRx:       ci.GetRsidRx(),
 			}
 		}
 	case *pb.Event_AudioLevel:
@@ -90,6 +148,26 @@ func (m *Model) applyEvent(ev *pb.Event) {
 		}
 	case *pb.Event_ChannelConfigured:
 		ensure(k.ChannelConfigured.GetChannel())
+	case *pb.Event_RsidDetected:
+		d := k.RsidDetected
+		label := d.GetTag()
+		if d.GetMode() != "" {
+			label = d.GetMode()
+		}
+		summary := fmt.Sprintf("%s @ %.0f Hz", label, d.GetFreqHz())
+		ensure(d.GetChannel()).lastRsid = summary
+		m.toast = ui.NewToast("RSID: "+summary, ui.SeverityInfo)
+	case *pb.Event_SdrState:
+		s := k.SdrState
+		cl := ensure(s.GetChannel())
+		cl.haveSdr = true
+		cl.sdrCenterHz = s.GetCenterHz()
+		cl.sdrOffsetHz = s.GetOffsetHz()
+		cl.sdrFreqHz = s.GetFreqHz()
+		cl.sdrGainAuto = s.GetGainAuto()
+		cl.sdrGainDb = s.GetGainDb()
+		cl.sdrDemod = s.GetDemodMode()
+		cl.sdrSquelchDb = s.GetSquelchDb()
 	}
 }
 
@@ -164,14 +242,24 @@ func (m *Model) View() string {
 	v := m.top()
 	header := ui.Header(m.connected, m.addr, m.version, m.width)
 	footer := ui.Footer(v.Hints(), m.width)
-	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	// The toast is drawn as an extra line below the footer, so it eats into the
+	// body's height budget — otherwise a full-height view (e.g. the picture
+	// picker) plus a live toast renders taller than the terminal and scrolls the
+	// top off. Reserve its rows (the line plus the "\n" separator) up front.
+	var toastLine string
+	toastH := 0
+	if m.toast != nil {
+		toastLine = m.toast.Line()
+		toastH = lipgloss.Height(toastLine) + 1
+	}
+	bodyH := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - toastH
 	if bodyH < 3 {
 		bodyH = 3
 	}
 	body := ui.Frame(v.Title(), v.Render(m.width-4, bodyH-2), true, m.width, bodyH)
 	out := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
-	if m.toast != nil {
-		out += "\n" + m.toast.Line()
+	if toastH > 0 {
+		out += "\n" + toastLine
 	}
 	return out
 }

@@ -23,10 +23,18 @@ var (
 )
 
 var (
-	// Text styles on the black panel background.
-	Accent = lipgloss.NewStyle().Foreground(ColorAccent)
-	Dim    = lipgloss.NewStyle().Foreground(ColorDim)
-	Title  = lipgloss.NewStyle().Foreground(ColorTitle).Bold(true)
+	// Text styles on the black panel background. Each pins Background(ColorPanel)
+	// explicitly: without it, a styled run ends in a full reset (ESC[0m) that drops
+	// the background to the terminal's own (often dark grey), so any styled snippet
+	// dropped mid-line — a dim hint, an accent value — would show a grey box behind
+	// it. Pinning the panel black keeps every run on the true-black desktop.
+	Accent = lipgloss.NewStyle().Foreground(ColorAccent).Background(ColorPanel)
+	Dim    = lipgloss.NewStyle().Foreground(ColorDim).Background(ColorPanel)
+	Title  = lipgloss.NewStyle().Foreground(ColorTitle).Background(ColorPanel).Bold(true)
+	// Body is plain white-on-black text. Use it for labels and spacers sitting
+	// between styled runs so they carry the panel background too (bare literals
+	// after a styled run's reset would otherwise flash the terminal's own bg).
+	Body = lipgloss.NewStyle().Foreground(ColorFg).Background(ColorPanel)
 
 	// Blue toolbars with bright text — the menu/status bars on the black desktop.
 	MenuBar   = lipgloss.NewStyle().Background(ColorBar).Foreground(ColorFg)

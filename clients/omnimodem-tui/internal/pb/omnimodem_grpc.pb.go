@@ -28,6 +28,7 @@ const (
 	ModemControl_ConfigureChannel_FullMethodName      = "/omnimodem.v1.ModemControl/ConfigureChannel"
 	ModemControl_GetState_FullMethodName              = "/omnimodem.v1.ModemControl/GetState"
 	ModemControl_Transmit_FullMethodName              = "/omnimodem.v1.ModemControl/Transmit"
+	ModemControl_TransmitImage_FullMethodName         = "/omnimodem.v1.ModemControl/TransmitImage"
 	ModemControl_SubscribeEvents_FullMethodName       = "/omnimodem.v1.ModemControl/SubscribeEvents"
 	ModemControl_ListDevices_FullMethodName           = "/omnimodem.v1.ModemControl/ListDevices"
 	ModemControl_ConfigureAudio_FullMethodName        = "/omnimodem.v1.ModemControl/ConfigureAudio"
@@ -40,6 +41,10 @@ const (
 	ModemControl_ConfigureKissListener_FullMethodName = "/omnimodem.v1.ModemControl/ConfigureKissListener"
 	ModemControl_SetAudioGain_FullMethodName          = "/omnimodem.v1.ModemControl/SetAudioGain"
 	ModemControl_ConfigureSpectrum_FullMethodName     = "/omnimodem.v1.ModemControl/ConfigureSpectrum"
+	ModemControl_SetSdrTune_FullMethodName            = "/omnimodem.v1.ModemControl/SetSdrTune"
+	ModemControl_SetSdrGain_FullMethodName            = "/omnimodem.v1.ModemControl/SetSdrGain"
+	ModemControl_ConfigureSdr_FullMethodName          = "/omnimodem.v1.ModemControl/ConfigureSdr"
+	ModemControl_GetSdrCaps_FullMethodName            = "/omnimodem.v1.ModemControl/GetSdrCaps"
 )
 
 // ModemControlClient is the client API for ModemControl service.
@@ -57,6 +62,11 @@ type ModemControlClient interface {
 	// TransmitStarted/TransmitComplete events. Returns once the frame is
 	// accepted onto the channel's TX queue, not when it leaves the air.
 	Transmit(ctx context.Context, in *TransmitRequest, opts ...grpc.CallOption) (*TransmitResponse, error)
+	// Transmit an image on a channel using the channel's configured picture-capable
+	// mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+	// and keys the rig. Returns once accepted onto the TX queue (same contract as
+	// Transmit). The symmetric partner of the typed RxFrame.image on receive.
+	TransmitImage(ctx context.Context, in *TransmitImageRequest, opts ...grpc.CallOption) (*TransmitResponse, error)
 	// Subscribe to the event stream. The first message is always a snapshot
 	// (Event.snapshot) reflecting state at subscription time; live events follow.
 	SubscribeEvents(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
@@ -86,6 +96,20 @@ type ModemControlClient interface {
 	// so the FFT costs nothing when no one is watching. Echoes the actual clamped
 	// params; takes effect on the running RX worker. Idempotent per channel.
 	ConfigureSpectrum(ctx context.Context, in *ConfigureSpectrumRequest, opts ...grpc.CallOption) (*ConfigureSpectrumResponse, error)
+	// Point-and-shoot tuning: set the absolute demod frequency. The daemon splits
+	// it into a hardware center + NCO offset (the gqrx wideband model) so small
+	// moves are instant and lossless. Echoes the resolved center/offset.
+	SetSdrTune(ctx context.Context, in *SetSdrTuneRequest, opts ...grpc.CallOption) (*SetSdrTuneResponse, error)
+	// Set tuner gain: automatic hardware AGC, or a manual gain snapped to the
+	// tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
+	SetSdrGain(ctx context.Context, in *SetSdrGainRequest, opts ...grpc.CallOption) (*SetSdrGainResponse, error)
+	// Source-wide SDR config: capture rate, demod mode, squelch, ppm, bias-tee,
+	// direct-sampling. All DemodMode values are implemented and selectable at
+	// runtime. Echoes the actual capture rate.
+	ConfigureSdr(ctx context.Context, in *ConfigureSdrRequest, opts ...grpc.CallOption) (*ConfigureSdrResponse, error)
+	// Query the bound tuner's capabilities (tuner name, RF range, valid capture
+	// rates, discrete gain table) for building UIs and validating requests.
+	GetSdrCaps(ctx context.Context, in *GetSdrCapsRequest, opts ...grpc.CallOption) (*GetSdrCapsResponse, error)
 }
 
 type modemControlClient struct {
@@ -120,6 +144,16 @@ func (c *modemControlClient) Transmit(ctx context.Context, in *TransmitRequest, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransmitResponse)
 	err := c.cc.Invoke(ctx, ModemControl_Transmit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *modemControlClient) TransmitImage(ctx context.Context, in *TransmitImageRequest, opts ...grpc.CallOption) (*TransmitResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransmitResponse)
+	err := c.cc.Invoke(ctx, ModemControl_TransmitImage_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -255,6 +289,46 @@ func (c *modemControlClient) ConfigureSpectrum(ctx context.Context, in *Configur
 	return out, nil
 }
 
+func (c *modemControlClient) SetSdrTune(ctx context.Context, in *SetSdrTuneRequest, opts ...grpc.CallOption) (*SetSdrTuneResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetSdrTuneResponse)
+	err := c.cc.Invoke(ctx, ModemControl_SetSdrTune_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *modemControlClient) SetSdrGain(ctx context.Context, in *SetSdrGainRequest, opts ...grpc.CallOption) (*SetSdrGainResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetSdrGainResponse)
+	err := c.cc.Invoke(ctx, ModemControl_SetSdrGain_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *modemControlClient) ConfigureSdr(ctx context.Context, in *ConfigureSdrRequest, opts ...grpc.CallOption) (*ConfigureSdrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfigureSdrResponse)
+	err := c.cc.Invoke(ctx, ModemControl_ConfigureSdr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *modemControlClient) GetSdrCaps(ctx context.Context, in *GetSdrCapsRequest, opts ...grpc.CallOption) (*GetSdrCapsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSdrCapsResponse)
+	err := c.cc.Invoke(ctx, ModemControl_GetSdrCaps_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ModemControlServer is the server API for ModemControl service.
 // All implementations must embed UnimplementedModemControlServer
 // for forward compatibility.
@@ -270,6 +344,11 @@ type ModemControlServer interface {
 	// TransmitStarted/TransmitComplete events. Returns once the frame is
 	// accepted onto the channel's TX queue, not when it leaves the air.
 	Transmit(context.Context, *TransmitRequest) (*TransmitResponse, error)
+	// Transmit an image on a channel using the channel's configured picture-capable
+	// mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+	// and keys the rig. Returns once accepted onto the TX queue (same contract as
+	// Transmit). The symmetric partner of the typed RxFrame.image on receive.
+	TransmitImage(context.Context, *TransmitImageRequest) (*TransmitResponse, error)
 	// Subscribe to the event stream. The first message is always a snapshot
 	// (Event.snapshot) reflecting state at subscription time; live events follow.
 	SubscribeEvents(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error
@@ -299,6 +378,20 @@ type ModemControlServer interface {
 	// so the FFT costs nothing when no one is watching. Echoes the actual clamped
 	// params; takes effect on the running RX worker. Idempotent per channel.
 	ConfigureSpectrum(context.Context, *ConfigureSpectrumRequest) (*ConfigureSpectrumResponse, error)
+	// Point-and-shoot tuning: set the absolute demod frequency. The daemon splits
+	// it into a hardware center + NCO offset (the gqrx wideband model) so small
+	// moves are instant and lossless. Echoes the resolved center/offset.
+	SetSdrTune(context.Context, *SetSdrTuneRequest) (*SetSdrTuneResponse, error)
+	// Set tuner gain: automatic hardware AGC, or a manual gain snapped to the
+	// tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
+	SetSdrGain(context.Context, *SetSdrGainRequest) (*SetSdrGainResponse, error)
+	// Source-wide SDR config: capture rate, demod mode, squelch, ppm, bias-tee,
+	// direct-sampling. All DemodMode values are implemented and selectable at
+	// runtime. Echoes the actual capture rate.
+	ConfigureSdr(context.Context, *ConfigureSdrRequest) (*ConfigureSdrResponse, error)
+	// Query the bound tuner's capabilities (tuner name, RF range, valid capture
+	// rates, discrete gain table) for building UIs and validating requests.
+	GetSdrCaps(context.Context, *GetSdrCapsRequest) (*GetSdrCapsResponse, error)
 	mustEmbedUnimplementedModemControlServer()
 }
 
@@ -317,6 +410,9 @@ func (UnimplementedModemControlServer) GetState(context.Context, *GetStateReques
 }
 func (UnimplementedModemControlServer) Transmit(context.Context, *TransmitRequest) (*TransmitResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Transmit not implemented")
+}
+func (UnimplementedModemControlServer) TransmitImage(context.Context, *TransmitImageRequest) (*TransmitResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TransmitImage not implemented")
 }
 func (UnimplementedModemControlServer) SubscribeEvents(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeEvents not implemented")
@@ -353,6 +449,18 @@ func (UnimplementedModemControlServer) SetAudioGain(context.Context, *SetAudioGa
 }
 func (UnimplementedModemControlServer) ConfigureSpectrum(context.Context, *ConfigureSpectrumRequest) (*ConfigureSpectrumResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConfigureSpectrum not implemented")
+}
+func (UnimplementedModemControlServer) SetSdrTune(context.Context, *SetSdrTuneRequest) (*SetSdrTuneResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetSdrTune not implemented")
+}
+func (UnimplementedModemControlServer) SetSdrGain(context.Context, *SetSdrGainRequest) (*SetSdrGainResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetSdrGain not implemented")
+}
+func (UnimplementedModemControlServer) ConfigureSdr(context.Context, *ConfigureSdrRequest) (*ConfigureSdrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfigureSdr not implemented")
+}
+func (UnimplementedModemControlServer) GetSdrCaps(context.Context, *GetSdrCapsRequest) (*GetSdrCapsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSdrCaps not implemented")
 }
 func (UnimplementedModemControlServer) mustEmbedUnimplementedModemControlServer() {}
 func (UnimplementedModemControlServer) testEmbeddedByValue()                      {}
@@ -425,6 +533,24 @@ func _ModemControl_Transmit_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ModemControlServer).Transmit(ctx, req.(*TransmitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ModemControl_TransmitImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransmitImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModemControlServer).TransmitImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModemControl_TransmitImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModemControlServer).TransmitImage(ctx, req.(*TransmitImageRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -638,6 +764,78 @@ func _ModemControl_ConfigureSpectrum_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ModemControl_SetSdrTune_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetSdrTuneRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModemControlServer).SetSdrTune(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModemControl_SetSdrTune_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModemControlServer).SetSdrTune(ctx, req.(*SetSdrTuneRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ModemControl_SetSdrGain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetSdrGainRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModemControlServer).SetSdrGain(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModemControl_SetSdrGain_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModemControlServer).SetSdrGain(ctx, req.(*SetSdrGainRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ModemControl_ConfigureSdr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfigureSdrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModemControlServer).ConfigureSdr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModemControl_ConfigureSdr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModemControlServer).ConfigureSdr(ctx, req.(*ConfigureSdrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ModemControl_GetSdrCaps_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSdrCapsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModemControlServer).GetSdrCaps(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModemControl_GetSdrCaps_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModemControlServer).GetSdrCaps(ctx, req.(*GetSdrCapsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ModemControl_ServiceDesc is the grpc.ServiceDesc for ModemControl service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -656,6 +854,10 @@ var ModemControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Transmit",
 			Handler:    _ModemControl_Transmit_Handler,
+		},
+		{
+			MethodName: "TransmitImage",
+			Handler:    _ModemControl_TransmitImage_Handler,
 		},
 		{
 			MethodName: "ListDevices",
@@ -700,6 +902,22 @@ var ModemControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConfigureSpectrum",
 			Handler:    _ModemControl_ConfigureSpectrum_Handler,
+		},
+		{
+			MethodName: "SetSdrTune",
+			Handler:    _ModemControl_SetSdrTune_Handler,
+		},
+		{
+			MethodName: "SetSdrGain",
+			Handler:    _ModemControl_SetSdrGain_Handler,
+		},
+		{
+			MethodName: "ConfigureSdr",
+			Handler:    _ModemControl_ConfigureSdr_Handler,
+		},
+		{
+			MethodName: "GetSdrCaps",
+			Handler:    _ModemControl_GetSdrCaps_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

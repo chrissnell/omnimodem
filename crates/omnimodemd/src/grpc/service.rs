@@ -50,6 +50,8 @@ impl ModemControl for ControlService {
             id: ChannelId(req.channel),
             name: req.name,
             mode,
+            rsid_tx: req.rsid_tx,
+            rsid_rx: req.rsid_rx,
             reply: tx,
         })?;
         rx.await
@@ -79,6 +81,27 @@ impl ModemControl for ControlService {
             payload: req.payload,
             reply: tx,
         })?;
+        let transmit_id = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::TransmitResponse { transmit_id: transmit_id.0 }))
+    }
+
+    async fn transmit_image(
+        &self,
+        request: Request<proto::TransmitImageRequest>,
+    ) -> Result<Response<proto::TransmitResponse>, Status> {
+        let req = request.into_inner();
+        let send = crate::mode::picture_tx::PictureSend {
+            rgb: req.rgb,
+            width: req.width,
+            height: req.height,
+            color: req.color,
+            txspp: req.txspp as u8,
+        };
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::TransmitImage { channel: ChannelId(req.channel), send, reply: tx })?;
         let transmit_id = rx
             .await
             .map_err(|_| Status::unavailable("core dropped reply"))?
@@ -326,6 +349,105 @@ impl ModemControl for ControlService {
         }))
     }
 
+    async fn set_sdr_tune(
+        &self,
+        request: Request<proto::SetSdrTuneRequest>,
+    ) -> Result<Response<proto::SetSdrTuneResponse>, Status> {
+        let req = request.into_inner();
+        if !req.freq_hz.is_finite() || req.freq_hz <= 0.0 {
+            return Err(Status::invalid_argument("freq_hz must be a positive frequency"));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::SetSdrTune {
+            channel: ChannelId(req.channel),
+            freq_hz: req.freq_hz,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::SetSdrTuneResponse {
+            actual_freq_hz: ok.actual_freq_hz,
+            center_hz: ok.center_hz,
+            offset_hz: ok.offset_hz,
+        }))
+    }
+
+    async fn set_sdr_gain(
+        &self,
+        request: Request<proto::SetSdrGainRequest>,
+    ) -> Result<Response<proto::SetSdrGainResponse>, Status> {
+        let req = request.into_inner();
+        if !req.r#auto && !req.gain_db.is_finite() {
+            return Err(Status::invalid_argument("gain_db must be finite"));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::SetSdrGain {
+            channel: ChannelId(req.channel),
+            auto: req.r#auto,
+            gain_db: req.gain_db,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::SetSdrGainResponse { actual_gain_db: ok.actual_gain_db }))
+    }
+
+    async fn configure_sdr(
+        &self,
+        request: Request<proto::ConfigureSdrRequest>,
+    ) -> Result<Response<proto::ConfigureSdrResponse>, Status> {
+        let req = request.into_inner();
+        // Reject a `demod_mode` that is not a defined `DemodMode` value up front —
+        // an undefined code must not silently fold into NBFM. Every defined mode
+        // (NBFM/AM/WFM/SSB) is implemented and passes through to the core.
+        let demod_mode = proto::DemodMode::try_from(req.demod_mode)
+            .map_err(|_| Status::invalid_argument(format!("unknown demod_mode {}", req.demod_mode)))?;
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::ConfigureSdr {
+            channel: ChannelId(req.channel),
+            capture_rate: req.capture_rate,
+            demod_mode: demod_mode as u8,
+            squelch_db: req.squelch_db,
+            ppm: req.ppm,
+            bias_tee: req.bias_tee,
+            direct_sampling: req.direct_sampling,
+            reply: tx,
+        })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::ConfigureSdrResponse {
+            actual_capture_rate: ok.actual_capture_rate,
+        }))
+    }
+
+    async fn get_sdr_caps(
+        &self,
+        request: Request<proto::GetSdrCapsRequest>,
+    ) -> Result<Response<proto::GetSdrCapsResponse>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = oneshot::channel();
+        self.send_command(Command::GetSdrCaps { channel: ChannelId(req.channel), reply: tx })?;
+        let ok = rx
+            .await
+            .map_err(|_| Status::unavailable("core dropped reply"))?
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(proto::GetSdrCapsResponse {
+            tuner: ok.tuner,
+            freq_min_hz: ok.freq_min_hz,
+            freq_max_hz: ok.freq_max_hz,
+            sample_rates: ok.sample_rates,
+            gains_db: ok.gains_db,
+            bias_tee_supported: ok.bias_tee_supported,
+            direct_sampling_supported: ok.direct_sampling_supported,
+        }))
+    }
+
     type SubscribeEventsStream = crate::grpc::subscribe::EventStream;
 
     async fn subscribe_events(
@@ -374,9 +496,94 @@ fn effective_mode(mode: String, params: Option<proto::ModeParams>) -> String {
                 None => mode,
             }
         }
+        Params::Dominoex(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Hell(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Mfsk(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Mt63(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Navtex(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Wefax(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Contestia(c) => {
+            ModeConfig::Contestia { tones: c.tones as u16, bandwidth_hz: c.bandwidth_hz as u16 }
+                .to_mode_string()
+        }
+        Params::Thor(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Throb(p) => {
+            // A known submode encodes canonically; an unknown one falls back to
+            // the bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.submode, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
         Params::Olivia(o) => {
             ModeConfig::Olivia { tones: o.tones as u16, bandwidth_hz: o.bandwidth_hz as u16 }
                 .to_mode_string()
+        }
+        Params::Ifkp(p) => {
+            // A known speed encodes canonically; an unknown one falls back to the
+            // bare `mode` string (which `ModeConfig::parse` then validates).
+            match ModeConfig::parse(&format!("{}:center={}", p.speed, p.center_hz)) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
+        }
+        Params::Fsq(p) => {
+            match ModeConfig::parse(&format!(
+                "{}:center={},mycall={},directed={}",
+                p.speed, p.center_hz, p.mycall, p.directed
+            )) {
+                Some(cfg) => cfg.to_mode_string(),
+                None => mode,
+            }
         }
         Params::Afsk1200(a) => ModeConfig::Afsk1200 { tx: a.tx }.to_mode_string(),
     }
@@ -422,5 +629,54 @@ mod tests {
             params: Some(proto::mode_params::Params::Psk31(proto::Psk31Params { center_hz: 1000.0 })),
         };
         assert_eq!(effective_mode("ignored".into(), Some(legacy)), "psk31:center=1000");
+    }
+
+    #[test]
+    fn effective_mode_encodes_dominoex_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Dominoex(proto::DominoParams {
+                submode: "dominoex16".into(),
+                center_hz: 1500.0,
+            })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "dominoex16:center=1500");
+    }
+
+    #[test]
+    fn effective_mode_encodes_thor_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Thor(proto::ThorParams {
+                submode: "thor16".into(),
+                center_hz: 1500.0,
+            })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "thor16:center=1500");
+    }
+
+    #[test]
+    fn effective_mode_encodes_ifkp_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Ifkp(proto::IfkpParams {
+                speed: "ifkp-slow".into(),
+                center_hz: 1500.0,
+            })),
+        };
+        assert_eq!(effective_mode("ignored".into(), Some(mp)), "ifkp-slow:center=1500");
+    }
+
+    #[test]
+    fn effective_mode_encodes_fsq_params() {
+        let mp = proto::ModeParams {
+            params: Some(proto::mode_params::Params::Fsq(proto::FsqParams {
+                speed: "fsq".into(),
+                center_hz: 1500.0,
+                mycall: "k1abc".into(),
+                directed: true,
+            })),
+        };
+        assert_eq!(
+            effective_mode("ignored".into(), Some(mp)),
+            "fsq:center=1500,mycall=k1abc,directed=true"
+        );
     }
 }

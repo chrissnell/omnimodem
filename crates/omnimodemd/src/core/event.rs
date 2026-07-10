@@ -7,13 +7,26 @@
 
 use crate::ids::{ChannelId, DeviceId, TransmitId};
 
+/// A decoded raster payload (Hell, WEFAX, picture sub-protocols): `pixels` is
+/// row-major 8-bit samples, `channels` interleaved values per pixel (1 =
+/// grayscale, 3 = RGB). `pixels.len() == width * rows * channels`.
+#[derive(Debug, Clone)]
+pub struct RxImage {
+    pub width: u16,
+    pub channels: u8,
+    pub pixels: Vec<u8>,
+}
+
 /// LOSSLESS class. Carried on a dedicated broadcast; a subscriber that lags is
 /// disconnected rather than allowed to miss a frame.
 #[derive(Debug, Clone)]
 pub enum FrameEvent {
     RxFrame {
         channel: ChannelId,
+        /// Opaque/text bytes for non-raster payloads; empty when `image` is set.
         data: Vec<u8>,
+        /// Typed raster for facsimile modes; `None` for byte payloads.
+        image: Option<RxImage>,
         timestamp_ns: u64,
     },
 }
@@ -47,6 +60,16 @@ pub enum TelemetryEvent {
         dcd: bool,
         last_decoder: Option<String>,
     },
+    /// A received RSID burst was identified (lossy: advisory annotation). `tag`
+    /// is the fldigi RSID tag (always known); `mode` is the omnimodem mode string
+    /// (empty if unported); `freq_hz` is the detected audio offset.
+    RsidDetected {
+        channel: ChannelId,
+        tag: String,
+        mode: String,
+        freq_hz: f32,
+        extended: bool,
+    },
     /// One waterfall line (lossy: a dropped line is invisible). `bins` is uint8
     /// dBFS over `[db_floor, db_ceiling]`, low→high frequency.
     SpectrumFrame {
@@ -59,5 +82,18 @@ pub enum TelemetryEvent {
         bins: Vec<u8>,
         /// True for the transmitted (TX) spectrum, false for received (RX).
         transmit: bool,
+    },
+    /// Current SDR tuner/demod state for a channel (lossy: only the latest
+    /// matters). Broadcast on each SetSdrTune/SetSdrGain/ConfigureSdr so multiple
+    /// and late-joining clients stay in sync. `demod_mode` is `DemodMode as u8`.
+    SdrState {
+        channel: ChannelId,
+        center_hz: f64,
+        offset_hz: f64,
+        freq_hz: f64,
+        gain_auto: bool,
+        gain_db: f32,
+        demod_mode: u8,
+        squelch_db: f32,
     },
 }

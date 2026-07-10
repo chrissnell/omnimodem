@@ -24,6 +24,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sock_path = runtime_dir.join("omnimodem.sock");
     let db_path = runtime_dir.join("omnimodem.sqlite");
 
+    // Optional daemon config file: registers `rtl_tcp` SDR endpoints so
+    // ListDevices can surface them. Defaults to <runtime_dir>/omnimodem.conf;
+    // a missing file is normal (no registered devices).
+    let config_path = std::env::var("OMNIMODEM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| runtime_dir.join("omnimodem.conf"));
+    let registered_devices = omnimodemd::config::load_registered_devices(&config_path);
+    if !registered_devices.is_empty() {
+        tracing::info!(
+            count = registered_devices.len(),
+            config = %config_path.display(),
+            "registered devices from config",
+        );
+    }
+
     // Routable mTLS bind if OMNIMODEM_ROUTABLE_ADDR is set, else the UDS default.
     let routable_addr = std::env::var("OMNIMODEM_ROUTABLE_ADDR")
         .ok()
@@ -37,8 +52,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("{warning}");
     }
 
+    tracing::info!(
+        version = omnimodemd::VERSION,
+        runtime_dir = %runtime_dir.display(),
+        "omnimodemd starting",
+    );
     let store = Store::open(&db_path)?;
-    let (core_handle, _join) = omnimodemd::production_core(store)?;
+    let (core_handle, _join) = omnimodemd::production_core(store, registered_devices)?;
 
     // Optional Prometheus exporter (off unless OMNIMODEM_PROMETHEUS_ADDR is set).
     if let Some(addr) = std::env::var("OMNIMODEM_PROMETHEUS_ADDR")

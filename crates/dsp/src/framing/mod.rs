@@ -12,6 +12,15 @@
 //! for the current Phase-5 plan; their groups are named here to keep the catalog
 //! map honest.
 pub mod varicode;
+pub mod jsc;
+pub mod js8_message;
+pub mod js8_callsign;
+pub mod js8_frames;
+pub mod dominoex_varicode;
+pub mod thor_varicode;
+pub mod ifkp_varicode;
+pub mod fsq_varicode;
+pub mod hellfont;
 pub mod baudot;
 pub mod morse;
 pub mod hdlc;

@@ -86,6 +86,22 @@ impl Ldpc {
         Ldpc { n, k, gen, check_vars }
     }
 
+    /// Build from an **explicit** generator and sparse Tanner graph. Unlike
+    /// [`Self::from_systematic`], the codeword need not be `[message | parity]`
+    /// — `gen[i]` is the full length-`n` codeword produced by the unit message
+    /// `e_i`, so `encode(msg) = ⊕_i msg_i·gen[i]` reproduces whatever column
+    /// ordering the reference uses (e.g. JS8/early-FT8's `colorder`-permuted
+    /// `[parity | message]`). `check_vars[c]` lists the 0-origin codeword
+    /// variable indices in check `c`. A KAT should assert
+    /// `parity_errors(encode(msg)) == 0`, i.e. the two tables agree.
+    pub fn from_generator_and_checks(k: usize, gen: Vec<Vec<u8>>, check_vars: Vec<Vec<usize>>) -> Self {
+        assert!(!gen.is_empty(), "generator must be non-empty");
+        let n = gen[0].len();
+        assert_eq!(gen.len(), k, "generator must have k rows");
+        assert!(gen.iter().all(|r| r.len() == n), "generator rows must be length n");
+        Ldpc { n, k, gen, check_vars }
+    }
+
     /// The FT8/FT4 `(174, 91)` LDPC code, using the real WSJT-X / `ft8_lib`
     /// tables (see module docs and [`super::ft8_tables`]).
     ///

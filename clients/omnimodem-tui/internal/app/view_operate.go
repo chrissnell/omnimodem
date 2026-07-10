@@ -2,6 +2,9 @@ package app
 
 import (
 	"fmt"
+	"image"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,10 +37,26 @@ type operateView struct {
 	theirCall  string
 	rst        string
 	seq        *ft8Seq
-	beacon     bool    // beacon monitor (WSPR): no ladder/compose; enter keys a beacon
-	modeLabel  string  // active mode label, for the surface header
-	slotSecs   float64 // T/R slot length for sequencer/beacon modes
+	beacon     bool       // beacon monitor (WSPR): no ladder/compose; enter keys a beacon
+	raster     *rasterBuf // facsimile raster (Hell): received image column stream
+	modeLabel  string     // active mode label, for the surface header
+	slotSecs   float64    // T/R slot length for sequencer/beacon modes
 	qlog       qsoLog
+
+	// Picture send (image-shape modes): a file picker overlay and the staged
+	// image awaiting transmit. picker != nil means the dialog is open and owns
+	// all keys; staged != nil means a picture is chosen and previewed.
+	picker *ui.ImagePicker
+	staged *stagedImage
+}
+
+// stagedImage is a picture chosen from the picker, held ready to transmit with a
+// live preview shown on the operate surface.
+type stagedImage struct {
+	name string
+	img  image.Image
+	w, h int
+	size int64 // source file size, for the preview header
 }
 
 func newOperateView(m *Model) *operateView {
@@ -48,21 +67,32 @@ func newOperateView(m *Model) *operateView {
 		rst:    "599",
 	}
 	if cl := m.live[m.sel]; cl != nil {
-		v.modeLabel = cl.mode
+		v.modeLabel = baseModeLabel(cl.mode)
 		if mi := modeByLabel(cl.mode); mi != nil {
 			v.slotSecs = mi.slotSecs
+			// FST4's T/R period is operator-selectable and carried in the mode
+			// string's tail; honour it so the slot clock and TX watchdog match the
+			// configured sequence length rather than the table's 15 s default.
+			if mi.label == "fst4" {
+				v.slotSecs = modeStringParam(cl.mode, "tr", mi.slotSecs)
+			}
 			switch mi.shape {
 			case "sequencer":
 				v.seq = newFT8Seq(v.myCall, v.myGrid)
 			case "beacon":
 				v.beacon = true
+			case "image":
+				// Facsimile (Hell): a scrolling raster RX surface. TX still composes
+				// text — the mode paints it as a pixel raster on the wire.
+				v.raster = &rasterBuf{}
 			}
 		}
 	}
 	// Size the TX watchdog to the mode's slot length now that it's known: windowed
 	// modes wait for the daemon's slot-align count-off before keying, so a fixed
 	// timeout would abort long-slot modes before they ever transmit.
-	v.tx = txState{watchdog: txWatchdog(v.slotSecs)}
+	dog := txWatchdog(v.slotSecs)
+	v.tx = txState{watchdog: dog, baseDog: dog}
 	return v
 }
 
@@ -79,7 +109,11 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			}
 		}
 		if rf := msg.ev.GetRxFrame(); rf != nil && rf.GetChannel() == v.m.sel {
-			v.appendRx(string(rf.GetData()))
+			if v.raster != nil {
+				v.raster.push(rf.GetImage()) // facsimile: accumulate the raster columns
+			} else {
+				v.appendRx(string(rf.GetData()))
+			}
 		}
 		if tf := msg.ev.GetTransmitFailed(); tf != nil && v.tx.active() {
 			// The burst never keyed (e.g. the message can't be encoded in this
@@ -89,6 +123,9 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		}
 		if tc := msg.ev.GetTransmitComplete(); tc != nil && v.tx.active() {
 			v.tx.onComplete()
+			// A picture is a one-shot send: once it's on the air, clear the staged
+			// slot so enter doesn't silently re-transmit the same file.
+			v.staged = nil
 			return v, releaseLeaseCmd(v.m.c, v.m.sel)
 		}
 		return v, nil
@@ -98,10 +135,13 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 	case leaseMsg:
 		if msg.resp.GetGranted() {
 			v.tx.onLeaseGranted()
+			if v.tx.image != nil {
+				return v, transmitImageCmd(v.m.c, v.m.sel, v.tx.image)
+			}
 			return v, transmitCmd(v.m.c, v.m.sel, v.tx.payload)
 		}
 		v.tx.halt()
-		v.m.toast = ui.NewToast(fmt.Sprintf("TX lease held by ch%d", msg.resp.GetHeldBy()), ui.SeverityWarn)
+		v.m.toast = ui.NewToast(fmt.Sprintf("TX lease held by CH%d", msg.resp.GetHeldBy()), ui.SeverityWarn)
 		return v, nil
 	case transmitMsg:
 		v.tx.id = msg.id
@@ -130,6 +170,17 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 		v.txWf.pushBlank()
 		return v, txDrainCmd()
 	case tea.KeyMsg:
+		// While the picture picker is open it owns every key.
+		if v.picker != nil {
+			switch v.picker.Update(msg) {
+			case ui.PickerSelected:
+				v.stageImage(v.picker.Selected())
+				v.picker = nil
+			case ui.PickerCancelled:
+				v.picker = nil
+			}
+			return v, nil
+		}
 		switch msg.String() {
 		case "esc":
 			// Leave operate: halt any TX, stop the spectrum, then pop back.
@@ -145,6 +196,16 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 				v.tx.halt()
 				return v, releaseLeaseCmd(v.m.c, v.m.sel)
 			}
+			// Idle picture mode: clear a staged image without transmitting.
+			if v.staged != nil {
+				v.staged = nil
+			}
+			return v, nil
+		case "ctrl+o":
+			// Picture modes: open the file picker to choose an image to send.
+			if v.raster != nil {
+				v.picker = ui.NewImagePicker(pickerStartDir())
+			}
 			return v, nil
 		case "enter":
 			if v.beacon {
@@ -153,21 +214,26 @@ func (v *operateView) Update(msg tea.Msg) (View, tea.Cmd) {
 			if v.seq != nil {
 				return v, v.ft8Send()
 			}
+			if v.raster != nil && v.staged != nil {
+				return v, v.sendImage() // picture mode with an image staged
+			}
 			return v, v.sendCompose()
 		case "f1", "f2", "f3", "f4", "f5":
-			if v.beacon || v.seq != nil {
-				return v, nil // no free-text macros on the ladder/beacon surfaces
+			if v.beacon || v.seq != nil || v.staged != nil {
+				return v, nil // no free-text macros on the ladder/beacon/staged surfaces
 			}
 			v.compose = expandMacro(macroForKey(msg.String()), macroCtx{
 				myCall: v.myCall, theirCall: v.theirCall, rst: v.rst,
 			})
 			return v, nil
 		case "backspace":
-			if n := len(v.compose); n > 0 {
-				v.compose = v.compose[:n-1]
+			if v.staged == nil && len(v.compose) > 0 {
+				v.compose = v.compose[:len(v.compose)-1]
 			}
 		default:
-			if v.seq == nil && !v.beacon && len(msg.Runes) > 0 {
+			// While a picture is staged the compose line is hidden behind its
+			// preview, so swallow text input rather than growing it invisibly.
+			if v.seq == nil && !v.beacon && v.staged == nil && len(msg.Runes) > 0 {
 				v.compose += string(msg.Runes)
 			}
 		}
@@ -241,6 +307,64 @@ func (v *operateView) appendRx(s string) {
 	}
 }
 
+// pickerStartDir chooses where the picture picker opens: the operator's home
+// directory when known (that's where photos usually live), else the working dir.
+func pickerStartDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return "."
+}
+
+// maxStageBytes caps the file we'll read into memory to stage. Facsimile
+// pictures are tiny (kilobytes), so anything past a few MB is a mistaken pick;
+// refusing it keeps a huge file from being read (and later decoded) whole on the
+// synchronous UI thread.
+const maxStageBytes = 8 << 20 // 8 MiB
+
+// stageImage decodes a chosen file into the staging slot for preview and TX. The
+// image is downsampled to a mode-appropriate raster only at send time. Failures
+// leave any previously staged image untouched and surface a toast.
+func (v *operateView) stageImage(path string) {
+	var size int64
+	if fi, err := os.Stat(path); err == nil {
+		if fi.Size() > maxStageBytes {
+			v.m.toast = ui.NewToast(fmt.Sprintf("Image too large (%s, max %s)",
+				ui.HumanSize(fi.Size()), ui.HumanSize(maxStageBytes)), ui.SeverityError)
+			return
+		}
+		size = fi.Size()
+	}
+	img, err := ui.DecodeImageFile(path)
+	if err != nil {
+		v.m.toast = ui.NewToast("Cannot decode image: "+err.Error(), ui.SeverityError)
+		return
+	}
+	b := img.Bounds()
+	v.staged = &stagedImage{name: filepath.Base(path), img: img, w: b.Dx(), h: b.Dy(), size: size}
+	v.compose = "" // the preview replaces the compose line; drop any half-typed text
+	v.m.toast = ui.NewToast(fmt.Sprintf("Staged %s — enter to transmit", v.staged.name), ui.SeverityInfo)
+}
+
+// sendImage transmits the staged picture over the current picture-capable mode.
+// The decoded image is downsampled to a mode-appropriate raster and handed to the
+// daemon's TransmitImage encoder — not the text Transmit RPC — so the picture is
+// modulated as pixels rather than dumped as garbage "text" the modulator rejects.
+func (v *operateView) sendImage() tea.Cmd {
+	if v.tx.active() || v.staged == nil {
+		return nil
+	}
+	ps, ok := buildPictureSend(v.modeLabel, v.staged.img)
+	if !ok {
+		v.m.toast = ui.NewToast(
+			fmt.Sprintf("%s can't transmit a picture — use an SSTV or WEFAX mode", displayMode(v.modeLabel)),
+			ui.SeverityError)
+		return nil
+	}
+	v.tx.beginImage(ps)
+	return acquireLeaseCmd(v.m.c, v.m.sel)
+}
+
 func (v *operateView) sendCompose() tea.Cmd {
 	line := strings.TrimSpace(v.compose)
 	if line == "" || v.tx.active() {
@@ -254,6 +378,28 @@ func (v *operateView) sendCompose() tea.Cmd {
 }
 
 func (v *operateView) Render(w, h int) string {
+	// The picture picker takes over the whole surface while open.
+	if v.picker != nil {
+		modalW := w
+		if modalW > 88 {
+			modalW = 88
+		}
+		// picker.View wraps a list/preview of height bodyH in its own chrome
+		// (title, top+bottom border, path, hint); on top of that the "\n" top
+		// margin and the enclosing ui.Frame's title row each cost a line. Reserve
+		// all of it so the modal fills the surface exactly instead of growing one
+		// line past it — which pushes the frame (and the modal's own title) off
+		// the top of the screen.
+		const chrome = 8
+		bodyH := h - chrome
+		if bodyH < 6 {
+			bodyH = 6
+		}
+		box := v.picker.View(modalW, bodyH)
+		return "\n" + lipgloss.PlaceHorizontal(w, lipgloss.Center, box,
+			lipgloss.WithWhitespaceBackground(ui.ColorPanel))
+	}
+
 	var b strings.Builder
 
 	// Two waterfalls side by side, fixed at the top: RX (received) on the left,
@@ -305,7 +451,7 @@ func (v *operateView) Render(w, h int) string {
 
 	if v.seq != nil {
 		b.WriteString(fmt.Sprintf("%s · slot %.1f/%gs · DX [%s %s]\n\n",
-			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs,
+			displayMode(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs,
 			orDash(v.seq.dxCall), v.seq.dxGrid))
 		b.WriteString("next: " + v.seq.current() + "\n")
 		b.WriteString("cq:   " + v.seq.cq() + "\n\n")
@@ -318,7 +464,26 @@ func (v *operateView) Render(w, h int) string {
 			b.WriteString(fmt.Sprintf("%s %c %s\n", l.t.Format("15:04"), l.dir, l.txt))
 		}
 		b.WriteString(fmt.Sprintf("%s beacon · slot %.0f/%gs · spots: %d",
-			strings.ToUpper(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs, len(v.transcript)))
+			displayMode(v.modeLabel), slotPosition(time.Now(), v.slotSecs), v.slotSecs, len(v.transcript)))
+		return b.String()
+	}
+	if v.raster != nil {
+		// Facsimile / picture: a scrolling raster of the received image columns,
+		// then either the staged-picture preview (ready to transmit) or the text
+		// compose line (the mode also paints typed text into pixels on TX).
+		b.WriteString(fmt.Sprintf("%s · facsimile raster · %d cols\n\n",
+			displayMode(v.modeLabel), len(v.raster.cols)))
+		b.WriteString(v.raster.render(w) + "\n\n")
+		if v.staged != nil {
+			b.WriteString(v.stagedPreview(w, h))
+			return b.String()
+		}
+		b.WriteString("› " + v.compose)
+		if v.tx.active() {
+			b.WriteString("   " + ui.Accent.Render("[TX]"))
+		} else {
+			b.WriteString("\n\n" + ui.Dim.Render("‹ctrl+o› choose a picture to send"))
+		}
 		return b.String()
 	}
 	for _, l := range v.transcript {
@@ -331,13 +496,46 @@ func (v *operateView) Render(w, h int) string {
 	return b.String()
 }
 
+// stagedPreview draws the chosen picture (half-block thumbnail) with its name,
+// dimensions, and the transmit/replace hints — the "preview before TX" surface.
+// It sizes the thumbnail to the space left below the raster (h) so it can't
+// overrun the frame on a short terminal.
+func (v *operateView) stagedPreview(w, h int) string {
+	s := v.staged
+	previewCols := w
+	if previewCols > 56 {
+		previewCols = 56
+	}
+	// Leave room for the header, the blank spacers, and the hint line; clamp to a
+	// sane band so tiny frames still show something and tall ones don't sprawl.
+	previewRows := h - 6
+	if previewRows < 3 {
+		previewRows = 3
+	}
+	if previewRows > 12 {
+		previewRows = 12
+	}
+	art := ui.RenderImageHalfBlock(s.img, previewCols, previewRows)
+	header := ui.Title.Render("Ready to send: ") +
+		ui.Accent.Render(fmt.Sprintf("%s  %d×%d  %s", s.name, s.w, s.h, ui.HumanSize(s.size)))
+	var b strings.Builder
+	b.WriteString(header + "\n\n")
+	b.WriteString(art + "\n\n")
+	if v.tx.active() {
+		b.WriteString(ui.Accent.Render("[TX] transmitting picture…"))
+	} else {
+		b.WriteString(ui.Dim.Render("‹enter› transmit   ‹ctrl+o› choose another   ‹ctrl+x› cancel"))
+	}
+	return b.String()
+}
+
 func (v *operateView) Title() string {
 	cl := v.m.live[v.m.sel]
 	mode := "—"
 	if cl != nil {
-		mode = orNone(cl.mode)
+		mode = orNone(displayMode(cl.mode))
 	}
-	return fmt.Sprintf("Operate ch%d · %s", v.m.sel, mode)
+	return fmt.Sprintf("Operate CH%d · %s", v.m.sel, mode)
 }
 
 func (v *operateView) Hints() []ui.Hint {
@@ -349,6 +547,23 @@ func (v *operateView) Hints() []ui.Hint {
 	if v.seq != nil {
 		return []ui.Hint{
 			{Key: "enter", Action: "send next"}, {Key: "ctrl+x", Action: "halt"}, {Key: "esc", Action: "back"},
+		}
+	}
+	if v.raster != nil {
+		if v.picker != nil {
+			return []ui.Hint{
+				{Key: "↑/↓", Action: "browse"}, {Key: "enter", Action: "select"}, {Key: "esc", Action: "cancel"},
+			}
+		}
+		if v.staged != nil {
+			return []ui.Hint{
+				{Key: "enter", Action: "transmit"}, {Key: "ctrl+o", Action: "change"},
+				{Key: "ctrl+x", Action: "cancel"}, {Key: "esc", Action: "back"},
+			}
+		}
+		return []ui.Hint{
+			{Key: "ctrl+o", Action: "pick picture"}, {Key: "enter", Action: "send text"},
+			{Key: "ctrl+x", Action: "halt"}, {Key: "esc", Action: "back"},
 		}
 	}
 	return []ui.Hint{

@@ -22,6 +22,12 @@ service ModemControl {
   // accepted onto the channel's TX queue, not when it leaves the air.
   rpc Transmit(TransmitRequest) returns (TransmitResponse);
 
+  // Transmit an image on a channel using the channel's configured picture-capable
+  // mode (MFSK/THOR/IFKP/FSQ). The daemon builds the in-band header + pixel-FSK
+  // and keys the rig. Returns once accepted onto the TX queue (same contract as
+  // Transmit). The symmetric partner of the typed RxFrame.image on receive.
+  rpc TransmitImage(TransmitImageRequest) returns (TransmitResponse);
+
   // Subscribe to the event stream. The first message is always a snapshot
   // (Event.snapshot) reflecting state at subscription time; live events follow.
   rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
@@ -61,6 +67,29 @@ service ModemControl {
   // so the FFT costs nothing when no one is watching. Echoes the actual clamped
   // params; takes effect on the running RX worker. Idempotent per channel.
   rpc ConfigureSpectrum(ConfigureSpectrumRequest) returns (ConfigureSpectrumResponse);
+
+  // --- SDR (rtl_tcp) runtime control (Phase A) ------------------------------
+  // These drive an SDR-bound channel's tuner/demod at runtime. The channel must
+  // be bound to an `rtltcp:host:port` device (via ConfigureAudio) first, else
+  // FAILED_PRECONDITION.
+
+  // Point-and-shoot tuning: set the absolute demod frequency. The daemon splits
+  // it into a hardware center + NCO offset (the gqrx wideband model) so small
+  // moves are instant and lossless. Echoes the resolved center/offset.
+  rpc SetSdrTune(SetSdrTuneRequest) returns (SetSdrTuneResponse);
+
+  // Set tuner gain: automatic hardware AGC, or a manual gain snapped to the
+  // tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
+  rpc SetSdrGain(SetSdrGainRequest) returns (SetSdrGainResponse);
+
+  // Source-wide SDR config: capture rate, demod mode, squelch, ppm, bias-tee,
+  // direct-sampling. All DemodMode values are implemented and selectable at
+  // runtime. Echoes the actual capture rate.
+  rpc ConfigureSdr(ConfigureSdrRequest) returns (ConfigureSdrResponse);
+
+  // Query the bound tuner's capabilities (tuner name, RF range, valid capture
+  // rates, discrete gain table) for building UIs and validating requests.
+  rpc GetSdrCaps(GetSdrCapsRequest) returns (GetSdrCapsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +108,13 @@ message ConfigureChannelRequest {
   // When present, its oneof variant selects the mode and its values; `mode` is
   // then ignored. Absent ⇒ the `mode` string is used as-is (backward compatible).
   ModeParams mode_params = 4;
+  // RSID (Reed-Solomon Identifier). When set, the daemon prepends the active
+  // mode's RSID burst ahead of each transmission (`rsid_tx`) and/or runs an RSID
+  // detector over the received audio, surfacing matches as RsidDetected events
+  // (`rsid_rx`). Both default off; proto3 scalars have no presence, so a client
+  // that reconfigures a channel should resend the current values.
+  bool rsid_tx = 5;
+  bool rsid_rx = 6;
 }
 
 // Typed per-mode parameters. The set oneof variant selects the mode.
@@ -90,6 +126,17 @@ message ModeParams {
     OliviaParams olivia = 4;
     Afsk1200Params afsk1200 = 5;
     PskParams psk = 6;
+    DominoParams dominoex = 7;
+    HellParams hell = 8;
+    MfskParams mfsk = 9;
+    ContestiaParams contestia = 10;
+    ThorParams thor = 11;
+    Mt63Params mt63 = 12;
+    IfkpParams ifkp = 13;
+    FsqParams fsq = 14;
+    NavtexParams navtex = 15;
+    WefaxParams wefax = 16;
+    ThrobParams throb = 17;
   }
 }
 
@@ -122,8 +169,95 @@ message OliviaParams {
   uint32 bandwidth_hz = 2;  // bandwidth in Hz (e.g. 1000)
 }
 
+// The fldigi DominoEX family (dominoex4/5/8/11/16/22/44/88/micro). 18-tone IFK+
+// MFSK. `submode` is the mode label; `center_hz` the audio carrier.
+message DominoParams {
+  string submode = 1;   // dominoex::DominoVariant label, e.g. "dominoex16"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi Hellschreiber family (feldhell/slowhell/hellx5/hellx9/hell80). A
+// facsimile mode: RX emits an image raster (see RxFrame.image), not text.
+// `submode` is the mode label; `center_hz` the audio carrier.
+message HellParams {
+  string submode = 1;   // hell::HellVariant label, e.g. "feldhell"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi MFSK family (mfsk4/8/11/16/22/31/32/64/128 + 64L/128L). M-ary FSK
+// with a K=7 conv code + diagonal interleaver + MFSK Varicode. `submode` is the
+// mode label; `center_hz` the audio carrier.
+message MfskParams {
+  string submode = 1;   // mfsk::MfskVariant label, e.g. "mfsk16"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi Contestia grid (Olivia's sibling; 32-chip Walsh). `tones` MFSK tones
+// over `bandwidth_hz` — e.g. 8 tones / 500 Hz.
+message ContestiaParams {
+  uint32 tones = 1;         // number of tones (4/8/16/32/64)
+  uint32 bandwidth_hz = 2;  // bandwidth in Hz (125..2000)
+}
+
+// The fldigi THOR family (thormicro/4/5/8/11/16/22/25x4/50x1/50x2/100). DominoEX's
+// 18-tone IFK+ core with convolutional FEC + interleave + soft decode.
+// `submode` is the mode label; `center_hz` the audio carrier.
+message ThorParams {
+  string submode = 1;   // thor::ThorVariant label, e.g. "thor16"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi MT63 family (mt63_500s/l, 1000s/l, 2000s/l). 64-carrier
+// overlapping-Walsh OFDM + deep interleave. `submode` is the mode label;
+// `center_hz` the audio carrier.
+message Mt63Params {
+  string submode = 1;   // mt63::Mt63Variant label, e.g. "mt63_1000l"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi IFKP family (ifkp / ifkp-slow / ifkp-fast). 33-tone IFK MFSK with
+// the self-framing IFKP Varicode. `speed` is the mode label; `center_hz` the
+// audio carrier.
+message IfkpParams {
+  string speed = 1;     // ifkp::IfkpSpeed label, e.g. "ifkp-slow"
+  float  center_hz = 2; // audio center frequency
+}
+
+// The fldigi FSQ / FSQCALL family (fsq-1.5 / fsq-2 / fsq / fsq-4.5 / fsq-6).
+// 33-tone IFK with a CRC8-keyed directed protocol. `speed` is the mode label;
+// `center_hz` the audio carrier; `mycall` the operator callsign in the directed
+// header; `directed` whether to send the CRC8 directed header + selective-call
+// framing (off ⇒ raw keyboard mode).
+message FsqParams {
+  string speed = 1;     // fsq::FsqSpeed label, e.g. "fsq" (= fsq-3)
+  float  center_hz = 2; // audio center frequency
+  string mycall = 3;    // operator callsign for the directed header
+  bool   directed = 4;  // append the CRC8 directed header + FSQEOT framing
+}
+
+// NAVTEX / SITOR-B: 100-baud FSK maritime broadcast text with CCIR-476 FEC-B.
+message NavtexParams {
+  string submode = 1;   // navtex::NavtexVariant label ("navtex" | "sitorb")
+  float  center_hz = 2; // audio center frequency (default 1000 Hz)
+}
+
+// WEFAX: HF weather facsimile at IOC 576/288. A raster mode — RX emits an
+// Image, not text (see the Image message on RxFrame).
+message WefaxParams {
+  string submode = 1;   // wefax::WefaxVariant label ("wefax576" | "wefax288")
+  float  center_hz = 2; // audio carrier frequency (default 1900 Hz)
+}
+
 message Afsk1200Params {
   bool tx = 1;          // enable the transmit modulator
+}
+
+// The fldigi Throb family (throb1/2/4, throbx1/2/4). Dual-tone MFSK at 8 kHz:
+// each character sounds a pair of tones under a pulse envelope. `submode` is the
+// mode label; `center_hz` the audio carrier.
+message ThrobParams {
+  string submode = 1;   // throb::ThrobVariant label, e.g. "throb2"
+  float  center_hz = 2; // audio center frequency
 }
 
 message ConfigureChannelResponse {
@@ -139,6 +273,19 @@ message TransmitRequest {
 
 message TransmitResponse {
   uint64 transmit_id = 1; // monotonically increasing per process
+}
+
+// Transmit a raster image over the channel's configured picture mode. `rgb` is
+// row-major interleaved RGB (`R,G,B,…`, `width*height*3` bytes). MFSK carries an
+// explicit W×H so any size is valid; THOR/IFKP/FSQ select from a fixed size
+// table, so (width,height[,colour for FSQ]) must match one of the mode's sizes.
+message TransmitImageRequest {
+  uint32 channel = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  bytes  rgb = 4;       // row-major interleaved RGB, width*height*3 bytes
+  bool   color = 5;     // send colour (3 planes) vs grayscale (luma)
+  uint32 txspp = 6;     // MFSK samples-per-pixel: 8 (default) / 4 / 2; 0 ⇒ 8
 }
 
 message SubscribeRequest {}
@@ -160,6 +307,10 @@ message ChannelInfo {
   string tx_device_id = 6;     // TX (playback) device; empty == same as RX
   string ptt_device_id = 7;    // PTT device; empty when deviceless (None/Vox) or unset
   PttMethod ptt_method = 8;    // configured PTT method (UNSPECIFIED if unset)
+  bool rsid_tx = 9;            // prepend the mode's RSID burst before each TX
+  bool rsid_rx = 10;           // run the RSID detector over received audio
+  uint32 ptt_tx_delay_ms = 11; // per-channel PTT keying lead-in (ms)
+  uint32 ptt_tx_tail_ms = 12;  // per-channel PTT keying tail/hold (ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +332,34 @@ message Event {
     ClockOffset clock_offset = 11;      // LOSSY
     ChannelMetrics channel_metrics = 12; // LOSSY
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
-    TransmitFailed transmit_failed = 14; // LOSSY: TX aborted before keying
+    RsidDetected rsid_detected = 14;     // LOSSY class
+    SdrState sdr_state = 15;             // LOSSY class
+    TransmitFailed transmit_failed = 16; // LOSSY: TX aborted before keying
   }
+}
+
+// Current SDR tuner/demod state for a channel. LOSSY class — broadcast whenever a
+// SetSdrTune/SetSdrGain/ConfigureSdr changes it, so multiple/late-joining clients
+// stay in sync with the effective tune, gain, demod mode, and squelch.
+message SdrState {
+  uint32    channel     = 1;
+  double    center_hz   = 2;   // hardware center frequency
+  double    offset_hz   = 3;   // NCO channel-select offset from center
+  double    freq_hz     = 4;   // effective demod frequency (center + offset)
+  bool      gain_auto   = 5;   // true: hardware AGC; false: manual gain_db
+  float     gain_db     = 6;   // manual tuner gain (meaningful when !gain_auto)
+  DemodMode demod_mode  = 7;
+  float     squelch_db  = 8;   // dBFS open threshold; <= -200 means disabled
+}
+
+// A received RSID burst was identified. LOSSY class — advisory, the operator
+// (or a client auto-switch) acts on the identified mode + audio offset.
+message RsidDetected {
+  uint32 channel   = 1;
+  string tag       = 2;   // fldigi RSID tag, always known (e.g. "MFSK16")
+  string mode      = 3;   // omnimodem mode string, empty if the mode is unported
+  float  freq_hz   = 4;   // detected audio offset of the burst
+  bool   extended  = 5;   // true: from the extended (ESCAPE-prefixed) table
 }
 
 // One waterfall line: a magnitude spectrum over the channel's audio passband.
@@ -228,12 +405,29 @@ message TransmitFailed {
   string reason = 3;
 }
 
-// A decoded RX frame. No DSP exists in Phase 1, so this is emitted only by
-// tests/tools; it is defined now to pin the LOSSLESS backpressure contract.
+// A decoded RX frame. Text/packet/message payloads travel in `data` (UTF-8 or
+// opaque bytes). Facsimile/raster modes (Hell, and later WEFAX + the picture
+// sub-protocols) instead populate the typed `image` field and leave `data`
+// empty — a receiver picks whichever is set.
 message RxFrame {
   uint32 channel = 1;
   bytes data = 2;
   uint64 timestamp_ns = 3;
+  Image image = 4;   // set for raster modes; `data` empty when this is present
+}
+
+// A decoded raster. `pixels` is row-major 8-bit samples, `channels` interleaved
+// values per pixel: 1 = grayscale luminance, 3 = RGB (`R,G,B,R,G,B,…`).
+// `pixels.len() == width * rows * channels` (rows = pixels.len()/(width*channels)).
+// Designed against Hell's continuous column stream — each successive
+// `width*channels`-byte row is one on-air column — and reused by WEFAX
+// (Phase 12) and the picture sub-protocols (Phase 15, which carry colour),
+// appended incrementally. `channels` defaults to 0 on the wire for older
+// grayscale producers; readers treat 0 as 1.
+message Image {
+  uint32 width = 1;     // pixels per row (Hell: 14, the column height)
+  bytes  pixels = 2;    // row-major 8-bit samples, `channels` per pixel
+  uint32 channels = 3;  // 1 = grayscale, 3 = RGB interleaved (0 ⇒ 1)
 }
 
 message AudioLevel {
@@ -296,6 +490,13 @@ message ConfigurePttRequest {
   string node = 4;            // resolved node / chip path (serial/cm108/gpio)
   uint32 pin_or_line = 5;     // cm108 GPIO pin (1-8) or gpiochip line offset
   bool invert = 6;
+  // Per-channel PTT keying timing. TX delay is a keyed-but-silent lead-in
+  // before audio starts (lets the rig's PTT close); TX tail holds the key
+  // asserted after audio drains before releasing. Both apply to every mode
+  // on this channel. A full ConfigurePtt replaces the binding, so clients
+  // should always send the current values (0 is a valid explicit setting).
+  uint32 tx_delay_ms = 7;
+  uint32 tx_tail_ms = 8;
 }
 
 message ConfigurePttResponse {}
@@ -399,4 +600,57 @@ message ConfigureSpectrumResponse {
   uint32 rate_hz       = 3;  // actual achievable lines/sec (see hop constraint)
   float  freq_start_hz = 4;  // matches SpectrumFrame.freq_start_hz
   float  freq_step_hz  = 5;  // matches SpectrumFrame.freq_step_hz
+}
+
+// SDR demodulator. All modes are implemented: DEMOD_NBFM landed in Phase A;
+// DEMOD_AM/DEMOD_WFM/DEMOD_USB/DEMOD_LSB landed in Phase B.
+enum DemodMode {
+  DEMOD_NBFM = 0;   // narrowband FM
+  DEMOD_AM   = 1;   // amplitude (envelope + DC block)
+  DEMOD_WFM  = 2;   // wideband FM
+  DEMOD_USB  = 3;   // upper sideband
+  DEMOD_LSB  = 4;   // lower sideband
+}
+
+message SetSdrTuneRequest {
+  uint32 channel = 1;
+  double freq_hz = 2;   // absolute demod frequency (Hz)
+}
+message SetSdrTuneResponse {
+  double actual_freq_hz = 1;  // resolved effective frequency (center + offset)
+  double center_hz      = 2;  // hardware center chosen by the split
+  double offset_hz      = 3;  // NCO offset chosen by the split
+}
+
+message SetSdrGainRequest {
+  uint32 channel = 1;
+  bool   auto    = 2;   // true: hardware AGC (gain_db ignored)
+  float  gain_db = 3;   // manual tuner gain; snapped to the tuner's table
+}
+message SetSdrGainResponse {
+  float actual_gain_db = 1;  // gain actually applied (0 when auto)
+}
+
+message ConfigureSdrRequest {
+  uint32    channel         = 1;
+  uint32    capture_rate    = 2;  // dongle sample rate (Hz); 0 = unchanged
+  DemodMode demod_mode      = 3;  // only DEMOD_NBFM implemented in Phase A
+  float     squelch_db      = 4;  // dBFS open threshold; <= -200 disables squelch
+  int32     ppm             = 5;  // frequency correction (ppm)
+  bool      bias_tee        = 6;  // power an inline LNA/antenna over coax
+  bool      direct_sampling = 7;  // bypass tuner for HF (Q-branch when true)
+}
+message ConfigureSdrResponse {
+  uint32 actual_capture_rate = 1;
+}
+
+message GetSdrCapsRequest { uint32 channel = 1; }
+message GetSdrCapsResponse {
+  string          tuner        = 1;   // "R820T", "E4000", ...
+  double          freq_min_hz  = 2;
+  double          freq_max_hz  = 3;
+  repeated uint32 sample_rates = 4;   // valid capture rates
+  repeated float  gains_db     = 5;   // discrete tuner gain table
+  bool   bias_tee_supported        = 6;
+  bool   direct_sampling_supported = 7;
 }

@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
 
 // dosTableStyles paints the channel table for the black DOS panel: a yellow
@@ -52,7 +52,7 @@ func (v *channelsView) refresh() {
 			ptt = "▣"
 		}
 		rows = append(rows, table.Row{
-			fmt.Sprintf("ch%d", ch), orNone(cl.name), orNone(cl.mode),
+			fmt.Sprintf("CH%d", ch), orNone(cl.name), orNone(displayMode(cl.mode)),
 			orDash(cl.deviceID), ptt, fmt.Sprintf("%.0f", cl.rxDbfs),
 		})
 	}
@@ -80,6 +80,15 @@ func (v *channelsView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, devicesCmd(v.m.c)
 		case "o", "enter":
 			v.m.sel = v.selectedChannel()
+			// SDR-bound channels open the tuning view (RF waterfall + tuner
+			// controls); every other channel opens the standard operate view.
+			if cl := v.m.live[v.m.sel]; cl != nil && isSDRDevice(cl.deviceID) {
+				v.m.push(newSdrView(v.m))
+				return v, tea.Batch(
+					enableRFSpectrumCmd(v.m.c, v.m.sel, sdrBinCount),
+					getSdrCapsCmd(v.m.c, v.m.sel),
+				)
+			}
 			v.m.push(newOperateView(v.m))
 			return v, enableSpectrumCmd(v.m.c, v.m.sel, 64)
 		}
@@ -102,7 +111,7 @@ func (v *channelsView) nextFreeChannel() uint32 {
 func (v *channelsView) selectedChannel() uint32 {
 	var ch uint32
 	if r := v.t.SelectedRow(); len(r) > 0 {
-		fmt.Sscanf(r[0], "ch%d", &ch)
+		fmt.Sscanf(r[0], "CH%d", &ch)
 	}
 	return ch
 }

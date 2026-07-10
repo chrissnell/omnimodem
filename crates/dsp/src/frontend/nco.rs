@@ -23,6 +23,14 @@ impl DownConverter {
         let (c, s) = self.osc.next();
         Cplx::new(x * c, -x * s)
     }
+
+    /// Complex sample -> complex baseband. Multiplies by e^{-j2πf t} (the same
+    /// NCO `push` uses), shifting `tune_hz` to DC for IQ channel selection.
+    /// `z * (cos - j sin)` expanded to avoid a temporary Cplx.
+    pub fn push_cplx(&mut self, z: Cplx) -> Cplx {
+        let (c, s) = self.osc.next();
+        Cplx::new(z.re * c + z.im * s, z.im * c - z.re * s)
+    }
 }
 
 #[cfg(test)]
@@ -56,5 +64,37 @@ mod tests {
             acc += dc.push(x);
         }
         assert!((acc / 8000.0).norm() < 0.05);
+    }
+
+    #[test]
+    fn complex_tone_at_tune_freq_becomes_dc() {
+        use crate::types::Cplx;
+        let rate = 240_000.0;
+        let f0 = 30_000.0; // signal sits +30 kHz above center
+        let mut dc = DownConverter::new(f0, rate);
+        let mut acc = Cplx::new(0.0, 0.0);
+        let n = 24_000;
+        for k in 0..n {
+            let ph = std::f32::consts::TAU * f0 * k as f32 / rate;
+            let x = Cplx::new(ph.cos(), ph.sin()); // e^{+j2π f0 k/rate}
+            acc += dc.push_cplx(x);
+        }
+        let mag = (acc / n as f32).norm();
+        assert!(mag > 0.9, "tuned complex tone should sit at DC, got {mag}");
+    }
+
+    #[test]
+    fn complex_offset_tone_averages_away() {
+        use crate::types::Cplx;
+        let rate = 240_000.0;
+        let mut dc = DownConverter::new(30_000.0, rate);
+        let mut acc = Cplx::new(0.0, 0.0);
+        let n = 24_000;
+        for k in 0..n {
+            let ph = std::f32::consts::TAU * 90_000.0 * k as f32 / rate; // 60 kHz off tune
+            let x = Cplx::new(ph.cos(), ph.sin());
+            acc += dc.push_cplx(x);
+        }
+        assert!((acc / n as f32).norm() < 0.05);
     }
 }

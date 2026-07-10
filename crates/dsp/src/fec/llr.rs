@@ -48,6 +48,14 @@ pub fn demap_fsk_ft8(tone_powers: &[f32], noise_var: f32) -> Vec<Llr> {
     demap_fsk_with(tone_powers, noise_var, |idx| tone_to_sym[idx])
 }
 
+/// 8-FSK soft demapper with the **identity** tone→symbol map (symbol value `v`
+/// is sent on tone `v`, plain binary MSB-first). Used by JS8, whose `genjs8`
+/// maps `cw[3j]·4 + cw[3j+1]·2 + cw[3j+2]` straight to the tone index — *not*
+/// Gray-coded like FT8. ref: js8call/lib/js8/genjs8.f90.
+pub fn demap_fsk_identity(tone_powers: &[f32], noise_var: f32) -> Vec<Llr> {
+    demap_fsk_with(tone_powers, noise_var, |idx| idx)
+}
+
 /// Max-log-MAP M-FSK demapper core, parametric in the tone→symbol-value map.
 fn demap_fsk_with(tone_powers: &[f32], noise_var: f32, sym_of_tone: impl Fn(usize) -> usize) -> Vec<Llr> {
     let m = tone_powers.len();

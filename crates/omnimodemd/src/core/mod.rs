@@ -19,6 +19,10 @@ pub mod tx_worker;
 pub(crate) use gain::AudioGain;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
+use crate::audio::rtlsdr::{
+    plan_tune, snap_gain, supported_sample_rates, DemodMode, SdrControl,
+    DIRECT_SAMPLING_MAX_HZ, DIRECT_SAMPLING_Q_BRANCH,
+};
 use crate::core::clock::ClockSource;
 use crate::core::rx_worker::RxWorker;
 use crate::core::tx_worker::{TxJob, TxWorker, TxWorkerCfg};
@@ -31,10 +35,14 @@ use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::{PttDriver, PttError};
 use crate::supervisor::Supervisor;
-use command::{Command, ConfigureAudioOk, ConfigureSpectrumOk};
+use command::{
+    Command, ConfigureAudioOk, ConfigureSdrOk, ConfigureSpectrumOk, SdrCapsOk, SdrGainOk,
+    SdrTuneOk,
+};
 use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -79,6 +87,18 @@ pub fn spawn(
     enumerator: Box<dyn DeviceEnumerator>,
     audio_factory: AudioBackendFactory,
 ) -> (CoreHandle, std::thread::JoinHandle<()>) {
+    spawn_with_devices(supervisor, enumerator, audio_factory, Vec::new())
+}
+
+/// Like [`spawn`], but seeds the config-file-registered devices merged into
+/// `ListDevices`. Production loads these from the daemon config; tests and the
+/// no-config path use the empty [`spawn`].
+pub fn spawn_with_devices(
+    supervisor: Supervisor,
+    enumerator: Box<dyn DeviceEnumerator>,
+    audio_factory: AudioBackendFactory,
+    registered_devices: Vec<crate::device::DeviceDescriptor>,
+) -> (CoreHandle, std::thread::JoinHandle<()>) {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(COMMAND_QUEUE_DEPTH);
     let (frame_tx, _) = broadcast::channel(FRAME_RING);
     let (tele_tx, _) = broadcast::channel(TELEMETRY_RING);
@@ -91,7 +111,9 @@ pub fn spawn(
 
     let join = std::thread::Builder::new()
         .name("omnimodem-core".into())
-        .spawn(move || run(supervisor, enumerator, audio_factory, cmd_rx, frame_tx, tele_tx))
+        .spawn(move || {
+            run(supervisor, enumerator, audio_factory, registered_devices, cmd_rx, frame_tx, tele_tx)
+        })
         .expect("spawn core thread");
 
     (handle, join)
@@ -131,20 +153,29 @@ struct LiveBindings {
     gains: HashMap<ChannelId, AudioGain>,
     /// Per-channel spectrum (waterfall) control, shared with the RX worker.
     spectra: HashMap<ChannelId, spectrum::SpectrumControl>,
+    /// Per-channel SDR runtime control, shared with an `rtl_tcp` capture thread.
+    /// Present only for SDR-bound channels; gRPC (Plan 3) mutates it live.
+    sdr_controls: HashMap<ChannelId, SdrControl>,
+    /// Devices pre-registered in the daemon config file (currently `rtl_tcp`
+    /// endpoints). Merged into `ListDevices` alongside the live enumeration so a
+    /// frontend can present network SDRs that no hardware scan would surface.
+    registered_devices: Vec<crate::device::DeviceDescriptor>,
 }
 
 /// The core loop. Blocks on `recv_timeout`; on a command, handles it; on the
 /// idle tick, polls hotplug. Exits on `Shutdown` or a closed channel.
+#[allow(clippy::too_many_arguments)]
 fn run(
     mut supervisor: Supervisor,
     enumerator: Box<dyn DeviceEnumerator>,
     audio_factory: AudioBackendFactory,
+    registered_devices: Vec<crate::device::DeviceDescriptor>,
     commands: Receiver<Command>,
     frames: broadcast::Sender<FrameEvent>,
     telemetry: broadcast::Sender<TelemetryEvent>,
 ) {
     let mut next_tx_id: u64 = 1;
-    let mut live = LiveBindings::default();
+    let mut live = LiveBindings { registered_devices, ..LiveBindings::default() };
     let interlock = supervisor.interlock();
     let lease = TxLeaseRegistry::new();
     // Persistence restores a channel's *config*, but not its live audio/PTT
@@ -216,7 +247,7 @@ fn restore_live_bindings(
         }
         if let Err(e) = configure_audio(
             supervisor, enumerator, audio_factory, live, cfg.id, cfg.device_id.clone(),
-            cfg.sample_rate, cfg.fanout, cfg.tx_device_id.clone(), cfg.tx_sample_rate,
+            cfg.sample_rate, cfg.fanout, cfg.tx_device_id.clone(), cfg.tx_sample_rate, telemetry,
         ) {
             tracing::warn!(channel = cfg.id.0, error = %e, "skipping audio restore on startup");
             continue;
@@ -244,14 +275,22 @@ fn handle_command(
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
     match cmd {
-        Command::ConfigureChannel { id, name, mode, reply } => {
+        Command::ConfigureChannel { id, name, mode, rsid_tx, rsid_rx, reply } => {
             // Validate the mode string against the parametric registry before
             // persisting, so a typo can't silently configure nothing. The
             // string remains the persisted form (gRPC proto unchanged); it is
             // resolved to a `ModeConfig` at use.
             let res = match crate::mode::ModeConfig::parse(&mode) {
-                Some(_) => supervisor.configure_channel(id, name, mode).map_err(Into::into),
-                None => Err(CoreError::UnknownMode(mode)),
+                Some(_) => {
+                    tracing::info!(channel = id.0, name = %name, mode = %mode, "mode selected");
+                    supervisor
+                        .configure_channel(id, name, mode, rsid_tx, rsid_rx)
+                        .map_err(Into::into)
+                }
+                None => {
+                    tracing::warn!(channel = id.0, mode = %mode, "rejected unknown mode");
+                    Err(CoreError::UnknownMode(mode))
+                }
             };
             if res.is_ok() {
                 let _ = telemetry.send(TelemetryEvent::ChannelConfigured { channel: id });
@@ -264,7 +303,7 @@ fn handle_command(
         } => {
             let res = configure_audio(
                 supervisor, enumerator, audio_factory, live, id, device_id, sample_rate, fanout,
-                tx_device_id, tx_sample_rate,
+                tx_device_id, tx_sample_rate, telemetry,
             );
             if res.is_ok() {
                 try_spawn_workers(id, supervisor, live, interlock, lease, frames, telemetry);
@@ -295,8 +334,27 @@ fn handle_command(
             let _ = reply.send(res);
         }
 
+        Command::TransmitImage { channel, send, reply } => {
+            if !supervisor.has_channel(channel) {
+                let _ = reply.send(Err(CoreError::UnknownChannel(channel)));
+                return;
+            }
+            let tx_id = TransmitId(*next_tx_id);
+            *next_tx_id += 1;
+            let res = transmit_image(supervisor, live, channel, send, tx_id);
+            let _ = reply.send(res);
+        }
+
         Command::ListDevices { reply } => {
-            let devices = supervisor.device_cache_mut().refresh(enumerator);
+            let mut devices = supervisor.device_cache_mut().refresh(enumerator);
+            // Merge config-file-registered endpoints (e.g. remote `rtl_tcp` SDRs)
+            // that no hardware scan produces. A registered id that the live
+            // enumeration already surfaced is not duplicated.
+            for reg in &live.registered_devices {
+                if !devices.iter().any(|d| d.id == reg.id) {
+                    devices.push(reg.clone());
+                }
+            }
             let _ = reply.send(devices);
         }
 
@@ -378,6 +436,38 @@ fn handle_command(
             let _ = reply.send(res);
         }
 
+        Command::SetSdrTune { channel, freq_hz, reply } => {
+            let res = set_sdr_tune(live, channel, freq_hz, telemetry);
+            let _ = reply.send(res);
+        }
+
+        Command::SetSdrGain { channel, auto, gain_db, reply } => {
+            let res = set_sdr_gain(live, channel, auto, gain_db, telemetry);
+            let _ = reply.send(res);
+        }
+
+        Command::ConfigureSdr {
+            channel,
+            capture_rate,
+            demod_mode,
+            squelch_db,
+            ppm,
+            bias_tee,
+            direct_sampling,
+            reply,
+        } => {
+            let res = configure_sdr(
+                live, channel, capture_rate, demod_mode, squelch_db, ppm, bias_tee,
+                direct_sampling, telemetry,
+            );
+            let _ = reply.send(res);
+        }
+
+        Command::GetSdrCaps { channel, reply } => {
+            let res = get_sdr_caps(live, channel);
+            let _ = reply.send(res);
+        }
+
         Command::Shutdown => {} // handled in run()
     }
 }
@@ -424,6 +514,164 @@ fn configure_spectrum(
     })
 }
 
+// ---------------------------------------------------------------------------
+// SDR (rtl_tcp) runtime control
+// ---------------------------------------------------------------------------
+
+/// The channel's SDR control cell, or `SdrRequired` when the channel is not bound
+/// to an `rtl_tcp` source (the cell exists only for SDR-bound channels).
+fn sdr_control(
+    live: &LiveBindings,
+    channel: ChannelId,
+) -> Result<&SdrControl, CoreError> {
+    live.sdr_controls.get(&channel).ok_or(CoreError::SdrRequired(channel))
+}
+
+/// Broadcast the channel's current SDR state so multiple/late-joining clients stay
+/// in sync. Called after every mutating SDR RPC.
+fn emit_sdr_state(
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+    channel: ChannelId,
+    control: &SdrControl,
+) {
+    let center_hz = control.center_hz();
+    let offset_hz = control.offset_hz() as f64;
+    let _ = telemetry.send(TelemetryEvent::SdrState {
+        channel,
+        center_hz,
+        offset_hz,
+        freq_hz: center_hz + offset_hz,
+        gain_auto: control.gain_auto(),
+        gain_db: control.gain_db(),
+        demod_mode: control.demod_mode() as u8,
+        squelch_db: control.squelch_db(),
+    });
+}
+
+/// Tune an SDR channel to an absolute frequency, splitting into hardware center +
+/// NCO offset (the gqrx model). Mutates the shared control (the capture thread
+/// picks it up on its next block) and broadcasts the new state.
+fn set_sdr_tune(
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    freq_hz: f64,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) -> Result<SdrTuneOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+    let (center, offset) = plan_tune(control.center_hz(), control.capture_rate(), freq_hz);
+    control.set_center_hz(center);
+    control.set_offset_hz(offset);
+    emit_sdr_state(telemetry, channel, control);
+    let offset = offset as f64;
+    Ok(SdrTuneOk { actual_freq_hz: center + offset, center_hz: center, offset_hz: offset })
+}
+
+/// Set an SDR channel's gain: auto AGC, or a manual value snapped to the tuner's
+/// discrete gain table (when caps are known). Echoes the applied gain.
+fn set_sdr_gain(
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    auto: bool,
+    gain_db: f32,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) -> Result<SdrGainOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+    let applied = if auto {
+        control.set_gain(true, 0.0);
+        0.0
+    } else {
+        // Snap to the nearest table entry so the echoed gain is what the dongle
+        // will actually use; an unknown tuner (no table) passes the value through.
+        let snapped = match control.caps() {
+            Some(caps) => snap_gain(&caps.gains_db, gain_db),
+            None => gain_db,
+        };
+        control.set_gain(false, snapped);
+        snapped
+    };
+    emit_sdr_state(telemetry, channel, control);
+    Ok(SdrGainOk { actual_gain_db: applied })
+}
+
+/// Configure an SDR channel's source parameters: capture rate, demod mode,
+/// squelch, ppm, bias-tee, and direct-sampling. All demod modes (NBFM/AM/WFM/SSB)
+/// are supported; the dongle-extras controls are applied to the shared
+/// `SdrControl`, where the capture thread sends them to the dongle on its next
+/// block. Direct sampling (`bool`) maps to the Q-branch (mode 2) — the branch
+/// consumer HF-capable dongles wire their HF input to. Echoes the effective rate.
+#[allow(clippy::too_many_arguments)]
+fn configure_sdr(
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    capture_rate: u32,
+    demod_mode: u8,
+    squelch_db: f32,
+    ppm: i32,
+    bias_tee: bool,
+    direct_sampling: bool,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) -> Result<ConfigureSdrOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+
+    // Every demod mode (NBFM/AM/WFM/SSB) is implemented; the capture thread
+    // dispatches on the mode via `SdrDemod`. Bias-tee and direct-sampling are
+    // applied below (Phase C) — no control is rejected here anymore.
+    let mode = DemodMode::from_u8(demod_mode);
+
+    // Capture rate: 0 = unchanged; otherwise it must be a rate the dongle accepts.
+    let actual_capture_rate = if capture_rate == 0 {
+        control.capture_rate()
+    } else {
+        if !supported_sample_rates().contains(&capture_rate) {
+            return Err(CoreError::InvalidArgument(format!(
+                "unsupported capture rate {capture_rate} Hz"
+            )));
+        }
+        control.set_capture_rate(capture_rate);
+        capture_rate
+    };
+
+    control.set_demod_mode(mode);
+    control.set_squelch_db(squelch_db);
+    control.set_ppm(ppm);
+    control.set_bias_tee(bias_tee);
+    control.set_direct_sampling(if direct_sampling { DIRECT_SAMPLING_Q_BRANCH } else { 0 });
+    emit_sdr_state(telemetry, channel, control);
+    Ok(ConfigureSdrOk { actual_capture_rate })
+}
+
+/// Read an SDR channel's tuner capabilities (published by the capture thread at
+/// connect). `SdrRequired` if the channel is not SDR-bound; a bound channel whose
+/// capture has not yet parsed the header reports an empty/unknown tuner.
+fn get_sdr_caps(live: &LiveBindings, channel: ChannelId) -> Result<SdrCapsOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+    let caps = control.caps().unwrap_or_else(|| crate::audio::rtlsdr::TunerCaps {
+        tuner: "unknown".into(),
+        freq_min_hz: 0.0,
+        freq_max_hz: 0.0,
+        sample_rates: supported_sample_rates(),
+        gains_db: Vec::new(),
+        bias_tee_supported: false,
+        direct_sampling_supported: false,
+    });
+    // Direct sampling bypasses the tuner to reach HF, so when it is active the
+    // usable range widens down to DC up to the ADC Nyquist ceiling.
+    let (freq_min_hz, freq_max_hz) = if control.direct_sampling() != 0 {
+        (0.0, caps.freq_max_hz.max(DIRECT_SAMPLING_MAX_HZ))
+    } else {
+        (caps.freq_min_hz, caps.freq_max_hz)
+    };
+    Ok(SdrCapsOk {
+        tuner: caps.tuner,
+        freq_min_hz,
+        freq_max_hz,
+        sample_rates: caps.sample_rates,
+        gains_db: caps.gains_db,
+        bias_tee_supported: caps.bias_tee_supported,
+        direct_sampling_supported: caps.direct_sampling_supported,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn configure_audio(
     supervisor: &mut Supervisor,
@@ -436,6 +684,7 @@ fn configure_audio(
     fanout: u32,
     tx_device_id: DeviceId,
     tx_sample_rate: u32,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
 ) -> Result<ConfigureAudioOk, CoreError> {
     if !supervisor.has_channel(id) {
         return Err(CoreError::UnknownChannel(id));
@@ -446,9 +695,19 @@ fn configure_audio(
     )?;
 
     // Resolve durable ids to live devices (refresh first so a never-listed
-    // device still binds). Capture (RX) and playback (TX) may differ.
+    // device still binds). Capture (RX) and playback (TX) may differ. An
+    // `rtl_tcp` SDR endpoint needs no physical enumeration — synthesize a
+    // capture-only descriptor so an ad-hoc `rtltcp:host:port` binds directly.
     supervisor.device_cache_mut().refresh(enumerator);
     let resolve = |sup: &mut Supervisor, dev: &DeviceId| -> Result<_, CoreError> {
+        if let DeviceId::RtlTcp { host, port } = dev {
+            return Ok(crate::device::DeviceDescriptor {
+                id: dev.clone(),
+                label: format!("rtl_tcp {host}:{port}"),
+                has_capture: true,
+                has_playback: false,
+            });
+        }
         sup.device_cache_mut()
             .resolve(dev)
             .cloned()
@@ -460,7 +719,20 @@ fn configure_audio(
     };
 
     let rx_desc = resolve(supervisor, &device_id)?;
-    let capture = (audio_factory)(&rx_desc).open_capture(sample_rate)?;
+    let mut rx_backend = (audio_factory)(&rx_desc);
+    // For an SDR device, inject the per-channel control cell + telemetry sink so
+    // the capture thread can honor runtime tune/gain/squelch and emit the RF
+    // waterfall. The control persists across rebinds (settings survive a mode
+    // switch); a departing device clears it in poll_hotplug.
+    if matches!(device_id, DeviceId::RtlTcp { .. }) {
+        let control = live.sdr_controls.entry(id).or_default().clone();
+        rx_backend.attach_sdr_context(id, telemetry.clone(), control);
+    } else {
+        // Rebinding to a non-SDR device: drop any stale control cell so a later
+        // rebind to an SDR starts fresh rather than resurrecting old tune/gain.
+        live.sdr_controls.remove(&id);
+    }
+    let capture = rx_backend.open_capture(sample_rate)?;
     let rx_rate = capture.sample_rate;
     live.captures.insert(id, capture);
 
@@ -482,9 +754,25 @@ fn configure_audio(
             live.sinks.remove(&id); // drop any stale sink from a prior bind
             0
         }
+        // An SDR (rtl_tcp) TX device is receive-only — bind the channel RX-only
+        // rather than failing the whole configure, same as a mic-only device.
+        Err(crate::audio::AudioError::Unsupported) => {
+            tracing::warn!(channel = id.0, "TX device is receive-only (SDR); channel is RX-only");
+            live.sinks.remove(&id);
+            0
+        }
         Err(e) => return Err(e.into()),
     };
 
+    tracing::info!(
+        channel = id.0,
+        rx_device = %device_id.to_canonical_string(),
+        tx_device = %tx_device_id.to_canonical_string(),
+        rx_rate,
+        tx_rate,
+        "audio bound{}",
+        if tx_rate == 0 { " (RX-only)" } else { "" },
+    );
     live.audio.insert(
         id,
         AudioBinding { rx_dev: device_id, tx_dev: tx_device_id, tx_rate },
@@ -515,6 +803,12 @@ fn configure_ptt(
     }
     supervisor.configure_ptt(id, ptt.clone())?;
     let driver = supervisor.ptt_registry_mut().build_driver(&ptt)?;
+    tracing::info!(
+        channel = id.0,
+        device = %ptt.device_id.to_canonical_string(),
+        method = ?ptt.method,
+        "PTT configured",
+    );
     live.drivers.insert(id, driver);
     live.ptt_dev.insert(id, ptt.device_id);
     Ok(())
@@ -540,8 +834,18 @@ fn try_spawn_workers(
     let rig = live.audio.get(&channel).map(|b| b.rx_dev.clone());
     // Shared runtime gain for this channel (cloned into the workers).
     let gain = live.gains.entry(channel).or_default().clone();
-    // Shared spectrum control (cloned into the RX worker; default OFF).
-    let spectrum = live.spectra.entry(channel).or_default().clone();
+    // Shared spectrum control (cloned into the RX worker; default OFF). For an
+    // SDR channel the RF waterfall is produced by the capture thread, so hand the
+    // RX worker a throwaway control that can never enable its audio-passband tap —
+    // keeping exactly one spectrum producer per channel.
+    let is_sdr = matches!(rig, Some(DeviceId::RtlTcp { .. }));
+    let spectrum = if is_sdr {
+        spectrum::SpectrumControl::default()
+    } else {
+        live.spectra.entry(channel).or_default().clone()
+    };
+    // Per-channel RSID enables: (tx = prepend our burst, rx = detect inbound).
+    let (rsid_tx, rsid_rx) = supervisor.channel_rsid(channel);
 
     // RX worker: needs a capture and a real demod. Consume the held capture.
     if !live.rx_workers.contains_key(&channel) {
@@ -553,16 +857,26 @@ fn try_spawn_workers(
                 .clone();
             match registry::demod_kind(&mode) {
                 DemodKind::Streaming(demod) => {
+                    tracing::info!(
+                        channel = channel.0, mode = mode.label(),
+                        device = %rig.to_canonical_string(), "RX started (streaming)",
+                    );
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
-                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(),
+                        telemetry.clone(), metrics, gain.clone(), spectrum.clone(), rsid_rx,
                     );
                     live.rx_workers.insert(channel, w);
                 }
                 DemodKind::Windowed(bd, window_s) => {
+                    tracing::info!(
+                        channel = channel.0, mode = mode.label(),
+                        device = %rig.to_canonical_string(), window_s,
+                        "RX started (windowed)",
+                    );
                     let w = RxWorker::spawn_windowed(
                         channel, rig, capture, bd, interlock.clone(), frames.clone(),
                         telemetry.clone(), metrics, window_s, gain.clone(), spectrum.clone(),
+                        rsid_rx,
                     );
                     live.rx_workers.insert(channel, w);
                 }
@@ -584,9 +898,18 @@ fn try_spawn_workers(
             live.audio.get(&channel).map(|b| (b.tx_dev.clone(), b.tx_rate)),
             registry::build_modulator(&mode),
         ) {
+            tracing::info!(
+                channel = channel.0, mode = mode.label(),
+                device = %rig.to_canonical_string(), "TX ready",
+            );
             let sink = live.sinks.remove(&channel).unwrap();
             let driver = live.drivers.remove(&channel).unwrap();
             let slot_s = registry::tx_slot_s(&mode);
+            // Resolve the mode's RSID burst once at spawn (key + audio offset).
+            let rsid = (rsid_tx)
+                .then(|| mode.rsid_key().map(|k| (k, mode.rsid_center_hz())))
+                .flatten();
+            let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
             let w = tx_worker::spawn(TxWorkerCfg {
                 channel,
                 rig,
@@ -600,6 +923,9 @@ fn try_spawn_workers(
                 slot_s,
                 gain: gain.clone(),
                 spectrum: spectrum.clone(),
+                rsid,
+                tx_delay: Duration::from_millis(tx_delay_ms as u64),
+                tx_tail: Duration::from_millis(tx_tail_ms as u64),
             });
             live.tx_workers.insert(channel, w);
         }
@@ -647,6 +973,7 @@ fn key_ptt(
 
     match result {
         Ok(()) => {
+            tracing::info!(channel = channel.0, keyed, "PTT keyed (manual)");
             let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed });
             Ok(())
         }
@@ -680,7 +1007,7 @@ fn transmit(
         let mode = supervisor.channel_mode(channel);
         let frame = tx_worker::payload_to_frame(&mode, payload);
         let worker = live.tx_workers.get(&channel).unwrap();
-        return match worker.enqueue(TxJob { frame, transmit_id: tx_id }) {
+        return match worker.enqueue(TxJob::frame(frame, tx_id)) {
             Ok(()) => Ok(tx_id),
             Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
         };
@@ -705,9 +1032,15 @@ fn transmit(
         let sink = live.sinks.get(&channel).unwrap();
         let driver = live.drivers.get_mut(&channel).unwrap();
 
+        let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
         interlock.begin_tx(&rig);
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: true });
-        let outcome = drive_tx_cycle(driver.as_mut(), sink, samples, rate, TX_POLL);
+        // The legacy raw-PCM cycle runs inline on the core thread (no worker),
+        // so there is no async cancel to honor — pass a never-set flag.
+        let outcome = drive_tx_cycle(
+            driver.as_mut(), sink, samples, rate, TX_POLL, &AtomicBool::new(false),
+            Duration::from_millis(tx_delay_ms as u64), Duration::from_millis(tx_tail_ms as u64),
+        );
         let _ = telemetry.send(TelemetryEvent::PttKeyed { channel, keyed: false });
         interlock.end_tx(&rig);
         Some(outcome)
@@ -718,13 +1051,40 @@ fn transmit(
     let _ = telemetry.send(TelemetryEvent::TransmitComplete { channel, transmit_id: tx_id });
 
     match outcome {
-        None | Some(TxCycleOutcome::Done) => Ok(tx_id),
+        // Aborted is unreachable here (the legacy cancel flag is never set) but
+        // is a clean stop, so it maps to Ok alongside Done.
+        None | Some(TxCycleOutcome::Done) | Some(TxCycleOutcome::Aborted) => Ok(tx_id),
         Some(TxCycleOutcome::KeyFailed(e))
         | Some(TxCycleOutcome::SubmitFailed(e))
         | Some(TxCycleOutcome::UnkeyFailed(e)) => {
             evict_on_gone(supervisor, live, channel, &e);
             Err(CoreError::Ptt(e))
         }
+    }
+}
+
+/// Transmit an image on a moded channel: build the header + pixel-FSK audio for
+/// the channel's configured picture mode and enqueue it on the channel worker
+/// (accepted onto the queue, not when it leaves the air — the worker emits
+/// TransmitStarted/Complete + keys the rig). Errors if the channel has no live TX
+/// worker or the mode/size can't carry the image.
+fn transmit_image(
+    supervisor: &Supervisor,
+    live: &LiveBindings,
+    channel: ChannelId,
+    send: crate::mode::picture_tx::PictureSend,
+    tx_id: TransmitId,
+) -> Result<TransmitId, CoreError> {
+    let worker = live
+        .tx_workers
+        .get(&channel)
+        .ok_or_else(|| CoreError::Picture("channel has no active transmit worker".into()))?;
+    let mode = supervisor.channel_mode(channel);
+    let (audio, native_rate) =
+        crate::mode::picture_tx::build(&mode, &send).map_err(|e| CoreError::Picture(e.to_string()))?;
+    match worker.enqueue(TxJob::prebuilt(audio, native_rate, tx_id)) {
+        Ok(()) => Ok(tx_id),
+        Err(_) => Err(CoreError::Ptt(PttError::Config("tx queue full".into()))),
     }
 }
 
@@ -759,12 +1119,17 @@ fn poll_hotplug(
     for ev in watcher.poll(enumerator) {
         match ev {
             HotplugEvent::Arrived(desc) => {
+                tracing::info!(
+                    device = %desc.id.to_canonical_string(), label = %desc.label,
+                    "device arrived",
+                );
                 let _ = telemetry.send(TelemetryEvent::DeviceArrived {
                     device_id: desc.id,
                     label: desc.label,
                 });
             }
             HotplugEvent::Departed(id) => {
+                tracing::info!(device = %id.to_canonical_string(), "device departed");
                 let _ = telemetry.send(TelemetryEvent::DeviceDeparted { device_id: id.clone() });
                 supervisor.ptt_registry_mut().evict(&id);
                 // Drop audio handles for channels bound to this device on
@@ -785,6 +1150,7 @@ fn poll_hotplug(
                     // Drop the spectrum control so a replugged device starts with
                     // the waterfall OFF rather than silently resuming the FFT.
                     live.spectra.remove(&c);
+                    live.sdr_controls.remove(&c); // gone SDR endpoint loses its control cell
                     lease.release_all(c); // free any lease held on the gone rig
                 }
                 let ptt_chans: Vec<ChannelId> = live
@@ -845,6 +1211,8 @@ mod tests {
                     id: ChannelId(0),
                     name: "vfo-a".into(),
                     mode: "none".into(),
+                    rsid_tx: false,
+                    rsid_rx: false,
                     reply: tx,
                 })
                 .unwrap();
@@ -918,7 +1286,7 @@ mod tests {
             core.commands
                 .send(Command::ConfigurePtt {
                     id: ChannelId(0),
-                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false },
+                    ptt: PttConfig { device_id: ptt_id.clone(), method: PttMethod::Vox, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                     reply: t,
                 })
                 .unwrap();
@@ -967,7 +1335,7 @@ mod tests {
             core.commands
                 .send(Command::ConfigurePtt {
                     id: ChannelId(0),
-                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false },
+                    ptt: PttConfig { device_id: bh_id.clone(), method: PttMethod::Vox, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                     reply: t,
                 })
                 .unwrap();
@@ -1011,7 +1379,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: bh_id.clone(),
                         method: PttMethod::SerialRts { node: String::new() },
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: t,
                 })
@@ -1043,6 +1411,29 @@ mod tests {
     }
 
     #[test]
+    fn transmit_image_on_unknown_channel_errors() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (core, join) = fresh_core();
+        rt.block_on(async {
+            let (tx, rx) = oneshot::channel();
+            let send = crate::mode::picture_tx::PictureSend {
+                rgb: vec![0; 12],
+                width: 2,
+                height: 2,
+                color: false,
+                txspp: 8,
+            };
+            core.commands
+                .send(Command::TransmitImage { channel: ChannelId(9), send, reply: tx })
+                .unwrap();
+            let err = rx.await.unwrap().unwrap_err();
+            assert!(matches!(err, CoreError::UnknownChannel(ChannelId(9))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
     fn configured_audio_ptt_transmit_runs_real_cycle() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dev = DeviceDescriptor {
@@ -1065,6 +1456,8 @@ mod tests {
                     id: ChannelId(0),
                     name: "vfo-a".into(),
                     mode: "none".into(),
+                    rsid_tx: false,
+                    rsid_rx: false,
                     reply: tx,
                 })
                 .unwrap();
@@ -1091,7 +1484,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: dev_id.clone(),
                         method: PttMethod::None,
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: tx,
                 })
@@ -1126,7 +1519,14 @@ mod tests {
     async fn configure_channel(core: &CoreHandle, id: ChannelId, mode: &str) {
         let (tx, rx) = oneshot::channel();
         core.commands
-            .send(Command::ConfigureChannel { id, name: "ch".into(), mode: mode.into(), reply: tx })
+            .send(Command::ConfigureChannel {
+                id,
+                name: "ch".into(),
+                mode: mode.into(),
+                rsid_tx: false,
+                rsid_rx: false,
+                reply: tx,
+            })
             .unwrap();
         rx.await.unwrap().unwrap();
     }
@@ -1223,6 +1623,107 @@ mod tests {
                 })
                 .unwrap();
             assert!(matches!(rx.await.unwrap(), Err(CoreError::UnknownChannel(_))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn sdr_rpcs_require_an_sdr_bound_channel() {
+        // A channel with no SDR binding must reject every SDR control RPC with
+        // SdrRequired (mapped to FAILED_PRECONDITION at the gRPC edge).
+        let (core, join) = fresh_core();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "none").await;
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::SetSdrTune { channel: ChannelId(0), freq_hz: 144_390_000.0, reply: tx })
+                .unwrap();
+            assert!(matches!(rx.await.unwrap(), Err(CoreError::SdrRequired(_))));
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::GetSdrCaps { channel: ChannelId(0), reply: tx })
+                .unwrap();
+            assert!(matches!(rx.await.unwrap(), Err(CoreError::SdrRequired(_))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn configure_sdr_applies_bias_tee_and_direct_sampling_and_widens_caps() {
+        // Phase C: bias-tee and direct-sampling flow through to the shared control,
+        // and direct-sampling widens the reported tunable range down to HF.
+        use crate::audio::rtlsdr::{caps_from_header, RtlHeader};
+        let mut live = LiveBindings::default();
+        let ctrl = SdrControl::default();
+        ctrl.set_caps(caps_from_header(&RtlHeader { tuner_type: 5, tuner_gain_count: 29 }));
+        live.sdr_controls.insert(ChannelId(0), ctrl.clone());
+        let (tele, _keep) = broadcast::channel(16);
+
+        // Baseline: without direct-sampling the range is the tuner's normal span.
+        let base = get_sdr_caps(&live, ChannelId(0)).unwrap();
+        assert!(base.freq_min_hz > 0.0);
+        assert!(base.bias_tee_supported && base.direct_sampling_supported);
+
+        let ok = configure_sdr(
+            &mut live, ChannelId(0), 0, 0, -200.0, 0, true, true, &tele,
+        )
+        .unwrap();
+        assert_eq!(ok.actual_capture_rate, ctrl.capture_rate());
+        assert!(ctrl.bias_tee());
+        assert_eq!(ctrl.direct_sampling(), 2); // bool true → Q-branch
+
+        // Caps now advertise HF: floor at DC, ceiling at least the ADC Nyquist.
+        let caps = get_sdr_caps(&live, ChannelId(0)).unwrap();
+        assert_eq!(caps.freq_min_hz, 0.0);
+        assert!(caps.freq_max_hz >= DIRECT_SAMPLING_MAX_HZ);
+
+        // Turning direct-sampling back off restores the tuner's normal range.
+        configure_sdr(&mut live, ChannelId(0), 0, 0, -200.0, 0, false, false, &tele).unwrap();
+        assert!(!ctrl.bias_tee());
+        assert_eq!(ctrl.direct_sampling(), 0);
+        let restored = get_sdr_caps(&live, ChannelId(0)).unwrap();
+        assert_eq!(restored.freq_min_hz, base.freq_min_hz);
+    }
+
+    #[test]
+    fn list_devices_surfaces_registered_rtl_tcp_endpoints() {
+        // A config-registered rtl_tcp endpoint must appear in ListDevices even
+        // though no hardware enumeration produces it, alongside live devices.
+        let reg = DeviceDescriptor {
+            id: DeviceId::RtlTcp { host: "192.168.1.50".into(), port: 1234 },
+            label: "Rooftop".into(),
+            has_capture: true,
+            has_playback: false,
+        };
+        let store = Store::open_in_memory().unwrap();
+        let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();
+        let (core, join) = spawn_with_devices(
+            sup,
+            Box::new(FakeEnumerator::new(vec![named_device("Soundcard")])),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+            vec![reg.clone()],
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::ListDevices { reply: tx }).unwrap();
+            let devices = rx.await.unwrap();
+            assert!(
+                devices.iter().any(|d| d.id == reg.id && d.label == "Rooftop"),
+                "registered rtl_tcp endpoint missing from ListDevices"
+            );
+            // The enumerated soundcard is still present (registered devices are
+            // additive, not a replacement).
+            assert!(devices.iter().any(|d| matches!(&d.id, DeviceId::AlsaCard { .. })));
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
@@ -1366,7 +1867,7 @@ mod tests {
                     ptt: PttConfig {
                         device_id: dev_id.clone(),
                         method: PttMethod::None,
-                        invert: false,
+                        invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                     },
                     reply: tx,
                 })
@@ -1410,7 +1911,7 @@ mod tests {
         core.commands
             .send(Command::ConfigurePtt {
                 id,
-                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false },
+                ptt: PttConfig { device_id: dev, method: PttMethod::None, invert: false, tx_delay_ms: 0, tx_tail_ms: 0 },
                 reply: tx,
             })
             .unwrap();
@@ -1457,6 +1958,98 @@ mod tests {
         join.join().unwrap();
     }
 
+    // GRA-279: reconfiguring a channel while a burst is on the air must stop that
+    // burst promptly (the mode-switch collision) — not let it drain to the end —
+    // and TX must still work afterward. A mode change from the client is a
+    // ConfigureChannel+ConfigureAudio+ConfigurePtt sequence; ConfigureAudio drops
+    // the running worker, which now aborts the in-flight cycle instead of playing
+    // it out.
+    #[test]
+    fn reconfigure_mid_tx_aborts_burst_and_tx_survives() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(|_| Box::new(FileBackend::from_samples(vec![], 48_000))),
+        );
+        let mut tele_rx = core.telemetry.subscribe();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "psk31").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
+
+            // A long PSK31 message is tens of seconds of airtime; draining it
+            // would blow past the assertion below, so only a real abort passes.
+            let long = "CQ CQ CQ DE NW5W NW5W NW5W ".repeat(4).into_bytes();
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::Transmit { channel: ChannelId(0), payload: long, reply: tx })
+                .unwrap();
+            assert_eq!(rx.await.unwrap().unwrap(), TransmitId(1));
+
+            // Wait until the burst is actually on the air.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitStarted { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        assert_eq!(transmit_id, TransmitId(1));
+                        return;
+                    }
+                }
+            })
+            .await
+            .expect("TransmitStarted within timeout");
+
+            // Reconfigure audio mid-burst — the client's mode-switch step that
+            // drops and rebuilds the worker. The in-flight burst must abort now.
+            let t0 = std::time::Instant::now();
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitComplete { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        assert_eq!(transmit_id, TransmitId(1));
+                        return;
+                    }
+                }
+            })
+            .await
+            .expect("in-flight burst never completed after reconfigure");
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(3),
+                "burst drained instead of aborting: {:?}",
+                t0.elapsed(),
+            );
+
+            // Rebuild PTT (its driver was consumed by the aborted worker) and
+            // confirm TX is not left dead — a fresh transmit completes.
+            configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::Transmit { channel: ChannelId(0), payload: b"K".to_vec(), reply: tx })
+                .unwrap();
+            let id2 = rx.await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
+                    if let Ok(TelemetryEvent::TransmitComplete { transmit_id, .. }) =
+                        tele_rx.recv().await
+                    {
+                        if transmit_id == id2 {
+                            return;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("post-reconfigure transmit never completed");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
     // A channel restored from persistence must come up fully live (audio bound,
     // workers spawned) so TX works right after a restart — not only after the
     // operator reconfigures. Regression for "unknown channel" on TX post-restart.
@@ -1478,8 +2071,10 @@ mod tests {
                 ptt: Some(PttConfig {
                     device_id: dev_id.clone(),
                     method: PttMethod::None,
-                    invert: false,
+                    invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
                 }),
+                rsid_tx: false,
+                rsid_rx: false,
             })
             .unwrap();
         let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();

@@ -39,6 +39,61 @@ fn crc14_ft8_is_14_bits_and_deterministic() {
     assert!(a < (1 << 14), "CRC-14 must fit in 14 bits");
 }
 
+/// JS8's JSC compressed-text codec is bit-exact vs the reference.
+/// `compress(text)` reproduces the reference bit stream byte-for-byte and
+/// `decompress` inverts the reference stream. Provenance:
+/// `tests/vectors/js8_jsc.json` (js8call @ a7ff1be, driver
+/// `scratch/refvectors/js8/build_jsc.sh`). The same assertions run as plain
+/// lib unit tests in `framing::jsc` (CI has no `testutil`).
+#[test]
+fn jsc_codec_matches_reference() {
+    use omnimodem_dsp::framing::jsc::{compress_bits, decompress};
+    let raw = include_str!("vectors/js8_jsc.json");
+    let mut checked = 0;
+    for line in raw.lines().filter(|l| l.contains("\"compressed\"")) {
+        let field = |k: &str| -> String {
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let text = field("\"text\": \"");
+        let compressed = field("\"compressed\": \"");
+        let decompressed = field("\"decompressed\": \"");
+        let got: String = compress_bits(&text).iter().map(|&b| if b { '1' } else { '0' }).collect();
+        assert_eq!(got, compressed, "JSC compress differs for {text:?}");
+        let bits: Vec<bool> = compressed.bytes().map(|c| c == b'1').collect();
+        assert_eq!(decompress(&bits), decompressed, "JSC decompress differs for {text:?}");
+        checked += 1;
+    }
+    assert!(checked >= 10, "expected the full JSC vector set, got {checked}");
+}
+
+/// JS8's LDPC(174,87) encoder is bit-exact vs the reference `encode174`, and
+/// the (independently transcribed) generator and `Nm` parity tables agree
+/// (`parity_errors == 0`). Provenance: `tests/vectors/js8_ldpc.json` (js8call @
+/// a7ff1be, driver `scratch/refvectors/js8/build_ldpc.sh`, pure-Fortran
+/// `encode174.f90`). The same assertions run as lib unit tests in
+/// `fec::ldpc_js8` (CI has no `testutil`).
+#[test]
+fn js8_ldpc_174_87_matches_reference() {
+    use omnimodem_dsp::fec::ldpc_js8::{encode174, extract_message, js8_174_87_code, K};
+    let raw = include_str!("vectors/js8_ldpc.json");
+    let field = |k: &str| -> String {
+        let i = raw.find(k).unwrap() + k.len();
+        raw[i..raw[i..].find('"').unwrap() + i].to_string()
+    };
+    let bits = |s: &str| -> Vec<u8> { s.bytes().map(|c| c - b'0').collect() };
+    let msgbits = bits(&field("\"msgbits\": \""));
+    let codeword = bits(&field("\"codeword\": \""));
+    let mut m = [0u8; K];
+    m.copy_from_slice(&msgbits);
+    let cw = encode174(&m);
+    assert_eq!(cw.to_vec(), codeword, "encode174 differs from reference");
+    let code = js8_174_87_code();
+    assert_eq!((code.n(), code.k()), (174, 87));
+    assert_eq!(code.parity_errors(&cw), 0, "generator/Nm tables disagree");
+    assert_eq!(extract_message(&cw).to_vec(), msgbits, "message extraction mismatch");
+}
+
 /// Reed–Solomon corrects within capacity and *detects* (does not miscorrect)
 /// beyond it, for both the FX.25 (fcr=1) and IL2P (fcr=0) instantiations.
 #[test]
@@ -316,6 +371,19 @@ fn ft8_wav_interop_doc() {
 }
 
 #[test]
+#[ignore = "requires WSJT-X jt4/jt4sim binaries (live-audio interop, beyond the byte-exact gate)"]
+fn jt4_cross_decode_doc() {
+    // The byte-exact TX gate is a plain lib unit test
+    // (modes::jt4::tests::tx_symbols_match_reference_vector), so it runs on CI
+    // without `testutil`. This remaining live check needs the WSJT-X binaries:
+    //   ours→ref:  render our `Jt4Mod` (submode A) waveform to a .wav; WSJT-X's
+    //              `jt4` decoder must recover the message.
+    //   ref→ours:  `jt4sim "K1ABC W9XYZ EN37" A 1 0 0 1 -5` → our `Jt4Demod`
+    //              (submode A) `decode_window` recovers it (exercises the exact
+    //              packjt 72-bit layout our self-consistent `pack72` does not).
+}
+
+#[test]
 #[ignore = "requires Direwolf gen_packets/atest (Phase-4 interop gate)"]
 fn afsk1200_cross_decode_doc() {
     // ours→ref:  our `Afsk1200Mod` audio (48 kHz) → `atest` must decode the
@@ -342,6 +410,46 @@ fn psk31_cross_decode_doc() {
 #[ignore = "requires fldigi (Phase-4 interop gate)"]
 fn cw_cross_decode_doc() {
     // Cross-check CW (Morse) against fldigi's CW decoder in both directions.
+}
+
+// --- Phase-15 picture sub-protocol interop gates ------------------------------
+//
+// The CI-runnable proofs for the picture modes are the bit-exact golden-vector
+// KATs — header, RX parse table, colour plane order, and the integer quantiser,
+// each transcribed from fldigi 4.1.23 @ 61b97f413 and asserted in
+// modes::{mfsk,thor,ifkp,fsq}_pic — plus the loopback raster tolerance and the
+// raster-fidelity-vs-SNR sweep (ber.rs). The remaining live check needs a built
+// fldigi with its picture RX/TX, so it is `#[ignore]`d and documents the exact
+// bidirectional procedure, mirroring the FT8 / AFSK cross-decode gates above.
+
+#[test]
+#[ignore = "requires fldigi 4.1.23 with picture RX/TX (Phase-15 interop gate)"]
+fn picture_cross_decode_doc() {
+    // Per family (MFSK/THOR/IFKP/FSQ) at a representative size + colour:
+    //
+    // ours → fldigi:
+    //   Assemble the TX audio with the picture-send assembler, e.g.
+    //     mfsk_pic::build_tx(MfskVariant::M16, 1500.0, RasterRef{rgb,width,height},
+    //                        color, /*txspp*/8, /*reverse*/false)
+    //     thor_pic::build_tx(ThorVariant::T16, 1500.0, ThorPicSize::Small, rgb, grey, false)
+    //     ifkp_pic::build_tx(IfkpSpeed::Normal, 1500.0, IfkpPicSize::Small, rgb, grey, false)
+    //     fsq_pic::build_tx(FsqSpeed::S3, 1500.0, "n0call", FsqPicMode::Small, rgb)
+    //   Write the samples to a WAV at the mode's native rate (8000 MFSK/THOR,
+    //   16000 IFKP, 12000 FSQ). Play it into fldigi on the matching modem
+    //   (MFSK-16 / THOR-16 / IFKP / FSQ-3) with the picture RX window open: the
+    //   in-band header (`Pic:WxH` / `pic%X` / `% X`) switches fldigi into picture
+    //   RX and it must render the raster.
+    //
+    // fldigi → ours:
+    //   In fldigi, transmit the same test image on the matching modem+size to a
+    //   WAV. Feed the WAV to our text demod to recover the header (parse_header)
+    //   and to PictureCodec::decode to recover the raster; assert the raster
+    //   matches the reference within the loopback tolerance the ber.rs sweep uses
+    //   (FSQ tracks the pinned FsqLinear quantiser, ~6 counts low by design).
+    //
+    // The header / plane / quantiser bytes are already pinned bit-exact against
+    // fldigi's source in the *_pic golden vectors; this gate closes the last mile
+    // on the analog discriminator across fldigi's real synthesizer.
 }
 
 // --- Phase-4 exit criterion ---------------------------------------------------
@@ -692,7 +800,7 @@ fn nx_rate_grid_loopback_and_awgn() {
 }
 
 /// The uncoded multi-carrier `nX_PSKnnn` grid (no FEC): plain differential BPSK
-/// + PSK31 Varicode over N carriers, through the decimating matched filter.
+/// with PSK31 Varicode over N carriers, through the decimating matched filter.
 /// Clean loopback plus a gentle AWGN pass — with no FEC the noise margin is thin
 /// (0.01, well below the FEC-bearing modes' 0.02+). PSK31 keeps the trailing
 /// `00`, so the full message round-trips.
@@ -727,4 +835,912 @@ fn nx_nonrobust_grid_loopback_and_awgn() {
         add_awgn(&mut noisy, 0.01, &mut rng);
         assert!(texts(&PskDemod::new(v, 1500.0).feed(&noisy)).contains(msg), "{v:?} AWGN");
     }
+}
+
+// --- Group 9: DominoEX family (IFK+ MFSK, fldigi parity) -----------------
+
+/// Bit-exact: omnimodem's DominoEX Varicode nibble stream, IFK+ tone sequence,
+/// and the whole primary alphabet's encode/decode round-trip reproduce fldigi's
+/// tables byte-for-byte. Provenance: `tests/vectors/dominoex_varicode.json`
+/// (fldigi 4.1.23 @ 61b97f413, driver `scratch/refvectors/build_dominoex_varicode.sh`).
+#[test]
+fn dominoex_varicode_and_ifk_match_fldigi_vector() {
+    use omnimodem_dsp::framing::dominoex_varicode::{decode_index, encode_char, Varidecoder};
+    use omnimodem_dsp::modes::dominoex::{text_nibbles, text_tones};
+
+    let raw = include_str!("vectors/dominoex_varicode.json");
+
+    // 1. Whole primary alphabet: nib / idx / dec columns, byte-for-byte.
+    let dec = Varidecoder::new();
+    for c in 0u16..256 {
+        let needle = format!("\"c\":{c},");
+        let row = raw.lines().find(|l| l.contains(&needle)).expect("primary row");
+        let field = |k: &str| {
+            let i = row.find(&needle).unwrap();
+            let j = row[i..].find(k).unwrap() + i + k.len();
+            row[j..].to_string()
+        };
+        let want_nib = {
+            let s = field("\"nib\":\"");
+            s[..s.find('"').unwrap()].to_string()
+        };
+        let want_idx: u16 =
+            field("\"idx\":")[..field("\"idx\":").find(&[',', '}'][..]).unwrap()].parse().unwrap();
+        let want_dec: i32 =
+            field("\"dec\":")[..field("\"dec\":").find(&[',', '}'][..]).unwrap()].parse().unwrap();
+
+        let nib = encode_char(c as u8, false);
+        let got_nib: String = nib.iter().map(|n| format!("{n:x}")).collect();
+        assert_eq!(got_nib, want_nib, "char {c} nibbles");
+        let idx = decode_index(&nib);
+        assert_eq!(idx, want_idx, "char {c} decode index");
+        assert_eq!(dec.decode(idx).map(|v| v as i32).unwrap_or(-1), want_dec, "char {c} decoded");
+    }
+
+    // 2. Per-message nibble + IFK+ tone streams.
+    for msg in ["CQ DE K1ABC", "The quick brown fox 0123456789"] {
+        let needle = format!("\"msg\":\"{msg}\"");
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("message line");
+        let nib_field = {
+            let k = "\"nibbles\":\"";
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let want_nib: Vec<u8> =
+            nib_field.chars().map(|ch| ch.to_digit(16).unwrap() as u8).collect();
+        assert_eq!(text_nibbles(msg), want_nib, "{msg:?} nibbles");
+
+        let k = "\"tones\":[";
+        let i = line.find(k).unwrap() + k.len();
+        let arr = &line[i..line[i..].find(']').unwrap() + i];
+        let want_tones: Vec<u32> = arr.split(',').map(|s| s.trim().parse().unwrap()).collect();
+        assert_eq!(text_tones(msg), want_tones, "{msg:?} IFK+ tones");
+    }
+}
+
+/// Every DominoEX submode round-trips a message TX→RX on a clean channel and
+/// under light AWGN (Goertzel tone detection + IFK+ inverse + Varicode framing).
+/// The submode grid is parametric; one message per submode.
+#[test]
+fn dominoex_submode_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::dominoex::{DominoDemod, DominoMod, DominoVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decode(v: DominoVariant, samples: &[f32]) -> String {
+        let mut rx = DominoDemod::new(v, 1500.0);
+        let mut f = rx.feed(samples);
+        f.extend(rx.flush());
+        texts(&f)
+    }
+
+    let msg = "CQ DE K1ABC/7";
+    for (i, &v) in DominoVariant::all().iter().enumerate() {
+        let clean = DominoMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(decode(v, &clean), msg, "{} clean loopback", v.label());
+
+        let mut noisy = DominoMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xD0E0 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
+    }
+}
+
+/// Extract every signed integer from a text fragment, in order. Used to read the
+/// compact JSON-line reference vectors without a serde dependency.
+fn kat_ints(s: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let neg = b[i] == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit();
+        if b[i].is_ascii_digit() || neg {
+            let start = i;
+            if neg {
+                i += 1;
+            }
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            out.push(s[start..i].parse().unwrap());
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The value of a *flat* integer array field `"<key>":[ ... ]` on a JSON line
+/// (stops at the first `]`).
+fn kat_arr(line: &str, key: &str) -> Vec<i64> {
+    let k = format!("\"{key}\":[");
+    let i = line.find(&k).unwrap() + k.len();
+    let j = line[i..].find(']').unwrap() + i;
+    kat_ints(&line[i..j])
+}
+
+/// Every integer in the (possibly nested) `"rows":[ ... ]` field — the outer
+/// array runs to the last `]` on the line, and bracket punctuation is ignored.
+fn kat_rows(line: &str) -> Vec<i64> {
+    let k = "\"rows\":[";
+    let i = line.find(k).unwrap() + k.len();
+    let j = line.rfind(']').unwrap();
+    kat_ints(&line[i..j])
+}
+
+/// Bit-exact: omnimodem's IFKP and FSQ varicode tables, IFK tone streams, and
+/// FSQ CRC8 reproduce fldigi's byte-for-byte. Provenance:
+/// `tests/vectors/{ifkp,fsq}_varicode.json` (drivers
+/// `scratch/refvectors/build_{ifkp,fsq}_varicode.sh`).
+#[test]
+fn ifkp_and_fsq_varicode_match_fldigi_vector() {
+    use omnimodem_dsp::framing::fsq_varicode::{self, FSQ_VARICODE, WSQ_VARIDECODE};
+    use omnimodem_dsp::framing::ifkp_varicode::{IFKP_VARICODE, IFKP_VARIDECODE};
+    use omnimodem_dsp::modes::{fsq, ifkp};
+
+    // --- IFKP ---
+    let raw = include_str!("vectors/ifkp_varicode.json");
+    let line = |name: &str| raw.lines().find(|l| l.contains(name)).expect(name);
+
+    let enc = kat_rows(line("\"ifkp_varicode\""));
+    let flat: Vec<i64> = IFKP_VARICODE.iter().flat_map(|r| [r[0] as i64, r[1] as i64]).collect();
+    assert_eq!(enc, flat, "ifkp_varicode encode table");
+
+    let dec = kat_rows(line("\"ifkp_varidecode\""));
+    let want_dec: Vec<i64> = IFKP_VARIDECODE.iter().map(|&v| v as i64).collect();
+    assert_eq!(dec, want_dec, "ifkp_varidecode table");
+
+    for msg in ["hello world", "CQ CQ CQ de K1ABC", "The quick brown fox 0123456789!"] {
+        let l = line(&format!("\"msg\":\"{msg}\""));
+        let want_syms: Vec<u8> = kat_arr(l, "syms").iter().map(|&v| v as u8).collect();
+        let want_tones: Vec<u32> = kat_arr(l, "tones").iter().map(|&v| v as u32).collect();
+        assert_eq!(ifkp::text_syms(msg), want_syms, "ifkp {msg:?} syms");
+        assert_eq!(ifkp::text_tones(msg), want_tones, "ifkp {msg:?} tones");
+    }
+
+    // --- FSQ ---
+    let raw = include_str!("vectors/fsq_varicode.json");
+    let line = |name: &str| raw.lines().find(|l| l.contains(name)).expect(name);
+
+    let enc = kat_rows(line("\"fsq_varicode\""));
+    let flat: Vec<i64> = FSQ_VARICODE.iter().flat_map(|r| [r[0] as i64, r[1] as i64]).collect();
+    assert_eq!(enc, flat, "fsq_varicode encode table");
+
+    let dec = kat_rows(line("\"wsq_varidecode\""));
+    let want_dec: Vec<i64> = WSQ_VARIDECODE.iter().map(|&v| v as i64).collect();
+    assert_eq!(dec, want_dec, "wsq_varidecode table");
+
+    // CRC8 rows: {"s":"<call>","crc":"<hex>"}.
+    let crc_line = line("\"crc8\"");
+    for pair in crc_line.split("{\"s\":\"").skip(1) {
+        let call = &pair[..pair.find('"').unwrap()];
+        let ci = pair.find("\"crc\":\"").unwrap() + 7;
+        let crc = &pair[ci..ci + 2];
+        assert_eq!(fsq_varicode::crc8_hex(call), crc, "crc8({call})");
+    }
+
+    // Frame tone streams: the plain-text frame and the full directed frame.
+    let l = line("\"frame\":\"text\"");
+    let want_tones: Vec<u32> = kat_arr(l, "tones").iter().map(|&v| v as u32).collect();
+    assert_eq!(fsq::raw_tones("the quick brown fox de w1hkj"), want_tones, "fsq text tones");
+
+    let l = line("\"frame\":\"directed\"");
+    let want_tones: Vec<u32> = kat_arr(l, "tones").iter().map(|&v| v as u32).collect();
+    let onair = fsq::build_tx("w1hkj", "k1abc test", true);
+    assert_eq!(fsq::raw_tones(&onair), want_tones, "fsq directed tones");
+}
+
+/// IFKP and FSQ recover a fixed message across every speed at high SNR and under
+/// mild AWGN. (Loopback is necessary-not-sufficient per Doctrine §5; the
+/// bidirectional cross-decode is the `#[ignore]` gate below.)
+#[test]
+fn ifkp_fsq_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::fsq::{FsqDemod, FsqMod, FsqSpeed};
+    use omnimodem_dsp::modes::ifkp::{IfkpDemod, IfkpMod, IfkpSpeed};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn texts(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ CQ de K1ABC/7 73";
+    for (i, &sp) in IfkpSpeed::all().iter().enumerate() {
+        let clean = IfkpMod::new(sp, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = IfkpDemod::new(sp, 1500.0);
+        let mut f = rx.feed(&clean);
+        f.extend(rx.flush());
+        assert_eq!(texts(&f), msg, "ifkp {} clean", sp.label());
+
+        let mut noisy = IfkpMod::new(sp, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x1F00 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        let mut rx = IfkpDemod::new(sp, 1500.0);
+        let mut f = rx.feed(&noisy);
+        f.extend(rx.flush());
+        assert_eq!(texts(&f), msg, "ifkp {} AWGN", sp.label());
+    }
+
+    // FSQ raw-keyboard loopback (no directed header); the monitor stream carries
+    // the body verbatim (FSQ prepends its faithful leading-space seed).
+    for (i, &sp) in FsqSpeed::all().iter().enumerate() {
+        let clean = FsqMod::new(sp, 1500.0, "", false).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = FsqDemod::new(sp, 1500.0, "");
+        let mut f = rx.feed(&clean);
+        f.extend(rx.flush());
+        assert!(texts(&f).contains(msg), "fsq {} clean", sp.label());
+
+        let mut noisy = FsqMod::new(sp, 1500.0, "", false).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xF500 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        let mut rx = FsqDemod::new(sp, 1500.0, "");
+        let mut f = rx.feed(&noisy);
+        f.extend(rx.flush());
+        assert!(texts(&f).contains(msg), "fsq {} AWGN", sp.label());
+    }
+}
+
+/// Bidirectional cross-decode against the fldigi `fldigi` CLI — the decisive
+/// interop gate (Doctrine §5). `#[ignore]`d because it needs the reference binary
+/// on `PATH` (env `FLDIGI_BIN`), mirroring the FT8 gate: our IFKP/FSQ TX must
+/// decode in fldigi and fldigi's TX must decode in ours, at the same audio
+/// offset. Enable once a headless fldigi build is wired into CI.
+#[test]
+#[ignore]
+fn ifkp_fsq_cross_decode_fldigi() {
+    // Placeholder for the reference-binary interop gate; see the module header
+    // and Doctrine §5. Left intentionally empty until FLDIGI_BIN is provisioned.
+}
+
+/// Bit-exact: omnimodem's THOR TX chain (THOR varicode → convolutional FEC →
+/// size-4 interleave → IFK+) reproduces fldigi's stage intermediates byte-for-
+/// byte, for both the K=7 (THOR16) and K=15 (THOR100) paths, plus the secondary
+/// varicode table. Provenance: `tests/vectors/thor_varicode.json` (fldigi 4.1.23
+/// @ 61b97f413, driver `scratch/refvectors/build_thor.sh`).
+#[test]
+fn thor_varicode_fec_and_ifk_match_fldigi_vector() {
+    use omnimodem_dsp::fec::conv::ConvEncoder;
+    use omnimodem_dsp::fec::interleave::MfskInterleaver;
+    use omnimodem_dsp::framing::thor_varicode;
+    use omnimodem_dsp::modes::thor::{encode_symbols, ThorVariant};
+
+    let raw = include_str!("vectors/thor_varicode.json");
+    let str_field = |line: &str, k: &str| {
+        let i = line.find(k).unwrap() + k.len();
+        line[i..line[i..].find('"').unwrap() + i].to_string()
+    };
+    let nums = |s: String| -> Vec<u32> { s.split(' ').map(|x| x.parse().unwrap()).collect() };
+
+    // 1. Per-mode message stages: code pairs, post-interleave nibbles, IFK+ tones.
+    for (mode, v) in [("thor16", ThorVariant::T16), ("thor100", ThorVariant::T100)] {
+        let line = raw.lines().find(|l| l.contains(&format!("\"mode\":\"{mode}\""))).unwrap();
+        let msg = str_field(line, "\"msg\":\"");
+        let want_pairs = nums(str_field(line, "\"codepairs\":\""));
+        let want_inlv = nums(str_field(line, "\"inlv\":\""));
+        let want_tones = nums(str_field(line, "\"tones\":\""));
+
+        assert_eq!(encode_symbols(v, &msg), want_tones, "{mode} IFK+ tones");
+
+        // Re-derive the FEC + interleave stages against their columns.
+        let mut enc = ConvEncoder::new(v.conv_code());
+        let mut inlv = MfskInterleaver::<u8>::new(4, v.params().idepth, true, 0u8);
+        let (mut pairs, mut nibbles) = (Vec::new(), Vec::new());
+        let (mut bitstate, mut bitshreg) = (0, 0u32);
+        let mut coded = Vec::new();
+        for &ch in msg.as_bytes() {
+            for bit in thor_varicode::encode(ch, false) {
+                coded.clear();
+                enc.encode(bit, &mut coded);
+                pairs.push(coded[0] as u32 | ((coded[1] as u32) << 1));
+                for &cb in &coded {
+                    bitshreg = (bitshreg << 1) | cb as u32;
+                    bitstate += 1;
+                    if bitstate == 4 {
+                        inlv.bits(&mut bitshreg);
+                        nibbles.push(bitshreg);
+                        bitstate = 0;
+                        bitshreg = 0;
+                    }
+                }
+            }
+        }
+        assert_eq!(pairs, want_pairs, "{mode} conv code pairs");
+        assert_eq!(nibbles, want_inlv, "{mode} interleaved nibbles");
+    }
+
+    // 2. The secondary varicode table, entry by entry.
+    let sline = raw.lines().find(|l| l.contains("\"secondary\"")).unwrap();
+    let mut n = 0;
+    for entry in sline.split('{').skip(2) {
+        let f = |k: &str| -> &str {
+            let i = entry.find(k).unwrap() + k.len();
+            &entry[i..i + entry[i..].find(['"', ',', '}']).unwrap()]
+        };
+        let c: u8 = f("\"c\":").parse().unwrap();
+        let code = f("\"code\":\"").to_string();
+        let dec: u16 = f("\"dec\":").parse().unwrap();
+        let got: String = thor_varicode::encode(c, true).iter().map(|b| (b + b'0') as char).collect();
+        assert_eq!(got, code, "secondary encode c={c}");
+        let sym = code.bytes().fold(0u32, |a, b| (a << 1) | (b - b'0') as u32);
+        assert_eq!(thor_varicode::decode(sym), Some(dec), "secondary decode c={c}");
+        n += 1;
+    }
+    assert_eq!(n, 91, "full secondary table");
+}
+
+/// Every THOR submode round-trips a message TX→RX on a clean channel (and, for
+/// the K=7 low-speed family, under light AWGN — the convolutional FEC recovers
+/// it). The decoded stream contains the message contiguously; the idle
+/// preamble/flush that primes the interleaver + Viterbi frames it.
+#[test]
+fn thor_submode_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::thor::{ThorDemod, ThorMod, ThorVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn decode(v: ThorVariant, samples: &[f32]) -> String {
+        let mut rx = ThorDemod::new(v, 1500.0);
+        rx.feed(samples)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Preamble detection is deferred, so the RX emits a short, bounded startup
+    // transient before the framer locks (see modes::thor docs); assert the strong
+    // invariant — the message arrives intact at the tail after ≤8 bytes of smear —
+    // rather than a loose `contains` that would hide tail corruption or drops.
+    fn assert_recovers(v: ThorVariant, msg: &str, got: &str, ch: &str) {
+        assert!(got.ends_with(msg), "{} {ch} lost the message tail: {got:?}", v.label());
+        assert!(got.len() - msg.len() <= 8, "{} {ch} transient too long: {got:?}", v.label());
+    }
+
+    let msg = "CQ DE K1ABC/7";
+    for (i, &v) in ThorVariant::all().iter().enumerate() {
+        let clean = ThorMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert_recovers(v, msg, &decode(v, &clean), "clean loopback");
+
+        // The K=15 modes carry a much longer Viterbi; keep the noise pass to the
+        // K=7 family to bound test time (still the whole low-speed grid).
+        if v.params().k == 7 {
+            let mut noisy = ThorMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+            let mut rng = Rng::new(0x7407 + i as u64);
+            add_awgn(&mut noisy, 0.02, &mut rng);
+            assert_recovers(v, msg, &decode(v, &noisy), "AWGN loopback");
+        }
+    }
+}
+
+/// Bit-exact: omnimodem's Feld Hell font (`hellfont::glyph_columns`) and on-air
+/// column raster (`hellfont::on_air_columns`) reproduce fldigi's tables and
+/// `tx_char` framing byte-for-byte, for every printable glyph and both test
+/// messages. Provenance: `tests/vectors/feldhell.json` (fldigi 4.1.23 @
+/// 61b97f413, driver `scratch/refvectors/build_feldhell.sh`, feldfontnbr 4).
+#[test]
+fn feldhell_font_and_raster_match_fldigi_vector() {
+    use omnimodem_dsp::framing::hellfont::{glyph_columns, on_air_columns, DEFAULT_XMT_WIDTH};
+
+    let raw = include_str!("vectors/feldhell.json");
+
+    // Parse the `"cols":[a,b,c]` array from a vector line.
+    fn cols_of(line: &str) -> Vec<u16> {
+        let k = "\"cols\":[";
+        let i = line.find(k).unwrap() + k.len();
+        let arr = &line[i..line[i..].find(']').unwrap() + i];
+        if arr.trim().is_empty() {
+            return Vec::new();
+        }
+        arr.split(',').map(|s| s.trim().parse().unwrap()).collect()
+    }
+
+    // 1. Every printable glyph's trimmed column raster.
+    for c in b' '..=b'~' {
+        let needle = format!("\"kind\":\"glyph\",\"c\":{},", c);
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("glyph row");
+        assert_eq!(glyph_columns(c), cols_of(line), "glyph {c}");
+    }
+
+    // 2. Both on-air column streams (leading/trailing null-column framing).
+    for msg in ["CQ DE K1ABC", "The quick brown fox 0123456789"] {
+        let needle = format!("\"kind\":\"stream\",\"msg\":\"{msg}\"");
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("stream row");
+        assert_eq!(on_air_columns(msg, DEFAULT_XMT_WIDTH), cols_of(line), "{msg:?} stream");
+    }
+}
+
+/// Every Feld Hell submode round-trips a message TX→RX as a raster on a clean
+/// channel and under light AWGN: the decoded image columns reproduce the
+/// bit-exact on-air glyph columns (the facsimile loopback gate, Doctrine §3 —
+/// audio is never asserted bit-exact).
+#[test]
+fn hell_submode_grid_raster_loopback_and_awgn() {
+    use omnimodem_dsp::framing::hellfont::{on_air_columns, DEFAULT_XMT_WIDTH};
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::hell::{image_columns, HellDemod, HellMod, HellVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn raster(v: HellVariant, samples: &[f32]) -> Vec<u16> {
+        let mut rx = HellDemod::new(v, 1500.0);
+        rx.feed(samples);
+        let frames = rx.flush();
+        match &frames[0].payload {
+            FramePayload::Image { width, pixels, .. } => image_columns(*width, pixels),
+            _ => panic!("expected Image payload"),
+        }
+    }
+
+    let msg = "CQ DE K1ABC";
+    let want = on_air_columns(msg, DEFAULT_XMT_WIDTH);
+    for (i, &v) in HellVariant::all().iter().enumerate() {
+        let clean = HellMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let got = raster(v, &clean);
+        assert_eq!(&got[..want.len()], &want[..], "{} clean raster loopback", v.label());
+
+        let mut noisy = HellMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xFE1D + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        let got = raster(v, &noisy);
+        assert_eq!(&got[..want.len()], &want[..], "{} AWGN raster loopback", v.label());
+    }
+}
+
+// --- Group 11: MFSK + Contestia families (fldigi parity) ------------------
+
+/// Bit-exact: omnimodem's MFSK TX chain (varicode → K=7 conv → interleave →
+/// grayencode) reproduces fldigi's `coded` bits, interleaved `symbols`, and
+/// gray `tones` byte-for-byte for every representative submode. Provenance:
+/// `tests/vectors/mfsk.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_mfsk.sh`).
+#[test]
+fn mfsk_tx_chain_matches_fldigi_vector() {
+    use omnimodem_dsp::framing::varicode::mfsk_encode;
+    use omnimodem_dsp::modes::mfsk::{text_tones, MfskVariant};
+
+    let raw = include_str!("vectors/mfsk.json");
+    for &v in MfskVariant::all() {
+        let needle = format!("\"mode\":\"{}\"", v.label());
+        let line = raw.lines().find(|l| l.contains(&needle)).expect("submode line");
+        let field = |k: &str| {
+            let i = line.find(k).unwrap() + k.len();
+            line[i..line[i..].find('"').unwrap() + i].to_string()
+        };
+        let msg = field("\"msg\":\"");
+        let want_tones: Vec<u32> =
+            field("\"tones\":\"").split(' ').map(|s| s.parse().unwrap()).collect();
+        assert_eq!(text_tones(v, &msg), want_tones, "{} tones", v.label());
+
+        // The varicode bits are the front of the chain — assert them too so a
+        // break localises to the varicode vs the FEC/interleave/gray stages.
+        let want_vari: Vec<u8> = field("\"varicode\":\"").bytes().map(|c| c - b'0').collect();
+        assert_eq!(mfsk_encode(&msg), want_vari, "{} varicode", v.label());
+    }
+}
+
+/// Every MFSK submode round-trips a message TX→RX on a clean channel and under
+/// light AWGN (Goertzel tone detection + gray/interleave inverse + streaming
+/// Viterbi + MFSK Varicode framing). Parametric grid; one message per submode.
+#[test]
+fn mfsk_submode_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::mfsk::{MfskDemod, MfskMod, MfskVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn decode(v: MfskVariant, samples: &[f32]) -> String {
+        let mut rx = MfskDemod::new(v, 1500.0);
+        rx.feed(samples)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC 73";
+    // The deep-interleave 64L/128L modes have very long latency (and 8000-sample
+    // symbols for 64L); the shallow reps of each symbits width carry the grid.
+    for (i, &v) in [
+        MfskVariant::M4,
+        MfskVariant::M8,
+        MfskVariant::M16,
+        MfskVariant::M31,
+        MfskVariant::M32,
+        MfskVariant::M64,
+        MfskVariant::M128,
+        MfskVariant::M11,
+        MfskVariant::M22,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let clean = MfskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(decode(v, &clean), msg, "{} clean loopback", v.label());
+
+        let mut noisy = MfskMod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0x11F5 + i as u64);
+        add_awgn(&mut noisy, 0.02, &mut rng);
+        assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
+    }
+}
+
+/// Every Contestia submode round-trips a message TX→RX on a clean channel and
+/// under light AWGN (MFSK tone bank + 32-chip Walsh soft decode). Parametric
+/// grid; one message per submode.
+#[test]
+fn contestia_grid_loopback_and_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::contestia::{ContestiaDemod, ContestiaMod, ContestiaVariant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    fn decode(v: ContestiaVariant, samples: &[f32]) -> String {
+        let mut rx = ContestiaDemod::new(v.tones, v.bandwidth_hz);
+        rx.feed(samples)
+            .iter()
+            .filter_map(|f| match &f.payload {
+                FramePayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let msg = "CQ DE K1ABC 2024";
+    for (i, &v) in ContestiaVariant::all().iter().enumerate() {
+        let clean = ContestiaMod::new(v.tones, v.bandwidth_hz).modulate(&Frame::text(msg)).unwrap();
+        assert_eq!(decode(v, &clean), msg, "{} clean loopback", v.label());
+
+        let mut noisy =
+            ContestiaMod::new(v.tones, v.bandwidth_hz).modulate(&Frame::text(msg)).unwrap();
+        let mut rng = Rng::new(0xC047 + i as u64);
+        add_awgn(&mut noisy, 0.015, &mut rng);
+        assert_eq!(decode(v, &noisy), msg, "{} AWGN loopback", v.label());
+    }
+}
+
+// --- Group 11: MT63 family (64-carrier overlapping-Walsh OFDM, fldigi parity) --
+
+/// Locate an MT63 config block's `encoder`/`txvect` lines by a minimal scan.
+fn mt63_config_lines(cfg: &str) -> (&'static str, &'static str) {
+    let raw = include_str!("vectors/mt63.json");
+    let mut lines = raw.lines();
+    let needle = format!("\"{cfg}\": {{");
+    for l in lines.by_ref() {
+        if l.contains(&needle) {
+            break;
+        }
+    }
+    let (mut enc, mut tx) = (None, None);
+    for l in lines.by_ref() {
+        if l.contains("\"encoder\"") {
+            enc = Some(l);
+        } else if l.contains("\"txvect\"") {
+            tx = Some(l);
+            break;
+        }
+    }
+    (enc.unwrap(), tx.unwrap())
+}
+
+/// Bit-exact: omnimodem's MT63 encoder (inverse-Walsh spread + block interleave)
+/// and per-carrier `TxVect` DBPSK phase indices reproduce fldigi's
+/// `MT63encoder.Output` and `MT63tx::SendChar` byte-for-byte across every config.
+/// Provenance: `tests/vectors/mt63.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_mt63.sh`). Mirrors the `frontend::ofdm` lib KAT so
+/// the gate runs both with and without the `testutil` feature.
+#[test]
+fn mt63_encoder_and_txvect_match_fldigi_vector() {
+    use omnimodem_dsp::frontend::ofdm::{tx_phase_indices, Interleave, Mt63Encoder, Mt63Geometry};
+    const MSG: &str = "CQ CQ DE K1ABC K1ABC/7 --.,?!";
+
+    for cfg in ["mt63_500s", "mt63_1000s", "mt63_1000l", "mt63_2000s"] {
+        let (enc_line, tx_line) = mt63_config_lines(cfg);
+        let intlv = if cfg.ends_with('l') { Interleave::Long } else { Interleave::Short };
+        let bw: u32 =
+            cfg.trim_start_matches("mt63_").trim_end_matches(['s', 'l']).parse().unwrap();
+
+        // encoder bits
+        let want_enc: Vec<Vec<u8>> = {
+            let inner = &enc_line[enc_line.find('[').unwrap() + 1..enc_line.rfind(']').unwrap()];
+            inner
+                .split(',')
+                .map(|t| t.trim().trim_matches('"').bytes().map(|c| c - b'0').collect())
+                .collect()
+        };
+        let mut enc = Mt63Encoder::new(intlv);
+        for (k, ch) in MSG.bytes().enumerate() {
+            assert_eq!(enc.process(ch).to_vec(), want_enc[k], "{cfg}: encoder char {k}");
+        }
+
+        // txvect phase indices
+        let want_tx: Vec<Vec<i32>> = {
+            let inner = &tx_line[tx_line.find('[').unwrap() + 1..tx_line.rfind(']').unwrap()];
+            inner
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split("],[")
+                .map(|r| r.split(',').map(|s| s.trim().parse().unwrap()).collect())
+                .collect()
+        };
+        let geo = Mt63Geometry::new(bw, 1500.0);
+        let chars: Vec<u8> = MSG.bytes().collect();
+        let got = tx_phase_indices(&geo, intlv, &chars);
+        for (k, (g, w)) in got.iter().zip(&want_tx).enumerate() {
+            assert_eq!(g.to_vec(), *w, "{cfg}: txvect symbol {k}");
+        }
+    }
+}
+
+/// Every MT63 submode round-trips a message TX→RX on a clean channel (windowed
+/// OFDM synthesis → per-carrier differential-BPSK demod → deinterleave + Walsh).
+/// The submode grid is parametric; one message per submode.
+#[test]
+fn mt63_submode_grid_loopback() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::mt63::{Mt63Demod, Mt63Mod, Mt63Variant};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    let msg = "CQ DE K1ABC/7 EM73";
+    for &v in Mt63Variant::all() {
+        let audio = Mt63Mod::new(v, 1500.0).modulate(&Frame::text(msg)).unwrap();
+        let mut rx = Mt63Demod::new(v, 1500.0);
+        let mut out = String::new();
+        for chunk in audio.chunks(1024) {
+            for f in rx.feed(chunk) {
+                if let FramePayload::Text(t) = &f.payload {
+                    out.push_str(t);
+                }
+            }
+        }
+        assert!(out.contains(msg), "{}: got {out:?}", v.label());
+    }
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-11 interop gate)"]
+fn mt63_cross_decode_doc() {
+    // Cross-check MT63-500/1000/2000 × Short/Long against fldigi's MT63 modem in
+    // both directions (our TX decodes in fldigi and fldigi's TX decodes in ours).
+    // The bit-exact encoder/TxVect gate above already pins the on-air integer
+    // domain; this live-audio gate additionally exercises the sync tracker.
+}
+
+/// Bit-exact Throb / ThrobX KAT: the tone-pair tables, character sets, and the
+/// `(tone1,tone2)` sequence `tx_process`/`send` emit for a fixed message all match
+/// the golden vector extracted from the unmodified fldigi tables byte-for-byte.
+/// Provenance: `tests/vectors/throb.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_throb.sh`).
+#[test]
+fn throb_tables_and_tones_match_fldigi_vector() {
+    use omnimodem_dsp::modes::throb::{
+        text_tones, ThrobVariant, THROBX_CHARSET, THROBX_TONEPAIRS, THROB_CHARSET, THROB_TONEPAIRS,
+    };
+
+    let raw = include_str!("vectors/throb.json").trim();
+
+    // Flatten every int inside a (possibly nested) `"key":[ ... ]` array, scanning
+    // to the bracket-depth-matched closing `]` (kat_arr stops at the first `]`,
+    // which would truncate a nested pair array).
+    fn nested(s: &str, key: &str) -> Vec<i64> {
+        let k = format!("\"{key}\":[");
+        let start = s.find(&k).unwrap_or_else(|| panic!("key {key}")) + k.len() - 1; // at '['
+        let bytes = s.as_bytes();
+        let (mut depth, mut i) = (0i32, start);
+        loop {
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        kat_ints(&s[start..=i])
+    }
+    let pairs = |s: &str, key: &str| -> Vec<(u8, u8)> {
+        nested(s, key).chunks(2).map(|c| (c[0] as u8, c[1] as u8)).collect()
+    };
+
+    // 1. Tone-pair tables (nested pairs) and char sets (flat).
+    assert_eq!(pairs(raw, "throb_tonepairs"), THROB_TONEPAIRS.to_vec(), "ThrobTonePairs");
+    assert_eq!(pairs(raw, "throbx_tonepairs"), THROBX_TONEPAIRS.to_vec(), "ThrobXTonePairs");
+    let bytes = |key: &str| -> Vec<u8> { kat_arr(raw, key).iter().map(|&v| v as u8).collect() };
+    assert_eq!(bytes("throb_charset"), THROB_CHARSET.to_vec(), "ThrobCharSet");
+    assert_eq!(bytes("throbx_charset"), THROBX_CHARSET.to_vec(), "ThrobXCharSet");
+
+    // 2. Per-message emitted tone-pair sequences (Throb1/ThrobX1 stand in for the
+    //    family — the tone *indices* are identical across symlen submodes).
+    for (mode, text, v) in [
+        ("throb", "CQ DE K1ABC", ThrobVariant::Throb1),
+        ("throb", "R U THERE? 73", ThrobVariant::Throb1),
+        ("throbx", "CQ DE K1ABC", ThrobVariant::ThrobX1),
+        ("throbx", "R U THERE? 73", ThrobVariant::ThrobX1),
+    ] {
+        let needle = format!("\"mode\":\"{mode}\",\"text\":\"{text}\"");
+        let at = raw.find(&needle).expect("message object");
+        let want: Vec<(u8, u8)> = pairs(&raw[at..], "tones");
+        assert_eq!(text_tones(v, text), want, "{mode} {text:?} tone sequence");
+    }
+}
+// --- Phase 12: NAVTEX / SITOR-B (CCIR-476 FEC-B) --------------------------
+
+/// The CCIR-476 code tables, `char_to_code` encode, `create_fec` time-diversity
+/// stream, and the LSB-first on-air bit stream match the fldigi reference
+/// byte-for-byte (the bit-exact domain, Doctrine §3). Provenance:
+/// `tests/vectors/navtex_ccir476.json` (fldigi 4.1.23 @ 61b97f413, driver
+/// `scratch/refvectors/build_navtex_ccir476.sh`).
+#[test]
+fn navtex_ccir476_matches_fldigi_vector() {
+    use omnimodem_dsp::fec::ccir476::{
+        check_bits, codes_to_bits, create_fec, Ccir476, CODE_TO_FIGS, CODE_TO_LTRS,
+    };
+
+    let raw = include_str!("vectors/navtex_ccir476.json");
+
+    // Helper: the integer after `"key":` up to the next `,`/`}`.
+    let int_after = |hay: &str, at: usize, key: &str| -> i64 {
+        let i = hay[at..].find(key).unwrap() + at + key.len();
+        let end = hay[i..].find([',', '}']).unwrap() + i;
+        hay[i..end].parse().unwrap()
+    };
+
+    // 1. Full 128-entry code table: valid mask + letter/figure slots.
+    for code in 0u16..128 {
+        let needle = format!("\"code\":{code},");
+        let at = raw.find(&needle).expect("table row");
+        let valid_str = {
+            let i = raw[at..].find("\"valid\":").unwrap() + at + "\"valid\":".len();
+            raw[i..].starts_with("true")
+        };
+        let want_ltrs = int_after(raw, at, "\"ltrs\":") as u8;
+        let want_figs = int_after(raw, at, "\"figs\":") as u8;
+        assert_eq!(check_bits(code as u8), valid_str, "code {code} validity");
+        assert_eq!(CODE_TO_LTRS[code as usize], want_ltrs, "code {code} ltrs");
+        assert_eq!(CODE_TO_FIGS[code as usize], want_figs, "code {code} figs");
+    }
+
+    // 2. Per-message encode + FEC + LSB-first bit stream, bit-exact.
+    let ccir = Ccir476::new();
+    for line in raw.lines().filter(|l| l.contains("\"label\":")) {
+        let msg = {
+            let k = "\"msg\":\"";
+            let i = line.find(k).unwrap() + k.len();
+            line[i..i + line[i..].find('"').unwrap()].to_string()
+        };
+        let arr = |key: &str| -> Vec<u8> {
+            let k = format!("\"{key}\":[");
+            let i = line.find(&k).unwrap() + k.len();
+            let end = line[i..].find(']').unwrap() + i;
+            line[i..end].split(',').map(|s| s.trim().parse().unwrap()).collect()
+        };
+        let want_codes = arr("codes");
+        let want_fec = arr("fec");
+        let want_bits = {
+            let k = "\"bits\":\"";
+            let i = line.find(k).unwrap() + k.len();
+            line[i..i + line[i..].find('"').unwrap()].to_string()
+        };
+
+        let codes = ccir.encode(&msg);
+        assert_eq!(codes, want_codes, "{msg:?} encode codes");
+        let fec = create_fec(&codes);
+        assert_eq!(fec, want_fec, "{msg:?} create_fec stream");
+        let bits: String =
+            codes_to_bits(&fec).iter().map(|&b| if b { '1' } else { '0' }).collect();
+        assert_eq!(bits, want_bits, "{msg:?} on-air bit stream");
+    }
+}
+
+#[test]
+#[ignore = "requires fldigi (Phase-12 interop gate)"]
+fn navtex_cross_decode_doc() {
+    // Cross-check NAVTEX / SITOR-B against fldigi's navtex modem in both
+    // directions (our TX decodes in fldigi and fldigi's TX decodes in ours).
+    // The bit-exact CCIR-476 + FEC-B gate above pins the on-air integer domain;
+    // this live-audio gate additionally exercises the 100-baud FSK sync.
+}
+
+// --- W2: MSK144 (WSJT-X meteor scatter) ----------------------------------
+
+/// MSK144 CRC-13 + LDPC(128,90) codeword + 144 MSK channel tones are bit-exact
+/// against the unmodified WSJT-X encoder. Provenance:
+/// `tests/vectors/msk144_reference.json` (WSJTX/wsjtx @ ccdfaf3, driver
+/// `scratch/refvectors/msk144/build_msk144.sh`, which links the real
+/// genmsk_128_90/encode_128_90 + boost crc13).
+#[test]
+fn msk144_encode_and_tones_match_wsjtx_reference() {
+    use omnimodem_dsp::fec::ldpc_msk144::{encode_msk144, get_crc13};
+    use omnimodem_dsp::modes::msk144::tones_from_codeword;
+
+    let raw = include_str!("vectors/msk144_reference.json");
+    // Extract every string value for a given key, in file order.
+    let values = |key: &str| -> Vec<String> {
+        let pat = format!("\"{key}\":");
+        raw.match_indices(&pat)
+            .map(|(i, _)| {
+                let after = &raw[i + pat.len()..];
+                let q1 = after.find('"').unwrap();
+                let q2 = after[q1 + 1..].find('"').unwrap();
+                after[q1 + 1..q1 + 1 + q2].to_string()
+            })
+            .collect()
+    };
+    let bits = |s: &str| -> Vec<u8> { s.bytes().map(|b| b - b'0').collect() };
+
+    let msgs = values("msg77");
+    let crcs = values("crc13");
+    let cws = values("codeword128");
+    let tones = values("tones144");
+    assert_eq!(msgs.len(), 2, "expected two golden vectors");
+
+    for i in 0..msgs.len() {
+        let msg77: [u8; 77] = bits(&msgs[i]).try_into().unwrap();
+        // CRC-13 bit-exact.
+        let want_crc = u16::from_str_radix(&crcs[i], 2).unwrap();
+        assert_eq!(get_crc13(&msg77), want_crc, "vector {i}: CRC-13");
+        // Codeword bit-exact.
+        let cw = encode_msk144(&msg77);
+        assert_eq!(cw.to_vec(), bits(&cws[i]), "vector {i}: codeword");
+        // Channel tones bit-exact.
+        let got = tones_from_codeword(&cw);
+        assert_eq!(got.to_vec(), bits(&tones[i]), "vector {i}: MSK tones");
+    }
+}
+
+/// MSK144 transmit → streaming decode round-trips a standard message under AWGN.
+/// The matched filter + BP decode recover the exact text; the audio itself is
+/// FP (never asserted bit-exact — porting doctrine §3).
+#[test]
+fn msk144_loopback_decodes_under_awgn() {
+    use omnimodem_dsp::mode::{Demodulator, Modulator};
+    use omnimodem_dsp::modes::msk144::{Msk144Demod, Msk144Mod};
+    use omnimodem_dsp::types::{Frame, FramePayload};
+
+    let msg = "K1ABC W9XYZ EN37";
+    let mut m = Msk144Mod::new();
+    let wave = m.modulate(&Frame::text(msg)).expect("modulate");
+    let trials = 12;
+    let mut ok = 0;
+    for t in 0..trials as u64 {
+        let mut w = wave.clone();
+        let mut rng = Rng::new(0x4D53_4B10 + t);
+        add_awgn(&mut w, 0.6, &mut rng);
+        let mut d = Msk144Demod::new();
+        if d.feed(&w).iter().any(|f| matches!(&f.payload, FramePayload::Text(x) if x == msg)) {
+            ok += 1;
+        }
+    }
+    let rate = ok as f32 / trials as f32;
+    assert!(rate >= 0.9, "MSK144 AWGN loopback decode rate {rate} below 0.9");
+}
+
+#[test]
+#[ignore = "requires WSJT-X msk144 decoder (W2 interop gate)"]
+fn msk144_cross_decode_doc() {
+    // The decisive interop proof (porting doctrine §5): our TX .wav decodes in
+    // the reference WSJT-X MSK144 decoder AND an msk144sim-generated ping decodes
+    // in Msk144Demod. The bit-exact CRC-13 + LDPC(128,90) + tone-map gate above
+    // pins the integer domain; this live-audio gate exercises the analytic-signal
+    // sync + matched filter against the reference binary.
 }

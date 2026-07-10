@@ -51,6 +51,21 @@ Per-toolchain driver programs live under `scratch/refvectors/` (not shipped):
 - **WSJT-X (Fortran):** reuse the shipped `*sim` / `*code` / `gen*` programs
   (`msk144sim`, `jt4code`, `genfst4`, `qratest`, …) — they already print intermediates.
 - **JS8Call:** the `jsc` / `JS8` units for the JSC codec, `lib/js8*` for symbol vectors.
+- **MMSSTV (SSTV, Borland C++Builder/VCL):** the reference won't build on Linux as-is, so
+  the DSP core (`sstv.cpp` + `fir.cpp`) is compiled *unmodified* against a fake-`<vcl.h>`
+  shim in `scratch/refvectors/sstv_shim/` (zero edits to the reference tree) and driven by
+  `sstv_tx_dump.cxx` / `build_sstv_tx.sh`. The truly VCL-bound sequencing — the
+  `TMmsstv::LineXXX` TX layouts and `DrawSSTVNormal` RX raster assembly, which are methods of
+  the GUI form class in `Main.cpp` — is **transcribed** into the driver with exact
+  `// ref: Main.cpp:NNNN` cites and a byte-buffer bitmap in place of the VCL canvas. Each
+  SSTV vector's provenance block lists what is *linked-unmodified* (timing tables, tone
+  renderer, demod) versus *transcribed* (line layout, raster assembly, colour helpers).
+
+  SSTV vectors split the two equivalence classes explicitly: the `symbols` field
+  (per-write `[freq_hz, ms]` list) and the decoded pixel `raster` are **bit-exact**; the
+  `pcm` field (VCO + BPF audio) is **FP-tolerance** (stats + checksum, never asserted
+  bit-exact). MMSSTV ships no Linux CLI decoder, so the "reference decodes our TX" direction
+  is substituted by feeding our TX audio back through the isolated `CSSTVDEM` harness.
 
 Each driver's invocation is recorded in the vector file's provenance block so the vector is
 reproducible from the pinned upstream commit.

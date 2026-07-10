@@ -15,6 +15,7 @@ pub fn core_error_to_status(e: CoreError) -> Status {
     match &e {
         CoreError::UnknownChannel(_) => Status::not_found(e.to_string()),
         CoreError::UnknownMode(_) => Status::invalid_argument(e.to_string()),
+        CoreError::Picture(_) => Status::invalid_argument(e.to_string()),
         CoreError::Persist(_) => Status::internal(e.to_string()),
         CoreError::Audio(_) => Status::failed_precondition(e.to_string()),
         CoreError::Ptt(p) => match p {
@@ -25,6 +26,9 @@ pub fn core_error_to_status(e: CoreError) -> Status {
             PttError::Unsupported => Status::unimplemented(e.to_string()),
             PttError::Io(_) => Status::internal(e.to_string()),
         },
+        CoreError::Unimplemented(_) => Status::unimplemented(e.to_string()),
+        CoreError::SdrRequired(_) => Status::failed_precondition(e.to_string()),
+        CoreError::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
         CoreError::Closed => Status::unavailable(e.to_string()),
     }
 }
@@ -74,7 +78,13 @@ pub fn proto_ptt_to_config(req: &proto::ConfigurePttRequest) -> Result<PttConfig
         DeviceId::parse(&req.device_id)
             .ok_or_else(|| Status::invalid_argument(format!("unparseable device_id {}", req.device_id)))?
     };
-    Ok(PttConfig { device_id, method, invert: req.invert })
+    Ok(PttConfig {
+        device_id,
+        method,
+        invert: req.invert,
+        tx_delay_ms: req.tx_delay_ms,
+        tx_tail_ms: req.tx_tail_ms,
+    })
 }
 
 /// Build a proto `ModemState` from a snapshot.
@@ -98,6 +108,12 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
                 Some(p) => (ptt_device_for_proto(p), ptt_method_to_proto(&p.method) as i32),
                 None => (String::new(), proto::PttMethod::Unspecified as i32),
             };
+            // Surface the per-channel PTT timing so a reopening client preloads
+            // the saved values instead of zeroing them on the next Apply.
+            let (ptt_tx_delay_ms, ptt_tx_tail_ms) = match &c.ptt {
+                Some(p) => (p.tx_delay_ms, p.tx_tail_ms),
+                None => (0, 0),
+            };
             proto::ChannelInfo {
                 channel: c.id.0,
                 name: c.name.clone(),
@@ -107,6 +123,10 @@ pub fn snapshot_to_proto(snap: &ModemSnapshot) -> proto::ModemState {
                 tx_device_id,
                 ptt_device_id,
                 ptt_method,
+                rsid_tx: c.rsid_tx,
+                rsid_rx: c.rsid_rx,
+                ptt_tx_delay_ms,
+                ptt_tx_tail_ms,
             }
         })
         .collect();
@@ -145,11 +165,16 @@ fn ptt_method_to_proto(m: &PttMethod) -> proto::PttMethod {
 /// Wrap a frame event as a proto `Event`.
 pub fn frame_event_to_proto(ev: FrameEvent) -> proto::Event {
     let kind = match ev {
-        FrameEvent::RxFrame { channel, data, timestamp_ns } => {
+        FrameEvent::RxFrame { channel, data, image, timestamp_ns } => {
             proto::event::Kind::RxFrame(proto::RxFrame {
                 channel: channel.0,
                 data,
                 timestamp_ns,
+                image: image.map(|i| proto::Image {
+                    width: i.width as u32,
+                    channels: i.channels as u32,
+                    pixels: i.pixels,
+                }),
             })
         }
     };
@@ -243,6 +268,35 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             bins,
             transmit,
         }),
+        TelemetryEvent::RsidDetected { channel, tag, mode, freq_hz, extended } => {
+            Kind::RsidDetected(proto::RsidDetected {
+                channel: channel.0,
+                tag,
+                mode,
+                freq_hz,
+                extended,
+            })
+        }
+        TelemetryEvent::SdrState {
+            channel,
+            center_hz,
+            offset_hz,
+            freq_hz,
+            gain_auto,
+            gain_db,
+            demod_mode,
+            squelch_db,
+        } => Kind::SdrState(proto::SdrState {
+            channel: channel.0,
+            center_hz,
+            offset_hz,
+            freq_hz,
+            gain_auto,
+            gain_db,
+            // The proto enum and the `SdrControl` u8 share numbering.
+            demod_mode: demod_mode as i32,
+            squelch_db,
+        }),
     };
     proto::Event { kind: Some(kind) }
 }
@@ -273,6 +327,52 @@ mod tests {
             method: method as i32,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn raster_frame_travels_in_the_typed_image_field() {
+        use crate::core::event::RxImage;
+        use crate::ids::ChannelId;
+        // A Hell-style raster: 14-wide (column height), two on-air columns.
+        let ev = FrameEvent::RxFrame {
+            channel: ChannelId(3),
+            data: Vec::new(),
+            image: Some(RxImage {
+                width: 14,
+                channels: 1,
+                pixels: vec![0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255],
+            }),
+            timestamp_ns: 42,
+        };
+        let proto::event::Kind::RxFrame(rf) =
+            frame_event_to_proto(ev).kind.expect("kind")
+        else {
+            panic!("expected RxFrame");
+        };
+        assert!(rf.data.is_empty(), "raster payloads must not flatten into data");
+        let img = rf.image.expect("typed image must be set");
+        assert_eq!(img.width, 14);
+        assert_eq!(img.channels, 1);
+        assert_eq!(img.pixels.len(), 14);
+        assert_eq!(rf.channel, 3);
+    }
+
+    #[test]
+    fn byte_frame_leaves_image_unset() {
+        use crate::ids::ChannelId;
+        let ev = FrameEvent::RxFrame {
+            channel: ChannelId(0),
+            data: b"CQ".to_vec(),
+            image: None,
+            timestamp_ns: 0,
+        };
+        let proto::event::Kind::RxFrame(rf) =
+            frame_event_to_proto(ev).kind.expect("kind")
+        else {
+            panic!("expected RxFrame");
+        };
+        assert_eq!(rf.data, b"CQ");
+        assert!(rf.image.is_none());
     }
 
     #[test]
@@ -311,6 +411,8 @@ mod tests {
             tx_device_id: tx,
             tx_sample_rate: 0,
             ptt,
+            rsid_tx: false,
+            rsid_rx: false,
         }
     }
 
@@ -321,7 +423,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Serial { by_id: "usb-FTDI-if00".into() },
             method: PttMethod::SerialRts { node: "/dev/ttyUSB0".into() },
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), tx.clone(), Some(ptt))],
@@ -340,7 +442,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Placeholder { tag: "ptt-deviceless".into() },
             method: PttMethod::Vox,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
@@ -361,7 +463,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Placeholder { tag: "BlackHole 2ch".into() },
             method: PttMethod::Vox,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],
@@ -380,7 +482,7 @@ mod tests {
         let ptt = PttConfig {
             device_id: DeviceId::Serial { by_id: "usb-FTDI-if00".into() },
             method: PttMethod::Vox,
-            invert: false,
+            invert: false, tx_delay_ms: 0, tx_tail_ms: 0,
         };
         let snap = ModemSnapshot {
             channels: vec![chan_cfg(rx.clone(), rx.clone(), Some(ptt))],

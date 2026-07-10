@@ -32,6 +32,21 @@ pub fn half_spectrum_dbfs(spectrum: &[Complex<f32>], window_sum: f32) -> Vec<f32
         .collect()
 }
 
+/// Two-sided amplitude dBFS for a complex spectrum, reordered so bin[0] is the
+/// most-negative frequency (fftshift) and the last bin is just below +Nyquist.
+/// `window_sum` normalizes to amplitude, matching `half_spectrum_dbfs`.
+pub fn full_spectrum_dbfs(spectrum: &[Complex<f32>], window_sum: f32) -> Vec<f32> {
+    let n = spectrum.len();
+    let mut out = vec![0.0f32; n];
+    for (k, slot) in out.iter_mut().enumerate() {
+        // fftshift: rotate by n/2 so negative freqs (upper FFT half) come first.
+        let src = (k + n / 2) % n;
+        let amp = spectrum[src].norm() / window_sum;
+        *slot = 20.0 * (amp + 1e-12).log10();
+    }
+    out
+}
+
 /// The fixed rendering geometry for a spectrum stream: which FFT bins map to which
 /// output buckets, and the axis labels a client renders from. Built once when a
 /// tap is (re)configured, then reused per line.
@@ -98,6 +113,39 @@ impl SpectrumPlan {
             freq_step_hz,
             db_floor,
             db_ceiling,
+        }
+    }
+
+    /// Geometry for a full two-sided (RF) spectrum centered at `center_hz` with
+    /// total span `rate` Hz. `freq_lo`/`freq_hi` are an optional zoom window in
+    /// Hz *relative to center* (pass the full ±rate/2 for no zoom). Renders the
+    /// same uint8 bins as `new`, so callers reuse `render` unchanged.
+    pub fn new_centered(
+        nfft: usize,
+        rate: f32,
+        center_hz: f32,
+        req_bin_count: usize,
+        freq_lo: f32,
+        freq_hi: f32,
+    ) -> Self {
+        let step = rate / nfft as f32;
+        // Map the relative zoom window to shifted-bin indices (bin 0 == -rate/2).
+        let lo = (((freq_lo + rate / 2.0) / step).floor() as isize).clamp(0, nfft as isize - 1);
+        let hi = (((freq_hi + rate / 2.0) / step).ceil() as isize).clamp(lo + 1, nfft as isize);
+        let lo_bin = lo as usize;
+        let hi_bin = hi as usize;
+        let span_bins = hi_bin - lo_bin;
+        let bin_count = req_bin_count.max(1).min(span_bins);
+        let freq_start_hz = center_hz - rate / 2.0 + lo_bin as f32 * step;
+        let freq_step_hz = (span_bins as f32 * step) / bin_count as f32;
+        SpectrumPlan {
+            lo_bin,
+            hi_bin,
+            bin_count,
+            freq_start_hz,
+            freq_step_hz,
+            db_floor: -120.0,
+            db_ceiling: 0.0,
         }
     }
 
@@ -273,5 +321,32 @@ mod tests {
         let plan = SpectrumPlan::new(2048, 48_000.0, 100, 0.0, 24_000.0, -120.0, 0.0);
         assert_eq!(plan.render(&half).len(), 100);
         assert!(plan.render(&half).iter().all(|&v| v == quantize(-50.0, -120.0, 0.0)));
+    }
+
+    #[test]
+    fn full_spectrum_is_fftshifted() {
+        use rustfft::num_complex::Complex;
+        // Length-8 spectrum with all energy in the DC bin (index 0). After
+        // fftshift, DC moves to the center (index nfft/2 == 4).
+        let mut spec = vec![Complex::new(0.0f32, 0.0); 8];
+        spec[0] = Complex::new(8.0, 0.0);
+        let db = full_spectrum_dbfs(&spec, 8.0);
+        assert_eq!(db.len(), 8);
+        let (peak, _) = db
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        assert_eq!(peak, 4, "DC should land at the shifted center");
+    }
+
+    #[test]
+    fn centered_plan_axis_starts_at_minus_nyquist() {
+        // 240 kHz span centered at 144.39 MHz → bin[0] at center - 120 kHz. The
+        // zoom window is the full band (±rate/2 in Hz), i.e. no zoom.
+        let plan =
+            SpectrumPlan::new_centered(1024, 240_000.0, 144_390_000.0, 256, -120_000.0, 120_000.0);
+        assert!((plan.freq_start_hz - (144_390_000.0 - 120_000.0)).abs() < 1.0);
+        assert!(plan.freq_step_hz > 0.0);
     }
 }

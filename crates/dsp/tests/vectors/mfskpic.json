@@ -1,0 +1,18 @@
+{"_meta":{"upstream":"w1hkj/fldigi 4.1.23 @ 61b97f413","files":["src/mfsk/mfsk-pic.cxx:196-202,239,205-207,246-248","src/mfsk/mfsk.cxx:366-422 (check_picture_header)"],"driver":"scratch/refvectors/build_mfskpic.sh","note":"bit-exact: TX header strings, colour plane reorder, integer luma, RX header parse."}}
+{"kind":"header","w":3,"h":2,"color":true,"txspp":8,"s":"\nSending Pic:3x2C;"}
+{"kind":"header","w":3,"h":2,"color":true,"txspp":4,"s":"\nSending Pic:3x2Cp4;"}
+{"kind":"header","w":3,"h":2,"color":true,"txspp":2,"s":"\nSending Pic:3x2Cp2;"}
+{"kind":"header","w":3,"h":2,"color":false,"txspp":8,"s":"\nSending Pic:3x2;"}
+{"kind":"header","w":3,"h":2,"color":false,"txspp":4,"s":"\nSending Pic:3x2p4;"}
+{"kind":"header","w":3,"h":2,"color":false,"txspp":2,"s":"\nSending Pic:3x2p2;"}
+{"kind":"header","w":320,"h":240,"color":true,"txspp":8,"s":"\nSending Pic:320x240C;"}
+{"kind":"color_raster","w":3,"h":2,"in":[10,11,12,20,21,22,30,31,32,40,41,42,50,51,52,60,61,62],"out":[10,20,30,11,21,31,12,22,32,40,50,60,41,51,61,42,52,62]}
+{"kind":"grey_raster","w":3,"h":2,"in":[10,11,12,20,21,22,30,31,32,40,41,42,50,51,52,60,61,62],"out":[10,20,30,40,50,60]}
+{"kind":"parse","s":"\nSending Pic:3x2C;","ok":true,"w":3,"h":2,"color":true,"rxspp":8}
+{"kind":"parse","s":"\nSending Pic:3x2Cp4;","ok":true,"w":3,"h":2,"color":true,"rxspp":4}
+{"kind":"parse","s":"\nSending Pic:3x2;","ok":true,"w":3,"h":2,"color":false,"rxspp":8}
+{"kind":"parse","s":"\nSending Pic:3x2p2;","ok":true,"w":3,"h":2,"color":false,"rxspp":2}
+{"kind":"parse","s":"\nSending Pic:320x240C;","ok":true,"w":320,"h":240,"color":true,"rxspp":8}
+{"kind":"parse","s":"\nSending Pic:0x2;","ok":false,"w":0,"h":2,"color":false,"rxspp":8}
+{"kind":"parse","s":"\nSending Pic:3x2Cp9;","ok":true,"w":3,"h":2,"color":true,"rxspp":8}
+{"kind":"parse","s":"junk no header","ok":false,"w":0,"h":0,"color":false,"rxspp":8}

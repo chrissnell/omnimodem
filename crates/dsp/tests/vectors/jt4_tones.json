@@ -1,0 +1,11 @@
+{ "_meta": {
+    "upstream": "WSJTX/wsjtx @ ccdfaf3c1c109010d15399674ce278167cfde848",
+    "files": ["lib/jt4.f90", "lib/gen4.f90", "lib/encode232.f90", "lib/conv232.f90",
+              "lib/interleave4.f90", "lib/entail.f90"],
+    "cmd": "bash scratch/refvectors/build_jt4_tones.sh",
+    "note": "72-bit payload fed directly as twelve 6-bit words (packjt's 72-bit layout is the #[ignore] cross-decode gate). tones[i] = 2*conv_interleaved[i] + npr(i+1); data = tone MSB, npr sync = LSB; 206 4-FSK symbols in 0..3." },
+  "encode": {
+    "msgbits": "111111000000101010010101111010000101010001100100111100001001110000011011",
+    "tones": "20013200332110012100020223320000200200032130112101313301202102302313132201232003313211203020132121030301313321210330121013100103301331200031013202131213103332212021301302320013313300330220110201231013310121"
+  }
+}

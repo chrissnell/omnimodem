@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "upstream": "js8call/js8call @ a7ff1be",
+    "files": ["jsc.cpp", "jsc_map.cpp", "jsc_list.cpp", "varicode.cpp"],
+    "cmd": "g++ -O0 jsc_map.o jsc_list.o dumper.cpp -o dumper && ./dumper",
+    "note": "JSC codec golden vectors. 'compressed' is the concatenated bit stream (MSB-first per 4-bit group). 'decompressed' is decompress(compressed). Confirmed bit-exact against the real Qt JSC::compress/decompress (scratch/refvectors/js8/jscqt/jsc_qt_dump.cpp); tables verbatim from the reference."
+  },
+  "vectors": [
+    {"text": "HELLO WORLD", "nchars": 11, "nbits": 38, "compressed": "01111000101110000101101111011100101000", "decompressed": "HELLO WORLD"},
+    {"text": "CQ CQ CQ DE K1ABC", "nchars": 17, "nbits": 91, "compressed": "0111111000101011111100010101111110001010111111001101100100100101100000011110001110011101010", "decompressed": "CQ CQ CQ DE K1ABC"},
+    {"text": "THE QUICK BROWN FOX", "nchars": 19, "nbits": 70, "compressed": "0001001110000000001110011101111001011111100101110110111101111100101000", "decompressed": "THE QUICK BROWN FOX"},
+    {"text": "ACK 73", "nchars": 6, "nbits": 26, "compressed": "01111001010011011101100010", "decompressed": "ACK 73"},
+    {"text": "TESTING 123", "nchars": 11, "nbits": 48, "compressed": "011110101011100100011101100000101100110101101100", "decompressed": "TESTING 123"},
+    {"text": "STATUS OK", "nchars": 9, "nbits": 31, "compressed": "1100011110000100100110100100100", "decompressed": "STATUS OK"},
+    {"text": "A", "nchars": 1, "nbits": 5, "compressed": "00100", "decompressed": "A"},
+    {"text": "E", "nchars": 1, "nbits": 5, "compressed": "00000", "decompressed": "E"},
+    {"text": "HELLO", "nchars": 5, "nbits": 21, "compressed": "011110001011100001010", "decompressed": "HELLO"},
+    {"text": "WORLD", "nchars": 5, "nbits": 17, "compressed": "01111011100101000", "decompressed": "WORLD"},
+    {"text": "THIS IS A TEST MESSAGE FOR JS8", "nchars": 30, "nbits": 80, "compressed": "11111010010110100001101001011001110100101111010000110111011011001110111011100000", "decompressed": "THIS IS A TEST MESSAGE FOR JS8"},
+    {"text": "QSL DE W1AW", "nchars": 11, "nbits": 39, "compressed": "101011000000101111110011011010011100100", "decompressed": "QSL DE W1AW"},
+    {"text": "GM ES 73", "nchars": 8, "nbits": 36, "compressed": "100010100011100000011011011101100010", "decompressed": "GM ES 73"}
+  ]
+}
