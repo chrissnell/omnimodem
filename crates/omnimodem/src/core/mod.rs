@@ -7,6 +7,7 @@
 //! `DeviceDeparted` are emitted and a departed device's handles are evicted —
 //! all without a second thread sharing the enumerator.
 
+pub mod adsb;
 pub mod clock;
 pub mod command;
 pub mod error;

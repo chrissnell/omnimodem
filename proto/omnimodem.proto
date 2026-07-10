@@ -335,6 +335,7 @@ message Event {
     RsidDetected rsid_detected = 14;     // LOSSY class
     SdrState sdr_state = 15;             // LOSSY class
     TransmitFailed transmit_failed = 16; // LOSSY: TX aborted before keying
+    AircraftReport aircraft_report = 17; // LOSSY class
   }
 }
 
@@ -653,4 +654,28 @@ message GetSdrCapsResponse {
   repeated float  gains_db     = 5;   // discrete tuner gain table
   bool   bias_tee_supported        = 6;
   bool   direct_sampling_supported = 7;
+}
+
+// ---------------------------------------------------------------------------
+// ADS-B (Mode S) surveillance
+// ---------------------------------------------------------------------------
+
+// Per-aircraft ADS-B state, folded from decoded Mode S extended squitters on an
+// ADS-B channel (delivered as Event.aircraft_report). LOSSY class: only the
+// latest state per aircraft matters, so a lagging subscriber may drop
+// intermediate reports. An aircraft is reported as soon as it is heard, so the
+// position, velocity, and altitude fields are `optional` — absent until the
+// squitter that carries them arrives (position in particular needs a matched
+// even/odd CPR pair).
+message AircraftReport {
+  uint32 channel                  = 1;   // channel that decoded the frame
+  uint32 icao                     = 2;   // 24-bit ICAO aircraft address
+  string flight                   = 3;   // callsign / flight id; empty until an ident squitter
+  optional double latitude        = 4;   // degrees
+  optional double longitude       = 5;   // degrees
+  optional sint32 altitude_ft     = 6;   // barometric altitude, feet
+  optional double ground_speed_kt = 7;   // knots
+  optional double track_deg       = 8;   // degrees clockwise from true north (0..360)
+  optional sint32 vert_rate_fpm   = 9;   // barometric vertical rate, feet/min (+ up)
+  uint64 last_seen_ms             = 10;  // tracker clock (ms) of the last decode
 }

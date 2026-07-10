@@ -1284,18 +1284,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnimodem-dsp"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "insta",
- "num-complex",
- "proptest",
- "rustfft",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "omnimodem"
 version = "0.1.0"
 dependencies = [
@@ -1320,6 +1308,18 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "omnimodem-dsp"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "num-complex",
+ "proptest",
+ "rustfft",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

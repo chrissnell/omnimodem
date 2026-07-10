@@ -1993,6 +1993,7 @@ type Event struct {
 	//	*Event_RsidDetected
 	//	*Event_SdrState
 	//	*Event_TransmitFailed
+	//	*Event_AircraftReport
 	Kind          isEvent_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2179,6 +2180,15 @@ func (x *Event) GetTransmitFailed() *TransmitFailed {
 	return nil
 }
 
+func (x *Event) GetAircraftReport() *AircraftReport {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_AircraftReport); ok {
+			return x.AircraftReport
+		}
+	}
+	return nil
+}
+
 type isEvent_Kind interface {
 	isEvent_Kind()
 }
@@ -2247,6 +2257,10 @@ type Event_TransmitFailed struct {
 	TransmitFailed *TransmitFailed `protobuf:"bytes,16,opt,name=transmit_failed,json=transmitFailed,proto3,oneof"` // LOSSY: TX aborted before keying
 }
 
+type Event_AircraftReport struct {
+	AircraftReport *AircraftReport `protobuf:"bytes,17,opt,name=aircraft_report,json=aircraftReport,proto3,oneof"` // LOSSY class
+}
+
 func (*Event_Snapshot) isEvent_Kind() {}
 
 func (*Event_ChannelConfigured) isEvent_Kind() {}
@@ -2278,6 +2292,8 @@ func (*Event_RsidDetected) isEvent_Kind() {}
 func (*Event_SdrState) isEvent_Kind() {}
 
 func (*Event_TransmitFailed) isEvent_Kind() {}
+
+func (*Event_AircraftReport) isEvent_Kind() {}
 
 // Current SDR tuner/demod state for a channel. LOSSY class — broadcast whenever a
 // SetSdrTune/SetSdrGain/ConfigureSdr changes it, so multiple/late-joining clients
@@ -4987,6 +5003,129 @@ func (x *GetSdrCapsResponse) GetDirectSamplingSupported() bool {
 	return false
 }
 
+// Per-aircraft ADS-B state, folded from decoded Mode S extended squitters on an
+// ADS-B channel (delivered as Event.aircraft_report). LOSSY class: only the
+// latest state per aircraft matters, so a lagging subscriber may drop
+// intermediate reports. An aircraft is reported as soon as it is heard, so the
+// position, velocity, and altitude fields are `optional` — absent until the
+// squitter that carries them arrives (position in particular needs a matched
+// even/odd CPR pair).
+type AircraftReport struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Channel       uint32                 `protobuf:"varint,1,opt,name=channel,proto3" json:"channel,omitempty"`                                           // channel that decoded the frame
+	Icao          uint32                 `protobuf:"varint,2,opt,name=icao,proto3" json:"icao,omitempty"`                                                 // 24-bit ICAO aircraft address
+	Flight        string                 `protobuf:"bytes,3,opt,name=flight,proto3" json:"flight,omitempty"`                                              // callsign / flight id; empty until an ident squitter
+	Latitude      *float64               `protobuf:"fixed64,4,opt,name=latitude,proto3,oneof" json:"latitude,omitempty"`                                  // degrees
+	Longitude     *float64               `protobuf:"fixed64,5,opt,name=longitude,proto3,oneof" json:"longitude,omitempty"`                                // degrees
+	AltitudeFt    *int32                 `protobuf:"zigzag32,6,opt,name=altitude_ft,json=altitudeFt,proto3,oneof" json:"altitude_ft,omitempty"`           // barometric altitude, feet
+	GroundSpeedKt *float64               `protobuf:"fixed64,7,opt,name=ground_speed_kt,json=groundSpeedKt,proto3,oneof" json:"ground_speed_kt,omitempty"` // knots
+	TrackDeg      *float64               `protobuf:"fixed64,8,opt,name=track_deg,json=trackDeg,proto3,oneof" json:"track_deg,omitempty"`                  // degrees clockwise from true north (0..360)
+	VertRateFpm   *int32                 `protobuf:"zigzag32,9,opt,name=vert_rate_fpm,json=vertRateFpm,proto3,oneof" json:"vert_rate_fpm,omitempty"`      // barometric vertical rate, feet/min (+ up)
+	LastSeenMs    uint64                 `protobuf:"varint,10,opt,name=last_seen_ms,json=lastSeenMs,proto3" json:"last_seen_ms,omitempty"`                // tracker clock (ms) of the last decode
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AircraftReport) Reset() {
+	*x = AircraftReport{}
+	mi := &file_omnimodem_proto_msgTypes[73]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AircraftReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AircraftReport) ProtoMessage() {}
+
+func (x *AircraftReport) ProtoReflect() protoreflect.Message {
+	mi := &file_omnimodem_proto_msgTypes[73]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AircraftReport.ProtoReflect.Descriptor instead.
+func (*AircraftReport) Descriptor() ([]byte, []int) {
+	return file_omnimodem_proto_rawDescGZIP(), []int{73}
+}
+
+func (x *AircraftReport) GetChannel() uint32 {
+	if x != nil {
+		return x.Channel
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetIcao() uint32 {
+	if x != nil {
+		return x.Icao
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetFlight() string {
+	if x != nil {
+		return x.Flight
+	}
+	return ""
+}
+
+func (x *AircraftReport) GetLatitude() float64 {
+	if x != nil && x.Latitude != nil {
+		return *x.Latitude
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetLongitude() float64 {
+	if x != nil && x.Longitude != nil {
+		return *x.Longitude
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetAltitudeFt() int32 {
+	if x != nil && x.AltitudeFt != nil {
+		return *x.AltitudeFt
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetGroundSpeedKt() float64 {
+	if x != nil && x.GroundSpeedKt != nil {
+		return *x.GroundSpeedKt
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetTrackDeg() float64 {
+	if x != nil && x.TrackDeg != nil {
+		return *x.TrackDeg
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetVertRateFpm() int32 {
+	if x != nil && x.VertRateFpm != nil {
+		return *x.VertRateFpm
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetLastSeenMs() uint64 {
+	if x != nil {
+		return x.LastSeenMs
+	}
+	return 0
+}
+
 var File_omnimodem_proto protoreflect.FileDescriptor
 
 const file_omnimodem_proto_rawDesc = "" +
@@ -5115,7 +5254,7 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\arsid_rx\x18\n" +
 	" \x01(\bR\x06rsidRx\x12%\n" +
 	"\x0fptt_tx_delay_ms\x18\v \x01(\rR\fpttTxDelayMs\x12#\n" +
-	"\x0eptt_tx_tail_ms\x18\f \x01(\rR\vpttTxTailMs\"\xad\b\n" +
+	"\x0eptt_tx_tail_ms\x18\f \x01(\rR\vpttTxTailMs\"\xf6\b\n" +
 	"\x05Event\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.omnimodem.v1.ModemStateH\x00R\bsnapshot\x12P\n" +
 	"\x12channel_configured\x18\x02 \x01(\v2\x1f.omnimodem.v1.ChannelConfiguredH\x00R\x11channelConfigured\x12J\n" +
@@ -5134,7 +5273,8 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\x0espectrum_frame\x18\r \x01(\v2\x1b.omnimodem.v1.SpectrumFrameH\x00R\rspectrumFrame\x12A\n" +
 	"\rrsid_detected\x18\x0e \x01(\v2\x1a.omnimodem.v1.RsidDetectedH\x00R\frsidDetected\x125\n" +
 	"\tsdr_state\x18\x0f \x01(\v2\x16.omnimodem.v1.SdrStateH\x00R\bsdrState\x12G\n" +
-	"\x0ftransmit_failed\x18\x10 \x01(\v2\x1c.omnimodem.v1.TransmitFailedH\x00R\x0etransmitFailedB\x06\n" +
+	"\x0ftransmit_failed\x18\x10 \x01(\v2\x1c.omnimodem.v1.TransmitFailedH\x00R\x0etransmitFailed\x12G\n" +
+	"\x0faircraft_report\x18\x11 \x01(\v2\x1c.omnimodem.v1.AircraftReportH\x00R\x0eaircraftReportB\x06\n" +
 	"\x04kind\"\x84\x02\n" +
 	"\bSdrState\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x1b\n" +
@@ -5333,7 +5473,29 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\fsample_rates\x18\x04 \x03(\rR\vsampleRates\x12\x19\n" +
 	"\bgains_db\x18\x05 \x03(\x02R\againsDb\x12,\n" +
 	"\x12bias_tee_supported\x18\x06 \x01(\bR\x10biasTeeSupported\x12:\n" +
-	"\x19direct_sampling_supported\x18\a \x01(\bR\x17directSamplingSupported*\xb1\x01\n" +
+	"\x19direct_sampling_supported\x18\a \x01(\bR\x17directSamplingSupported\"\xb9\x03\n" +
+	"\x0eAircraftReport\x12\x18\n" +
+	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +
+	"\x04icao\x18\x02 \x01(\rR\x04icao\x12\x16\n" +
+	"\x06flight\x18\x03 \x01(\tR\x06flight\x12\x1f\n" +
+	"\blatitude\x18\x04 \x01(\x01H\x00R\blatitude\x88\x01\x01\x12!\n" +
+	"\tlongitude\x18\x05 \x01(\x01H\x01R\tlongitude\x88\x01\x01\x12$\n" +
+	"\valtitude_ft\x18\x06 \x01(\x11H\x02R\n" +
+	"altitudeFt\x88\x01\x01\x12+\n" +
+	"\x0fground_speed_kt\x18\a \x01(\x01H\x03R\rgroundSpeedKt\x88\x01\x01\x12 \n" +
+	"\ttrack_deg\x18\b \x01(\x01H\x04R\btrackDeg\x88\x01\x01\x12'\n" +
+	"\rvert_rate_fpm\x18\t \x01(\x11H\x05R\vvertRateFpm\x88\x01\x01\x12 \n" +
+	"\flast_seen_ms\x18\n" +
+	" \x01(\x04R\n" +
+	"lastSeenMsB\v\n" +
+	"\t_latitudeB\f\n" +
+	"\n" +
+	"_longitudeB\x0e\n" +
+	"\f_altitude_ftB\x12\n" +
+	"\x10_ground_speed_ktB\f\n" +
+	"\n" +
+	"_track_degB\x10\n" +
+	"\x0e_vert_rate_fpm*\xb1\x01\n" +
 	"\tPttMethod\x12\x1a\n" +
 	"\x16PTT_METHOD_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fPTT_METHOD_NONE\x10\x01\x12\x12\n" +
@@ -5388,7 +5550,7 @@ func file_omnimodem_proto_rawDescGZIP() []byte {
 }
 
 var file_omnimodem_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_omnimodem_proto_msgTypes = make([]protoimpl.MessageInfo, 73)
+var file_omnimodem_proto_msgTypes = make([]protoimpl.MessageInfo, 74)
 var file_omnimodem_proto_goTypes = []any{
 	(PttMethod)(0),                        // 0: omnimodem.v1.PttMethod
 	(DemodMode)(0),                        // 1: omnimodem.v1.DemodMode
@@ -5465,6 +5627,7 @@ var file_omnimodem_proto_goTypes = []any{
 	(*ConfigureSdrResponse)(nil),          // 72: omnimodem.v1.ConfigureSdrResponse
 	(*GetSdrCapsRequest)(nil),             // 73: omnimodem.v1.GetSdrCapsRequest
 	(*GetSdrCapsResponse)(nil),            // 74: omnimodem.v1.GetSdrCapsResponse
+	(*AircraftReport)(nil),                // 75: omnimodem.v1.AircraftReport
 }
 var file_omnimodem_proto_depIdxs = []int32{
 	3,  // 0: omnimodem.v1.ConfigureChannelRequest.mode_params:type_name -> omnimodem.v1.ModeParams
@@ -5503,57 +5666,58 @@ var file_omnimodem_proto_depIdxs = []int32{
 	31, // 33: omnimodem.v1.Event.rsid_detected:type_name -> omnimodem.v1.RsidDetected
 	30, // 34: omnimodem.v1.Event.sdr_state:type_name -> omnimodem.v1.SdrState
 	37, // 35: omnimodem.v1.Event.transmit_failed:type_name -> omnimodem.v1.TransmitFailed
-	1,  // 36: omnimodem.v1.SdrState.demod_mode:type_name -> omnimodem.v1.DemodMode
-	39, // 37: omnimodem.v1.RxFrame.image:type_name -> omnimodem.v1.Image
-	43, // 38: omnimodem.v1.ListDevicesResponse.devices:type_name -> omnimodem.v1.DeviceInfo
-	0,  // 39: omnimodem.v1.ConfigurePttRequest.method:type_name -> omnimodem.v1.PttMethod
-	58, // 40: omnimodem.v1.GetMetricsResponse.metrics:type_name -> omnimodem.v1.ChannelMetrics
-	1,  // 41: omnimodem.v1.ConfigureSdrRequest.demod_mode:type_name -> omnimodem.v1.DemodMode
-	2,  // 42: omnimodem.v1.ModemControl.ConfigureChannel:input_type -> omnimodem.v1.ConfigureChannelRequest
-	22, // 43: omnimodem.v1.ModemControl.GetState:input_type -> omnimodem.v1.GetStateRequest
-	23, // 44: omnimodem.v1.ModemControl.Transmit:input_type -> omnimodem.v1.TransmitRequest
-	25, // 45: omnimodem.v1.ModemControl.TransmitImage:input_type -> omnimodem.v1.TransmitImageRequest
-	26, // 46: omnimodem.v1.ModemControl.SubscribeEvents:input_type -> omnimodem.v1.SubscribeRequest
-	42, // 47: omnimodem.v1.ModemControl.ListDevices:input_type -> omnimodem.v1.ListDevicesRequest
-	45, // 48: omnimodem.v1.ModemControl.ConfigureAudio:input_type -> omnimodem.v1.ConfigureAudioRequest
-	47, // 49: omnimodem.v1.ModemControl.ConfigurePtt:input_type -> omnimodem.v1.ConfigurePttRequest
-	49, // 50: omnimodem.v1.ModemControl.KeyPtt:input_type -> omnimodem.v1.KeyPttRequest
-	51, // 51: omnimodem.v1.ModemControl.SuggestUdevRule:input_type -> omnimodem.v1.SuggestUdevRuleRequest
-	56, // 52: omnimodem.v1.ModemControl.GetMetrics:input_type -> omnimodem.v1.GetMetricsRequest
-	59, // 53: omnimodem.v1.ModemControl.AcquireTxLease:input_type -> omnimodem.v1.TxLeaseRequest
-	59, // 54: omnimodem.v1.ModemControl.ReleaseTxLease:input_type -> omnimodem.v1.TxLeaseRequest
-	61, // 55: omnimodem.v1.ModemControl.ConfigureKissListener:input_type -> omnimodem.v1.ConfigureKissListenerRequest
-	63, // 56: omnimodem.v1.ModemControl.SetAudioGain:input_type -> omnimodem.v1.SetAudioGainRequest
-	65, // 57: omnimodem.v1.ModemControl.ConfigureSpectrum:input_type -> omnimodem.v1.ConfigureSpectrumRequest
-	67, // 58: omnimodem.v1.ModemControl.SetSdrTune:input_type -> omnimodem.v1.SetSdrTuneRequest
-	69, // 59: omnimodem.v1.ModemControl.SetSdrGain:input_type -> omnimodem.v1.SetSdrGainRequest
-	71, // 60: omnimodem.v1.ModemControl.ConfigureSdr:input_type -> omnimodem.v1.ConfigureSdrRequest
-	73, // 61: omnimodem.v1.ModemControl.GetSdrCaps:input_type -> omnimodem.v1.GetSdrCapsRequest
-	21, // 62: omnimodem.v1.ModemControl.ConfigureChannel:output_type -> omnimodem.v1.ConfigureChannelResponse
-	27, // 63: omnimodem.v1.ModemControl.GetState:output_type -> omnimodem.v1.ModemState
-	24, // 64: omnimodem.v1.ModemControl.Transmit:output_type -> omnimodem.v1.TransmitResponse
-	24, // 65: omnimodem.v1.ModemControl.TransmitImage:output_type -> omnimodem.v1.TransmitResponse
-	29, // 66: omnimodem.v1.ModemControl.SubscribeEvents:output_type -> omnimodem.v1.Event
-	44, // 67: omnimodem.v1.ModemControl.ListDevices:output_type -> omnimodem.v1.ListDevicesResponse
-	46, // 68: omnimodem.v1.ModemControl.ConfigureAudio:output_type -> omnimodem.v1.ConfigureAudioResponse
-	48, // 69: omnimodem.v1.ModemControl.ConfigurePtt:output_type -> omnimodem.v1.ConfigurePttResponse
-	50, // 70: omnimodem.v1.ModemControl.KeyPtt:output_type -> omnimodem.v1.KeyPttResponse
-	52, // 71: omnimodem.v1.ModemControl.SuggestUdevRule:output_type -> omnimodem.v1.SuggestUdevRuleResponse
-	57, // 72: omnimodem.v1.ModemControl.GetMetrics:output_type -> omnimodem.v1.GetMetricsResponse
-	60, // 73: omnimodem.v1.ModemControl.AcquireTxLease:output_type -> omnimodem.v1.TxLeaseResponse
-	60, // 74: omnimodem.v1.ModemControl.ReleaseTxLease:output_type -> omnimodem.v1.TxLeaseResponse
-	62, // 75: omnimodem.v1.ModemControl.ConfigureKissListener:output_type -> omnimodem.v1.ConfigureKissListenerResponse
-	64, // 76: omnimodem.v1.ModemControl.SetAudioGain:output_type -> omnimodem.v1.SetAudioGainResponse
-	66, // 77: omnimodem.v1.ModemControl.ConfigureSpectrum:output_type -> omnimodem.v1.ConfigureSpectrumResponse
-	68, // 78: omnimodem.v1.ModemControl.SetSdrTune:output_type -> omnimodem.v1.SetSdrTuneResponse
-	70, // 79: omnimodem.v1.ModemControl.SetSdrGain:output_type -> omnimodem.v1.SetSdrGainResponse
-	72, // 80: omnimodem.v1.ModemControl.ConfigureSdr:output_type -> omnimodem.v1.ConfigureSdrResponse
-	74, // 81: omnimodem.v1.ModemControl.GetSdrCaps:output_type -> omnimodem.v1.GetSdrCapsResponse
-	62, // [62:82] is the sub-list for method output_type
-	42, // [42:62] is the sub-list for method input_type
-	42, // [42:42] is the sub-list for extension type_name
-	42, // [42:42] is the sub-list for extension extendee
-	0,  // [0:42] is the sub-list for field type_name
+	75, // 36: omnimodem.v1.Event.aircraft_report:type_name -> omnimodem.v1.AircraftReport
+	1,  // 37: omnimodem.v1.SdrState.demod_mode:type_name -> omnimodem.v1.DemodMode
+	39, // 38: omnimodem.v1.RxFrame.image:type_name -> omnimodem.v1.Image
+	43, // 39: omnimodem.v1.ListDevicesResponse.devices:type_name -> omnimodem.v1.DeviceInfo
+	0,  // 40: omnimodem.v1.ConfigurePttRequest.method:type_name -> omnimodem.v1.PttMethod
+	58, // 41: omnimodem.v1.GetMetricsResponse.metrics:type_name -> omnimodem.v1.ChannelMetrics
+	1,  // 42: omnimodem.v1.ConfigureSdrRequest.demod_mode:type_name -> omnimodem.v1.DemodMode
+	2,  // 43: omnimodem.v1.ModemControl.ConfigureChannel:input_type -> omnimodem.v1.ConfigureChannelRequest
+	22, // 44: omnimodem.v1.ModemControl.GetState:input_type -> omnimodem.v1.GetStateRequest
+	23, // 45: omnimodem.v1.ModemControl.Transmit:input_type -> omnimodem.v1.TransmitRequest
+	25, // 46: omnimodem.v1.ModemControl.TransmitImage:input_type -> omnimodem.v1.TransmitImageRequest
+	26, // 47: omnimodem.v1.ModemControl.SubscribeEvents:input_type -> omnimodem.v1.SubscribeRequest
+	42, // 48: omnimodem.v1.ModemControl.ListDevices:input_type -> omnimodem.v1.ListDevicesRequest
+	45, // 49: omnimodem.v1.ModemControl.ConfigureAudio:input_type -> omnimodem.v1.ConfigureAudioRequest
+	47, // 50: omnimodem.v1.ModemControl.ConfigurePtt:input_type -> omnimodem.v1.ConfigurePttRequest
+	49, // 51: omnimodem.v1.ModemControl.KeyPtt:input_type -> omnimodem.v1.KeyPttRequest
+	51, // 52: omnimodem.v1.ModemControl.SuggestUdevRule:input_type -> omnimodem.v1.SuggestUdevRuleRequest
+	56, // 53: omnimodem.v1.ModemControl.GetMetrics:input_type -> omnimodem.v1.GetMetricsRequest
+	59, // 54: omnimodem.v1.ModemControl.AcquireTxLease:input_type -> omnimodem.v1.TxLeaseRequest
+	59, // 55: omnimodem.v1.ModemControl.ReleaseTxLease:input_type -> omnimodem.v1.TxLeaseRequest
+	61, // 56: omnimodem.v1.ModemControl.ConfigureKissListener:input_type -> omnimodem.v1.ConfigureKissListenerRequest
+	63, // 57: omnimodem.v1.ModemControl.SetAudioGain:input_type -> omnimodem.v1.SetAudioGainRequest
+	65, // 58: omnimodem.v1.ModemControl.ConfigureSpectrum:input_type -> omnimodem.v1.ConfigureSpectrumRequest
+	67, // 59: omnimodem.v1.ModemControl.SetSdrTune:input_type -> omnimodem.v1.SetSdrTuneRequest
+	69, // 60: omnimodem.v1.ModemControl.SetSdrGain:input_type -> omnimodem.v1.SetSdrGainRequest
+	71, // 61: omnimodem.v1.ModemControl.ConfigureSdr:input_type -> omnimodem.v1.ConfigureSdrRequest
+	73, // 62: omnimodem.v1.ModemControl.GetSdrCaps:input_type -> omnimodem.v1.GetSdrCapsRequest
+	21, // 63: omnimodem.v1.ModemControl.ConfigureChannel:output_type -> omnimodem.v1.ConfigureChannelResponse
+	27, // 64: omnimodem.v1.ModemControl.GetState:output_type -> omnimodem.v1.ModemState
+	24, // 65: omnimodem.v1.ModemControl.Transmit:output_type -> omnimodem.v1.TransmitResponse
+	24, // 66: omnimodem.v1.ModemControl.TransmitImage:output_type -> omnimodem.v1.TransmitResponse
+	29, // 67: omnimodem.v1.ModemControl.SubscribeEvents:output_type -> omnimodem.v1.Event
+	44, // 68: omnimodem.v1.ModemControl.ListDevices:output_type -> omnimodem.v1.ListDevicesResponse
+	46, // 69: omnimodem.v1.ModemControl.ConfigureAudio:output_type -> omnimodem.v1.ConfigureAudioResponse
+	48, // 70: omnimodem.v1.ModemControl.ConfigurePtt:output_type -> omnimodem.v1.ConfigurePttResponse
+	50, // 71: omnimodem.v1.ModemControl.KeyPtt:output_type -> omnimodem.v1.KeyPttResponse
+	52, // 72: omnimodem.v1.ModemControl.SuggestUdevRule:output_type -> omnimodem.v1.SuggestUdevRuleResponse
+	57, // 73: omnimodem.v1.ModemControl.GetMetrics:output_type -> omnimodem.v1.GetMetricsResponse
+	60, // 74: omnimodem.v1.ModemControl.AcquireTxLease:output_type -> omnimodem.v1.TxLeaseResponse
+	60, // 75: omnimodem.v1.ModemControl.ReleaseTxLease:output_type -> omnimodem.v1.TxLeaseResponse
+	62, // 76: omnimodem.v1.ModemControl.ConfigureKissListener:output_type -> omnimodem.v1.ConfigureKissListenerResponse
+	64, // 77: omnimodem.v1.ModemControl.SetAudioGain:output_type -> omnimodem.v1.SetAudioGainResponse
+	66, // 78: omnimodem.v1.ModemControl.ConfigureSpectrum:output_type -> omnimodem.v1.ConfigureSpectrumResponse
+	68, // 79: omnimodem.v1.ModemControl.SetSdrTune:output_type -> omnimodem.v1.SetSdrTuneResponse
+	70, // 80: omnimodem.v1.ModemControl.SetSdrGain:output_type -> omnimodem.v1.SetSdrGainResponse
+	72, // 81: omnimodem.v1.ModemControl.ConfigureSdr:output_type -> omnimodem.v1.ConfigureSdrResponse
+	74, // 82: omnimodem.v1.ModemControl.GetSdrCaps:output_type -> omnimodem.v1.GetSdrCapsResponse
+	63, // [63:83] is the sub-list for method output_type
+	43, // [43:63] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_omnimodem_proto_init() }
@@ -5597,14 +5761,16 @@ func file_omnimodem_proto_init() {
 		(*Event_RsidDetected)(nil),
 		(*Event_SdrState)(nil),
 		(*Event_TransmitFailed)(nil),
+		(*Event_AircraftReport)(nil),
 	}
+	file_omnimodem_proto_msgTypes[73].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_omnimodem_proto_rawDesc), len(file_omnimodem_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   73,
+			NumMessages:   74,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
