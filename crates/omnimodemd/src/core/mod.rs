@@ -1561,6 +1561,35 @@ mod tests {
     }
 
     #[test]
+    fn sdr_rpcs_require_an_sdr_bound_channel() {
+        // A channel with no SDR binding must reject every SDR control RPC with
+        // SdrRequired (mapped to FAILED_PRECONDITION at the gRPC edge).
+        let (core, join) = fresh_core();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            configure_channel(&core, ChannelId(0), "none").await;
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::SetSdrTune { channel: ChannelId(0), freq_hz: 144_390_000.0, reply: tx })
+                .unwrap();
+            assert!(matches!(rx.await.unwrap(), Err(CoreError::SdrRequired(_))));
+
+            let (tx, rx) = oneshot::channel();
+            core.commands
+                .send(Command::GetSdrCaps { channel: ChannelId(0), reply: tx })
+                .unwrap();
+            assert!(matches!(rx.await.unwrap(), Err(CoreError::SdrRequired(_))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
     fn configure_audio_binds_distinct_rx_and_tx_devices() {
         let rx = named_device("RX");
         let tx = named_device("TX");
