@@ -57,6 +57,31 @@ func TestModeFieldsPerFamily(t *testing.T) {
 	}
 }
 
+// The submode-family center default must match the daemon's per-mode default, so
+// opening the editor and saving without touching Center doesn't overwrite the
+// mode's real center (navtex/sitorb 1000 Hz, wefax 1900 Hz, not the generic 1500).
+func TestCenterDefaultMatchesDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		want  string
+	}{
+		{"navtex", "1000"},
+		{"sitorb", "1000"},
+		{"wefax576", "1900"},
+		{"wefax288", "1900"},
+		{"psk31", "1000"},
+		{"mfsk16", "1500"},
+	} {
+		got := modeFields(tc.label)
+		if len(got) != 1 || got[0].Key != "center" {
+			t.Fatalf("%s must expose a single center field, got %+v", tc.label, got)
+		}
+		if got[0].Default != tc.want {
+			t.Errorf("%s center default = %q, want %q", tc.label, got[0].Default, tc.want)
+		}
+	}
+}
+
 // Values edited in a mode's settings form must flow through into the typed
 // ModeParams the daemon receives.
 func TestModeValsReachModeParams(t *testing.T) {
