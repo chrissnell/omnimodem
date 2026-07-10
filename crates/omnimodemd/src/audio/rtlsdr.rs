@@ -268,6 +268,254 @@ impl SdrControl {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+/// An `rtl_tcp` SDR endpoint bound as an audio capture device. RX-only: dongles
+/// cannot transmit, so `open_playback` reports `Unsupported`.
+pub struct RtlTcpBackend {
+    host: String,
+    port: u16,
+    capture_rate: u32,
+    deviation_hz: f32,
+    control: SdrControl,
+    telemetry: Option<broadcast::Sender<TelemetryEvent>>,
+    channel: ChannelId,
+}
+
+impl RtlTcpBackend {
+    /// Construct a backend for `host:port` with default capture rate/deviation
+    /// and a fresh control cell. The core replaces the control and wires the
+    /// telemetry sink + channel via [`AudioBackend::attach_sdr_context`].
+    pub fn new(host: impl Into<String>, port: u16) -> Self {
+        RtlTcpBackend {
+            host: host.into(),
+            port,
+            capture_rate: DEFAULT_CAPTURE_RATE,
+            deviation_hz: DEFAULT_DEVIATION_HZ,
+            control: SdrControl::default(),
+            telemetry: None,
+            channel: ChannelId(0),
+        }
+    }
+
+    /// The shared control cell (so the core can store a clone for gRPC to mutate).
+    pub fn control(&self) -> SdrControl {
+        self.control.clone()
+    }
+
+    /// Override the dongle capture (sample) rate. Kept a multiple of the audio
+    /// channel rate so the complex decimator has an integer ratio.
+    pub fn with_capture_rate(mut self, rate: u32) -> Self {
+        self.capture_rate = rate;
+        self
+    }
+}
+
+/// Send the dongle's initial parameters from the current control snapshot: rate,
+/// ppm, gain mode/level, then center frequency (order mirrors `rtl_tcp` clients).
+fn send_initial_commands(
+    sock: &mut TcpStream,
+    capture_rate: u32,
+    control: &SdrControl,
+) -> Result<(), AudioError> {
+    let io = |e: std::io::Error| AudioError::Io(e.to_string());
+    sock.write_all(&RtlCmd::SampleRate(capture_rate).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::FreqCorrection(control.ppm()).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::GainMode(!control.gain_auto()).encode()).map_err(io)?;
+    if !control.gain_auto() {
+        let tenths = (control.gain_db() * 10.0).round() as i32;
+        sock.write_all(&RtlCmd::TunerGain(tenths).encode()).map_err(io)?;
+    }
+    sock.write_all(&RtlCmd::CenterFreq(control.center_hz() as u32).encode()).map_err(io)?;
+    Ok(())
+}
+
+/// Re-apply hardware parameters after a control change: gain mode/level, ppm, and
+/// center frequency. NCO offset and squelch are handled in-thread (no socket).
+fn apply_hardware(
+    sock: &mut TcpStream,
+    control: &SdrControl,
+) -> Result<(), AudioError> {
+    let io = |e: std::io::Error| AudioError::Io(e.to_string());
+    sock.write_all(&RtlCmd::FreqCorrection(control.ppm()).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::GainMode(!control.gain_auto()).encode()).map_err(io)?;
+    if !control.gain_auto() {
+        let tenths = (control.gain_db() * 10.0).round() as i32;
+        sock.write_all(&RtlCmd::TunerGain(tenths).encode()).map_err(io)?;
+    }
+    sock.write_all(&RtlCmd::CenterFreq(control.center_hz() as u32).encode()).map_err(io)?;
+    Ok(())
+}
+
+/// Emit one RF-referenced waterfall line per complete STFT frame of the raw IQ.
+/// `freq_start_hz` is absolute RF: bin[0] = hardware center − rate/2.
+fn emit_waterfall(
+    stft: &mut ComplexStft,
+    iq: &[omnimodem_dsp::types::Cplx],
+    capture_rate: u32,
+    center_hz: f64,
+    channel: ChannelId,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) {
+    for frame in stft.feed(iq) {
+        let dbfs = full_spectrum_dbfs(&frame, stft.window_sum());
+        let plan = SpectrumPlan::new_centered(
+            WATERFALL_NFFT,
+            capture_rate as f32,
+            center_hz as f32,
+            WATERFALL_BINS,
+            -(capture_rate as f32) / 2.0,
+            (capture_rate as f32) / 2.0,
+        );
+        let bins = plan.render(&dbfs);
+        let timestamp_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let _ = telemetry.send(TelemetryEvent::SpectrumFrame {
+            channel,
+            timestamp_ns,
+            freq_start_hz: plan.freq_start_hz,
+            freq_step_hz: plan.freq_step_hz,
+            db_floor: plan.db_floor,
+            db_ceiling: plan.db_ceiling,
+            bins,
+            transmit: false,
+        });
+    }
+}
+
+impl AudioBackend for RtlTcpBackend {
+    fn open_capture(&self, requested_rate: u32) -> Result<CaptureHandle, AudioError> {
+        // The audio channel rate delivered downstream (capped like the soundcard
+        // path). The dongle streams at `self.capture_rate`; we decimate to this.
+        let channel_rate = requested_rate.min(MAX_SAMPLE_RATE);
+
+        let addr = format!("{}:{}", self.host, self.port);
+        let mut sock = TcpStream::connect(&addr)
+            .map_err(|e| AudioError::Io(format!("rtl_tcp connect {addr}: {e}")))?;
+
+        // Read + validate the 12-byte greeting before anything else.
+        let mut header = [0u8; 12];
+        sock.read_exact(&mut header).map_err(|e| AudioError::Io(e.to_string()))?;
+        parse_header(&header)?;
+
+        send_initial_commands(&mut sock, self.capture_rate, &self.control)?;
+
+        // A second handle for the capture thread to issue retune/gain commands.
+        let mut cmd_sock = sock
+            .try_clone()
+            .map_err(|e| AudioError::Io(e.to_string()))?;
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+
+        let control = self.control.clone();
+        let telemetry = self.telemetry.clone();
+        let channel = self.channel;
+        let capture_rate = self.capture_rate;
+        let deviation_hz = self.deviation_hz;
+
+        std::thread::Builder::new()
+            .name("omni-rtl-capture".into())
+            .spawn(move || {
+                let mut rx_chain = NbfmReceiver::new(
+                    capture_rate,
+                    channel_rate,
+                    control.offset_hz(),
+                    deviation_hz,
+                    control.effective_squelch(),
+                );
+                let mut stft = ComplexStft::new(WATERFALL_NFFT, WATERFALL_NFFT);
+                let mut seen_gen = control.generation();
+                // Read buffer sized for ~one waterfall frame of IQ (2 bytes/sample).
+                let mut buf = vec![0u8; WATERFALL_NFFT * 2];
+                // Carry a split IQ pair across TCP read boundaries.
+                let mut carry: Option<u8> = None;
+
+                while !stop_thread.load(Ordering::Relaxed) {
+                    let n = match sock.read(&mut buf) {
+                        Ok(0) => break, // server closed
+                        Ok(n) => n,
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    };
+
+                    // Reassemble a whole-pair byte stream, prepending any carry.
+                    let mut bytes: Vec<u8> = Vec::with_capacity(n + 1);
+                    if let Some(c) = carry.take() {
+                        bytes.push(c);
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if bytes.len() % 2 == 1 {
+                        carry = bytes.pop();
+                    }
+
+                    let iq = u8_iq_to_cplx(&bytes);
+                    if iq.is_empty() {
+                        continue;
+                    }
+
+                    // Reconcile runtime control changes before demodulating.
+                    let gen = control.generation();
+                    if gen != seen_gen {
+                        seen_gen = gen;
+                        rx_chain.retune(control.offset_hz());
+                        rx_chain.set_squelch(control.effective_squelch());
+                        let _ = apply_hardware(&mut cmd_sock, &control);
+                    }
+
+                    if let Some(tele) = telemetry.as_ref() {
+                        emit_waterfall(
+                            &mut stft, &iq, capture_rate, control.center_hz(), channel, tele,
+                        );
+                    }
+
+                    let audio = rx_chain.push_iq(&iq);
+                    if audio.is_empty() {
+                        continue;
+                    }
+                    let chunk: AudioChunk = audio
+                        .iter()
+                        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                        .collect();
+                    if tx.send(chunk).is_err() {
+                        break; // consumer dropped
+                    }
+                }
+            })
+            .map_err(|e| AudioError::Io(e.to_string()))?;
+
+        let stop_on_drop = stop;
+        Ok(CaptureHandle::new(rx, channel_rate, move || {
+            stop_on_drop.store(true, Ordering::Relaxed);
+        }))
+    }
+
+    fn open_playback(&self, _requested_rate: u32) -> Result<PlaybackHandle, AudioError> {
+        // RTL dongles are receive-only.
+        Err(AudioError::Unsupported)
+    }
+
+    fn device_id(&self) -> DeviceId {
+        DeviceId::RtlTcp { host: self.host.clone(), port: self.port }
+    }
+
+    fn attach_sdr_context(
+        &mut self,
+        channel: ChannelId,
+        telemetry: broadcast::Sender<TelemetryEvent>,
+        control: SdrControl,
+    ) {
+        self.channel = channel;
+        self.telemetry = Some(telemetry);
+        self.control = control;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +595,96 @@ mod tests {
         assert!(!c.effective_squelch().is_open());
         c.set_squelch_db(SQUELCH_DISABLED_DB);
         assert!(c.effective_squelch().is_open());
+    }
+
+    use std::net::TcpListener;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    /// FM-modulate a `tone_hz` sine at `offset_hz` into u8 IQ at `rate`.
+    fn fm_iq_u8(rate: f32, offset_hz: f32, tone_hz: f32, dev_hz: f32, n: usize) -> Vec<u8> {
+        let mut phase = 0.0f32;
+        let mut out = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            let t = k as f32 / rate;
+            let inst = offset_hz + dev_hz * (std::f32::consts::TAU * tone_hz * t).sin();
+            phase += std::f32::consts::TAU * inst / rate;
+            let i = ((phase.cos() * 0.9 * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8;
+            let q = ((phase.sin() * 0.9 * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8;
+            out.push(i);
+            out.push(q);
+        }
+        out
+    }
+
+    /// Start an in-process `rtl_tcp` server: write the 12-byte header, drain
+    /// client commands on a side thread, stream `iq`, then close. Returns the
+    /// bound port.
+    fn spawn_fake_server(iq: Vec<u8>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut header = [0u8; 12];
+            header[0..4].copy_from_slice(b"RTL0");
+            header[4..8].copy_from_slice(&5u32.to_be_bytes());
+            header[8..12].copy_from_slice(&29u32.to_be_bytes());
+            sock.write_all(&header).unwrap();
+            // Drain whatever commands the client sends without blocking the write.
+            let mut drain = sock.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut sink = [0u8; 64];
+                while let Ok(n) = drain.read(&mut sink) {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+            sock.write_all(&iq).unwrap();
+            // Signal EOF on the read side even though the drain clone lingers, so
+            // the client's capture loop terminates.
+            let _ = sock.shutdown(std::net::Shutdown::Write);
+        });
+        port
+    }
+
+    #[test]
+    fn capture_reads_header_and_delivers_audio() {
+        let iq = fm_iq_u8(DEFAULT_CAPTURE_RATE as f32, 30_000.0, 1_200.0, DEFAULT_DEVIATION_HZ, 48_000);
+        let port = spawn_fake_server(iq);
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        backend.control.set_offset_hz(30_000.0);
+        let cap = backend.open_capture(48_000).unwrap();
+        assert_eq!(cap.sample_rate, 48_000);
+
+        let mut total = 0usize;
+        loop {
+            match cap.rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(chunk) => total += chunk.len(),
+                Err(RecvTimeoutError::Timeout) => panic!("capture stalled"),
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(total > 0, "expected demodulated audio samples, got none");
+    }
+
+    #[test]
+    fn bad_header_fails_capture() {
+        // A server that sends a wrong magic must make open_capture error.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.write_all(&[0u8; 12]).unwrap();
+        });
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        assert!(backend.open_capture(48_000).is_err());
+    }
+
+    #[test]
+    fn playback_is_unsupported() {
+        let backend = RtlTcpBackend::new("127.0.0.1", 1234);
+        assert!(matches!(backend.open_playback(48_000), Err(AudioError::Unsupported)));
+        assert_eq!(backend.device_id(), DeviceId::RtlTcp { host: "127.0.0.1".into(), port: 1234 });
     }
 }
