@@ -41,6 +41,12 @@ struct Entry {
 }
 
 /// Aggregates decoded Mode S frames into live aircraft state.
+///
+/// `ingest` never evicts, so `by_icao` grows one entry per distinct ICAO ever
+/// heard; the caller owns the eviction cadence and must call [`prune`] (e.g. on
+/// a timer) to bound memory on a long-running receiver.
+///
+/// [`prune`]: AircraftTracker::prune
 pub struct AircraftTracker {
     max_age_ms: u64,
     cpr_window_ms: u64,
@@ -59,6 +65,13 @@ impl AircraftTracker {
     /// frame was an extended squitter (DF17/18) this tracker understood, else
     /// `None`.
     pub fn ingest(&mut self, bytes: &[u8], now_ms: u64) -> Option<u32> {
+        // Extended squitter (DF17/18) is always 14 bytes. Reject anything
+        // shorter up front — this also guards the unchecked byte reads in
+        // `ModeS::df`/`icao`/`airborne_position` below, so a truncated or empty
+        // payload returns `None` instead of panicking.
+        if bytes.len() < 14 {
+            return None;
+        }
         let m = ModeS::new(bytes);
         if !matches!(m.df(), 17 | 18) {
             return None;
@@ -89,8 +102,18 @@ impl AircraftTracker {
                     } else {
                         entry.even = Some(slot);
                     }
+                    // Pair even+odd into a global position only when BOTH
+                    // halves were seen within `cpr_window_ms` of this frame.
+                    // CPR global decode assumes near-simultaneous reports; a
+                    // lingering stale half would otherwise re-derive a wrong
+                    // position for a moving aircraft (and overwrite a fresher
+                    // one). Gating on age relative to `now_ms` — not just the
+                    // pair-internal spread — expires stale halves.
+                    let fresh = |s: &CprSlot| now_ms.saturating_sub(s.ts) <= cpr_window;
                     if let (Some(e), Some(o)) = (entry.even, entry.odd) {
-                        if e.ts.abs_diff(o.ts) <= cpr_window {
+                        if fresh(&e) && fresh(&o) {
+                            // On a same-tick tie, anchor to odd — either frame
+                            // is a valid anchor when the two truly coincide.
                             let newest_is_odd = o.ts >= e.ts;
                             if let Some(pos) = cpr_decode_airborne(&e.pos, &o.pos, newest_is_odd) {
                                 entry.ac.position = Some(pos);
@@ -173,6 +196,27 @@ mod tests {
         let even = hex("8D40621D58C382D690C8AC2863A7");
         t.ingest(&odd, 0);
         t.ingest(&even, 50_000); // 50 s apart > 10 s window
+        assert_eq!(t.aircraft()[0].position, None);
+    }
+
+    #[test]
+    fn ingest_rejects_runt_frames_without_panicking() {
+        let mut t = AircraftTracker::new(60_000, 10_000);
+        assert_eq!(t.ingest(&[], 0), None);
+        // A DF17 first byte on a slice too short for the ICAO / ME reads.
+        assert_eq!(t.ingest(&[0x8D, 0x40, 0x62, 0x1D], 0), None);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn stale_cpr_half_does_not_pair() {
+        let mut t = AircraftTracker::new(600_000, 10_000);
+        let odd = hex("8D40621D58C386435CC412692AD6");
+        let even = hex("8D40621D58C382D690C8AC2863A7");
+        // Even arrives 11 s after odd — outside the 10 s freshness window — so
+        // no position is derived even though both halves are on file.
+        t.ingest(&odd, 0);
+        t.ingest(&even, 11_000);
         assert_eq!(t.aircraft()[0].position, None);
     }
 
