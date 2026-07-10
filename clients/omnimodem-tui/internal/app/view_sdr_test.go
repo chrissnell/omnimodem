@@ -7,6 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func keyRunes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
@@ -173,6 +175,25 @@ func TestSdrPpm(t *testing.T) {
 	run(t, v, keyRunes("-"))
 	if f.SdrConfigCalls[2].GetPpm() != 1 {
 		t.Fatalf("- should drop ppm to 1, got %v", f.SdrConfigCalls[2].GetPpm())
+	}
+}
+
+// Selecting a Phase-B demod mode (UNIMPLEMENTED daemon-side) surfaces an error
+// and doesn't stick: the ConfigureSdr failure yields an rpcErrMsg that the Model
+// turns into a toast, and the picker label (read from chanLive) stays on NBFM.
+func TestSdrDemodUnimplemented(t *testing.T) {
+	f := &client.Fake{}
+	v := sdrTestView(f)
+	f.Err = status.Error(codes.Unimplemented, "demod mode AM lands in Phase B")
+	msg := run(t, v, keyRunes("m")) // cycle NBFM -> AM, daemon rejects
+	if _, ok := msg.(rpcErrMsg); !ok {
+		t.Fatalf("UNIMPLEMENTED demod should yield rpcErrMsg, got %T", msg)
+	}
+	if got := demodLabel(v.demod(v.live())); got != "NBFM" {
+		t.Fatalf("rejected demod must not stick; label = %s", got)
+	}
+	if v.m.Update(msg); v.m.toast == nil {
+		t.Fatal("rpcErrMsg should raise a toast")
 	}
 }
 

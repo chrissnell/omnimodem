@@ -82,7 +82,9 @@ func isSDRDevice(id string) bool {
 // 12.5 k, 25 k — the common amateur channel spacings.
 var sdrSteps = []float64{1000, 5000, 12500, 25000}
 
-// stepLabel renders a tuning step in a compact human form (1k, 12.5k, 25k).
+// stepLabel renders a tuning step in a compact human form (1k, 12.5k, 25k). The
+// fractional branch keeps a single decimal, which is exact for every value in
+// sdrSteps; a step with sub-100-Hz precision would be rounded in the label.
 func stepLabel(hz float64) string {
 	switch {
 	case hz >= 1000 && hz == float64(int64(hz/1000))*1000:
@@ -183,8 +185,11 @@ func demodLabel(m pb.DemodMode) string {
 }
 
 // demodModes is the cycle order for the `m` picker. The enum ships complete in
-// Phase A even though only NBFM is implemented daemon-side; the others return
-// UNIMPLEMENTED, surfaced to the operator as a toast.
+// Phase A even though only NBFM is implemented daemon-side; selecting another
+// mode makes ConfigureSdr fail with UNIMPLEMENTED, which the event loop shows as
+// an error toast (model.go's rpcErrMsg case). The picker's displayed mode reads
+// from the SdrState-fed chanLive, so a rejected mode never sticks — the label
+// stays on the mode actually in effect.
 var demodModes = []pb.DemodMode{
 	pb.DemodMode_DEMOD_NBFM,
 	pb.DemodMode_DEMOD_AM,

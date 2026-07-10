@@ -31,9 +31,15 @@ type sdrView struct {
 	m       *Model
 	rxWf    waterfall
 	caps    *pb.GetSdrCapsResponse
-	stepIdx int   // index into sdrSteps
-	gainIdx int   // cursor into caps.gains for manual stepping; -1 unknown
-	ppm     int32 // desired ppm correction (not reported back in SdrState)
+	stepIdx int // index into sdrSteps
+	gainIdx int // cursor into caps.gains for manual stepping; -1 unknown
+	// ppm is the operator's desired frequency correction. It is NOT carried in
+	// SdrState (the daemon boots it at 0 and, in Phase A, only a ConfigureSdr call
+	// changes it — end-to-end ppm wiring is Phase C), so unlike squelch/gain it
+	// cannot be adopted from the daemon. This view is therefore the sole author of
+	// ppm for a single operator; with multiple concurrent clients ppm can't be
+	// kept in sync until SdrState carries it. See the review note on GRA-300.
+	ppm     int32
 	squelch float32
 	adopted bool // adopted the daemon's squelch/gain into editing state yet
 
@@ -367,7 +373,8 @@ func (v *sdrView) Hints() []ui.Hint {
 	}
 	return []ui.Hint{
 		{Key: "←/→", Action: "tune"}, {Key: "s", Action: "step"}, {Key: "f", Action: "freq"},
-		{Key: "g/[/]", Action: "gain"}, {Key: "m", Action: "demod"}, {Key: ",/.", Action: "squelch"},
+		{Key: "g/[/]", Action: "gain"}, {Key: "m", Action: "demod"},
+		{Key: ",/.", Action: "squelch"}, {Key: "\\", Action: "sql off"}, {Key: "-/+", Action: "ppm"},
 		{Key: "esc", Action: "back"},
 	}
 }

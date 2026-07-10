@@ -125,7 +125,9 @@ var wfCursor = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(
 // cursorColumn maps an absolute RF frequency to a display column in a
 // `width`-wide waterfall line, via the current frame's freqStart/freqStep axis.
 // Returns -1 when there is no axis yet or the frequency falls outside the shown
-// span, so callers can skip drawing a marker cleanly.
+// span, so callers can skip drawing a marker cleanly. It bins against the newest
+// frame's width; if the daemon reconfigures the bin count mid-stream, older
+// retained rows can be a column off until they scroll out (wfHistory frames).
 func (w *waterfall) cursorColumn(width int, freqHz float64) int {
 	if width <= 0 || w.freqStep == 0 || len(w.rows) == 0 {
 		return -1
