@@ -334,6 +334,7 @@ message Event {
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
     RsidDetected rsid_detected = 14;     // LOSSY class
     SdrState sdr_state = 15;             // LOSSY class
+    TransmitFailed transmit_failed = 16; // LOSSY: TX aborted before keying
   }
 }
 
@@ -393,6 +394,15 @@ message TransmitStarted {
 message TransmitComplete {
   uint32 channel = 1;
   uint64 transmit_id = 2;
+}
+
+// A transmit that could not go on the air (e.g. the message can't be encoded in
+// this mode), reported so the client can tell the operator instead of leaving
+// them with unexplained silence.
+message TransmitFailed {
+  uint32 channel = 1;
+  uint64 transmit_id = 2;
+  string reason = 3;
 }
 
 // A decoded RX frame. Text/packet/message payloads travel in `data` (UTF-8 or

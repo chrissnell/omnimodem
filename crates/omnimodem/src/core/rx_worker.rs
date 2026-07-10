@@ -823,4 +823,59 @@ mod tests {
         let peak_hz = peak_idx as f32 * (24_000.0 / 64.0);
         assert!((peak_hz - 1000.0).abs() < 500.0, "tone bucket at {peak_hz} Hz, expected ~1 kHz");
     }
+
+    // GRA-257: the WINDOWED RX worker (FST4/FT8/JT65/JT9/WSPR) must feed the
+    // waterfall per audio chunk, even though it only decodes once per multi-second
+    // window — otherwise a windowed mode shows no RX spectrum. The streaming test
+    // above never exercised spawn_windowed.
+    #[test]
+    fn windowed_rx_worker_emits_spectrum_frames() {
+        use crate::core::spectrum::{SpectrumCfg, SpectrumControl};
+        use omnimodem_dsp::modes::fst4::Fst4Demod;
+        use std::f32::consts::TAU;
+
+        // ~1 s of a 1500 Hz tone (FST4's audio band) at 48 kHz; the worker
+        // resamples to the 12 kHz native rate before the tap.
+        let tone: Vec<i16> = (0..48_000)
+            .map(|n| ((TAU * 1500.0 * n as f32 / 48_000.0).sin() * 16_384.0) as i16)
+            .collect();
+        let backend = FileBackend::from_samples(tone, 48_000);
+        let capture = backend.open_capture(48_000).unwrap();
+
+        let spectrum = SpectrumControl::default();
+        spectrum.enable(SpectrumCfg {
+            bin_count: 64,
+            fft_size: 0,
+            rate_hz: 0,
+            freq_lo_hz: 0.0,
+            freq_hi_hz: 3000.0,
+        });
+
+        let (tele_tx, mut tele_rx) = broadcast::channel(1024);
+        let worker = RxWorker::spawn_windowed(
+            ChannelId(3),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(Fst4Demod::new(15)),
+            RxTxInterlock::new(),
+            broadcast::channel(8).0,
+            tele_tx,
+            test_metrics(),
+            15.0,
+            crate::core::AudioGain::default(),
+            spectrum,
+            false,
+        );
+        worker.join();
+
+        let mut frames = 0;
+        while let Ok(ev) = tele_rx.try_recv() {
+            if let TelemetryEvent::SpectrumFrame { channel, transmit, .. } = ev {
+                assert_eq!(channel, ChannelId(3));
+                assert!(!transmit, "RX spectrum must be tagged transmit=false");
+                frames += 1;
+            }
+        }
+        assert!(frames > 0, "windowed RX worker emitted no SpectrumFrame (blank waterfall)");
+    }
 }

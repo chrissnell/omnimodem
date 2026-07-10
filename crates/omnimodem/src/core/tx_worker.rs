@@ -174,12 +174,19 @@ fn run(mut cfg: TxWorkerCfg, rx: Receiver<TxJob>, cancel: Arc<AtomicBool>) {
             Some(pb) => (pb.samples, pb.native_rate),
             None => match cfg.modulator.modulate(&job.frame) {
                 Ok(s) => (s, cfg.modulator.caps().native_rate),
-                Err(_) => {
-                    // Payload not valid for this mode: surface start+complete so a
-                    // client awaiting this transmit id isn't left hanging.
+                Err(e) => {
+                    // Payload not valid for this mode: emit start + a failure with
+                    // the reason (so the operator learns WHY there was no audio) +
+                    // complete (so a client awaiting this transmit id isn't left
+                    // hanging).
                     let _ = cfg.telemetry.send(TelemetryEvent::TransmitStarted {
                         channel: cfg.channel,
                         transmit_id: job.transmit_id,
+                    });
+                    let _ = cfg.telemetry.send(TelemetryEvent::TransmitFailed {
+                        channel: cfg.channel,
+                        transmit_id: job.transmit_id,
+                        reason: format!("cannot encode this message in this mode ({e})"),
                     });
                     let _ = cfg.telemetry.send(TelemetryEvent::TransmitComplete {
                         channel: cfg.channel,
@@ -376,6 +383,116 @@ mod tests {
     use crate::mode::ModeConfig;
     use crate::ptt::none::MockPtt;
     use omnimodem_dsp::types::Frame as DspFrame;
+
+    // GRA-257 regression: the real modulate->resample->i16->sink path must play
+    // non-silent audio for every windowed mode (not just FT8). slot_s: None keeps
+    // the test off the slot grid; the sink is fed at submit() so we poll `played`
+    // directly rather than waiting out real-time airtime.
+    #[test]
+    fn every_windowed_mode_plays_nonsilent_audio() {
+        let cases: &[(ModeConfig, &str)] = &[
+            (ModeConfig::Ft8, "CQ NW5W EM10"),
+            (ModeConfig::Ft4, "CQ NW5W EM10"),
+            (ModeConfig::Jt65, "W9XYZ K1ABC FN42"),
+            (ModeConfig::Jt9, "W9XYZ K1ABC FN42"),
+            (ModeConfig::Fst4 { tr_s: 15 }, "CQ NW5W EM10"),
+            (ModeConfig::Wspr, "K1ABC FN42 37"),
+        ];
+        for (mode, msg) in cases {
+            let label = mode.label();
+            let backend = FileBackend::from_samples(vec![], 48_000);
+            let sink = backend.open_playback(48_000).unwrap();
+            let (tele, _tele_rx) = broadcast::channel(64);
+            // Worker dropped at loop end (detaches; no join on real-time airtime).
+            let worker = spawn(TxWorkerCfg {
+                channel: ChannelId(0),
+                rig: DeviceId::placeholder(),
+                rate: 48_000,
+                modulator: crate::mode::registry::build_modulator(mode).unwrap(),
+                sink,
+                driver: Box::new(MockPtt::new()),
+                interlock: RxTxInterlock::new(),
+                lease: TxLeaseRegistry::new(),
+                telemetry: tele,
+                slot_s: None,
+                gain: crate::core::AudioGain::default(),
+                spectrum: SpectrumControl::default(),
+                rsid: None,
+                tx_delay: Duration::ZERO,
+                tx_tail: Duration::ZERO,
+            });
+            worker
+                .enqueue(TxJob::frame(DspFrame::text(*msg), TransmitId(1)))
+                .unwrap();
+            let mut peak = 0i32;
+            for _ in 0..600 {
+                {
+                    let played = backend.played.lock().unwrap();
+                    if !played.is_empty() {
+                        peak = played.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0);
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(peak > 16_000, "{label}: TX played silence (peak {peak})");
+            drop(worker);
+        }
+    }
+
+    // An unencodable message must not fail silently: the worker emits a
+    // TransmitFailed (with a reason) so the client can tell the operator, then a
+    // TransmitComplete so nothing is left hanging.
+    #[test]
+    fn unencodable_message_reports_transmit_failed() {
+        let backend = FileBackend::from_samples(vec![], 48_000);
+        let sink = backend.open_playback(48_000).unwrap();
+        let (tele, mut tele_rx) = broadcast::channel(64);
+        let worker = spawn(TxWorkerCfg {
+            channel: ChannelId(0),
+            rig: DeviceId::placeholder(),
+            rate: 48_000,
+            // FST4 can't encode a nonstandard/slashed call -> pack fails.
+            modulator: crate::mode::registry::build_modulator(&ModeConfig::Fst4 { tr_s: 15 }).unwrap(),
+            sink,
+            driver: Box::new(MockPtt::new()),
+            interlock: RxTxInterlock::new(),
+            lease: TxLeaseRegistry::new(),
+            telemetry: tele,
+            slot_s: None,
+            gain: crate::core::AudioGain::default(),
+            spectrum: SpectrumControl::default(),
+            rsid: None,
+            tx_delay: Duration::ZERO,
+            tx_tail: Duration::ZERO,
+        });
+        worker
+            .enqueue(TxJob::frame(DspFrame::text("CQ K7XYZ/P EM10"), TransmitId(7)))
+            .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let (failed, keyed) = rt.block_on(async {
+            let (mut failed, mut keyed) = (false, false);
+            for _ in 0..100 {
+                while let Ok(ev) = tele_rx.try_recv() {
+                    match ev {
+                        TelemetryEvent::TransmitFailed { transmit_id, reason, .. } => {
+                            assert_eq!(transmit_id, TransmitId(7));
+                            assert!(!reason.is_empty(), "reason should explain the failure");
+                            failed = true;
+                        }
+                        TelemetryEvent::PttKeyed { keyed: true, .. } => keyed = true,
+                        _ => {}
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (failed, keyed)
+        });
+        assert!(failed, "expected a TransmitFailed for an unencodable message");
+        assert!(!keyed, "an unencodable message must never key PTT");
+        assert!(backend.played.lock().unwrap().is_empty(), "nothing should have played");
+        worker.shutdown();
+    }
 
     #[test]
     fn worker_modulates_and_plays_a_queued_text_frame() {

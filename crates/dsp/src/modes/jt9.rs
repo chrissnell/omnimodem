@@ -54,7 +54,8 @@ impl Modulator for Jt9Mod {
 
     fn modulate(&mut self, frame: &Frame) -> Result<Vec<Sample>, ModError> {
         let text = match &frame.payload {
-            FramePayload::Text(t) => t.clone(),
+            // 6-char locators don't fit a legacy message; use the 4-char square.
+            FramePayload::Text(t) => crate::framing::message77::normalize_grid6(t),
             _ => return Err(ModError::UnsupportedPayload("jt9 needs text")),
         };
         let bits = pack72(&text).ok_or_else(|| ModError::TooLong(text.clone()))?;

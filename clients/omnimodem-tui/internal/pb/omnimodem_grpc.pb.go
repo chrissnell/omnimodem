@@ -103,10 +103,9 @@ type ModemControlClient interface {
 	// Set tuner gain: automatic hardware AGC, or a manual gain snapped to the
 	// tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
 	SetSdrGain(ctx context.Context, in *SetSdrGainRequest, opts ...grpc.CallOption) (*SetSdrGainResponse, error)
-	// Source-wide SDR config: capture rate, demod mode, squelch, ppm. Only NBFM is
-	// implemented in Phase A (other DemodMode values return UNIMPLEMENTED);
-	// bias_tee/direct_sampling are Phase C (requesting either returns UNIMPLEMENTED,
-	// leaving them false is a no-op). Echoes the actual capture rate.
+	// Source-wide SDR config: capture rate, demod mode, squelch, ppm, bias-tee,
+	// direct-sampling. All DemodMode values are implemented and selectable at
+	// runtime. Echoes the actual capture rate.
 	ConfigureSdr(ctx context.Context, in *ConfigureSdrRequest, opts ...grpc.CallOption) (*ConfigureSdrResponse, error)
 	// Query the bound tuner's capabilities (tuner name, RF range, valid capture
 	// rates, discrete gain table) for building UIs and validating requests.
@@ -386,10 +385,9 @@ type ModemControlServer interface {
 	// Set tuner gain: automatic hardware AGC, or a manual gain snapped to the
 	// tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
 	SetSdrGain(context.Context, *SetSdrGainRequest) (*SetSdrGainResponse, error)
-	// Source-wide SDR config: capture rate, demod mode, squelch, ppm. Only NBFM is
-	// implemented in Phase A (other DemodMode values return UNIMPLEMENTED);
-	// bias_tee/direct_sampling are Phase C (requesting either returns UNIMPLEMENTED,
-	// leaving them false is a no-op). Echoes the actual capture rate.
+	// Source-wide SDR config: capture rate, demod mode, squelch, ppm, bias-tee,
+	// direct-sampling. All DemodMode values are implemented and selectable at
+	// runtime. Echoes the actual capture rate.
 	ConfigureSdr(context.Context, *ConfigureSdrRequest) (*ConfigureSdrResponse, error)
 	// Query the bound tuner's capabilities (tuner name, RF range, valid capture
 	// rates, discrete gain table) for building UIs and validating requests.

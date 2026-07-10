@@ -124,6 +124,24 @@ func TestWsprBeaconNeedsCallAndGrid(t *testing.T) {
 	}
 }
 
+// A TransmitFailed event (the burst never keyed — e.g. an unencodable message)
+// must surface as a toast so the operator learns why there was no audio, rather
+// than being left with silent-completion.
+func TestTransmitFailedShowsToast(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.live[0] = &chanLive{mode: "fst4"}
+	m.sel = 0
+	v := newOperateView(m)
+	v.tx.begin([]byte("CQ K7XYZ/P EM10")) // an in-flight transmit
+	ev := &pb.Event{Kind: &pb.Event_TransmitFailed{TransmitFailed: &pb.TransmitFailed{
+		Channel: 0, TransmitId: 1, Reason: "cannot encode this message in this mode",
+	}}}
+	v.Update(eventMsg{ev: ev})
+	if m.toast == nil || !strings.Contains(m.toast.Line(), "cannot encode") {
+		t.Fatalf("expected a TX-failed toast, got %+v", m.toast)
+	}
+}
+
 // Received text (decoded by the daemon and delivered as RxFrame events) must
 // appear in the transcript; streaming modes accumulate onto one line.
 func TestOperateShowsReceivedText(t *testing.T) {
