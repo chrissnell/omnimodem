@@ -726,6 +726,21 @@ fn configure_audio(
     // switch); a departing device clears it in poll_hotplug.
     if matches!(device_id, DeviceId::RtlTcp { .. }) {
         let control = live.sdr_controls.entry(id).or_default().clone();
+        // Couple the channel mode to the SDR front-end before opening the capture.
+        // ADS-B needs the wideband magnitude path (`RawMag`), which delivers full-rate
+        // |I+jQ| at 2.4 Msps instead of channelized audio; every other mode uses the
+        // channelizing demod. This runs on every (re)bind, and `configure_audio`
+        // always re-opens the capture — so a mode switch across the `RawMag` boundary
+        // (which changes the delivered sample rate) re-negotiates it correctly.
+        match supervisor.channel_mode(id) {
+            crate::mode::ModeConfig::Adsb => control.set_demod_mode(DemodMode::RawMag),
+            // Don't clobber the operator-selected audio demod mode, but make sure a
+            // channel that was previously ADS-B doesn't stay stuck in RawMag.
+            _ if control.demod_mode() == DemodMode::RawMag => {
+                control.set_demod_mode(DemodMode::Nbfm)
+            }
+            _ => {}
+        }
         rx_backend.attach_sdr_context(id, telemetry.clone(), control);
     } else {
         // Rebinding to a non-SDR device: drop any stale control cell so a later

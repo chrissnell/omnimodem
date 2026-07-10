@@ -586,6 +586,41 @@ mod tests {
     }
 
     #[test]
+    fn rx_worker_decodes_a_replayed_adsb_frame() {
+        // The streaming worker drives the wideband ADS-B demod at its 2 MHz native
+        // rate (as the RawMag capture delivers it) and surfaces the decoded Mode S
+        // bytes as a Packet frame. Modulate a known DF17 identification frame, replay
+        // its magnitude envelope, and assert the same bytes come back out.
+        use omnimodem_dsp::modes::adsb::{encode_identification, AdsbDemod, AdsbMod};
+        let frame = encode_identification(0x3C6444, "TEST42");
+        let wave = AdsbMod::new().modulate(&Frame::packet(frame.to_vec())).unwrap();
+        let backend = FileBackend::from_samples(to_i16(&wave), 2_000_000);
+        let capture = backend.open_capture(2_000_000).unwrap();
+
+        let (tx_b, mut rx_b) = broadcast::channel(64);
+        let worker = RxWorker::spawn_streaming(
+            ChannelId(0),
+            DeviceId::placeholder(),
+            capture,
+            Box::new(AdsbDemod::new()),
+            RxTxInterlock::new(),
+            tx_b,
+            broadcast::channel(8).0,
+            test_metrics(),
+            crate::core::AudioGain::default(),
+            crate::core::spectrum::SpectrumControl::default(),
+            false,
+        );
+        worker.join();
+
+        let mut got = Vec::new();
+        while let Ok(FrameEvent::RxFrame { data, .. }) = rx_b.try_recv() {
+            got.push(data);
+        }
+        assert!(got.iter().any(|d| d == &frame.to_vec()), "no matching ADS-B frame: {got:?}");
+    }
+
+    #[test]
     fn rx_worker_mutes_while_interlocked() {
         // With the rig muted, the worker must emit no frames even though the
         // capture replays a valid signal.

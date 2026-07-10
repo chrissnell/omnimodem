@@ -86,6 +86,11 @@ pub enum ModeConfig {
     /// W2 WSJT-X: MSK144 meteor scatter. `freq_hz` is the audio centre frequency
     /// (default 1500). A streaming, ping-buffered short-burst offset-MSK mode.
     Msk144 { freq_hz: f32 },
+    /// ADS-B (Mode S) 1090 MHz extended squitter. A wideband SDR-only streaming
+    /// mode: it consumes a full-rate magnitude envelope (2 MHz native), not audio,
+    /// so the daemon feeds it via the rtl_tcp `RawMag` capture path rather than the
+    /// channelizing `sdr_demod`. Carries no tunable params (1090 MHz is fixed).
+    Adsb,
 }
 
 impl ModeConfig {
@@ -209,6 +214,7 @@ impl ModeConfig {
                 .to_string(),
             }),
             "msk144" => Some(ModeConfig::Msk144 { freq_hz: f("freq", 1500.0) }),
+            "adsb" => Some(ModeConfig::Adsb),
             m if omnimodem_dsp::modes::jt4::Jt4Submode::from_label(m).is_some() => {
                 Some(ModeConfig::Jt4 { submode: m.to_string() })
             }
@@ -381,6 +387,7 @@ impl ModeConfig {
                 .unwrap_or("jt4a"),
             ModeConfig::Msk144 { .. } => "msk144",
             ModeConfig::Olivia { .. } => "olivia",
+            ModeConfig::Adsb => "adsb",
         }
     }
 }
@@ -776,6 +783,15 @@ mod tests {
         }
         assert_eq!(ModeConfig::parse("jt4"), None);
         assert_eq!(ModeConfig::parse("jt4h"), None);
+    }
+
+    #[test]
+    fn parse_resolves_adsb_and_round_trips() {
+        assert_eq!(ModeConfig::parse("adsb"), Some(ModeConfig::Adsb));
+        let c = ModeConfig::Adsb;
+        assert_eq!(c.label(), "adsb");
+        assert_eq!(c.to_mode_string(), "adsb");
+        assert_eq!(ModeConfig::parse(&c.to_mode_string()), Some(c));
     }
 
     #[test]
