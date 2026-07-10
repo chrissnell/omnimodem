@@ -30,6 +30,8 @@ modem configuration lives in the daemon.
 | Channels view (list, new/configure/operate) | `internal/app/view_channels.go` |
 | Configure view (mode/family selector, device pickers, PTT, RSID) | `internal/app/view_config.go` |
 | Operate view (transcript / sequencer / beacon / raster / waterfall / compose) | `internal/app/view_operate.go` |
+| SDR tuning view (RF readout, step/direct tune, gain/ppm/demod/squelch, RF waterfall + demod cursor) | `internal/app/view_sdr.go` |
+| SDR control commands + pure tuning/gain helpers | `internal/app/sdr.go` |
 | Mode registry + shape classification | `internal/app/modes.go` |
 | Per-mode settings form fields | `internal/app/mode_settings.go` |
 | TX state machine + lease flow | `internal/app/tx.go` |
@@ -53,12 +55,27 @@ modem configuration lives in the daemon.
 | `ConfigurePtt` | `view_config.go` | Set PTT method + delay/tail. |
 | `KeyPtt` | `view_operate.go` | Manual key (beacon/test). |
 | `SetAudioGain` | `view_config.go` | RX/TX gain. |
-| `ConfigureSpectrum` | `view_operate.go` | Turn the waterfall on when entering Operate. |
+| `ConfigureSpectrum` | `view_operate.go`, `waterfall.go` | Turn the waterfall on when entering Operate (audio passband) or the SDR view (`enableRFSpectrumCmd`, full RF span). |
+| `SetSdrTune` | `sdr.go`, `view_sdr.go` | Absolute demod tune (step / direct entry); daemon splits into hardware center + NCO offset. |
+| `SetSdrGain` | `sdr.go`, `view_sdr.go` | AGC toggle or manual tuner gain stepped through the caps table. |
+| `ConfigureSdr` | `sdr.go`, `view_sdr.go` | Demod mode, squelch threshold, ppm correction. |
+| `GetSdrCaps` | `sdr.go`, `view_sdr.go` | Tuner freq range + gain table, fetched on entering the SDR view. |
 | `SuggestUdevRule` | `view_config.go` | PTT-permission troubleshooting helper. |
 | `AcquireTxLease` / `ReleaseTxLease` | `tx.go` | Take/release exclusive TX around a transmission. |
 | `Transmit` | `tx.go` | Queue a text/packet payload. |
 | `TransmitImage` | `tx.go`, `picture_send.go` | Queue a raster (SSTV/WEFAX/Hell). |
-| `SubscribeEvents` (stream) | `events.go` | The live feed: snapshot then `rx_frame`, `audio_level`, `ptt_state`, `clock_offset`, `channel_metrics`, `spectrum_frame`, `rsid_detected`, `channel_configured`. |
+| `SubscribeEvents` (stream) | `events.go` | The live feed: snapshot then `rx_frame`, `audio_level`, `ptt_state`, `clock_offset`, `channel_metrics`, `spectrum_frame`, `rsid_detected`, `channel_configured`, `sdr_state`. |
+
+The channels view routes by bound device: a channel on an `rtltcp:<host>:<port>`
+capture device (`isSDRDevice`) opens the **SDR tuning view**; every other channel
+opens Operate. The SDR view is authoritative-daemon-driven — tune/gain/demod/squelch
+state is folded from the `sdr_state` event into `chanLive` (like `audio_level`), and
+the view holds only editing state (step size, direct-entry buffer, gain-table
+cursor, pending ppm). Keys: `←/→` tune ∓ step, `s` cycle step (1k/5k/12.5k/25k), `f`
+direct MHz entry, `g` AGC toggle, `[`/`]` step manual gain, `m` cycle demod, `,`/`.`
+squelch, `\` squelch on/off, `-`/`+` ppm. The RF waterfall reuses the shared renderer
+with a demod-channel **cursor** column (`waterfall.cursorColumn` maps Hz→bin via the
+RF-referenced `freq_start_hz`/`freq_step_hz` that Plan 2 emits).
 
 The Operate view adapts to the mode's *shape* (from `modes.go`): a **ragchew**
 transcript + macros for keyboard modes, an FT8/FT4/JT65/JT9 **sequencer** ladder for

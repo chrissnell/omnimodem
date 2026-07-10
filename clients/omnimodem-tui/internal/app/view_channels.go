@@ -80,6 +80,15 @@ func (v *channelsView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, devicesCmd(v.m.c)
 		case "o", "enter":
 			v.m.sel = v.selectedChannel()
+			// SDR-bound channels open the tuning view (RF waterfall + tuner
+			// controls); every other channel opens the standard operate view.
+			if cl := v.m.live[v.m.sel]; cl != nil && isSDRDevice(cl.deviceID) {
+				v.m.push(newSdrView(v.m))
+				return v, tea.Batch(
+					enableRFSpectrumCmd(v.m.c, v.m.sel, sdrBinCount),
+					getSdrCapsCmd(v.m.c, v.m.sel),
+				)
+			}
 			v.m.push(newOperateView(v.m))
 			return v, enableSpectrumCmd(v.m.c, v.m.sel, 64)
 		}

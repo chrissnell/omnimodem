@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ramp maps a 0..255 intensity to a density glyph (low→high).
@@ -92,6 +92,13 @@ func (w *waterfall) hasSignal() bool {
 // newest at the bottom, with blank lines padding the top until enough history
 // accumulates — so it occupies a fixed block that doesn't jump around.
 func (w *waterfall) render(width, rows int) string {
+	return w.renderCursor(width, rows, -1)
+}
+
+// renderCursor is render with a demod-channel marker painted down `cursorCol`
+// (a display column, from cursorColumn). cursorCol < 0 draws no marker, so
+// render delegates here with -1.
+func (w *waterfall) renderCursor(width, rows, cursorCol int) string {
 	if width <= 0 || rows <= 0 {
 		return ""
 	}
@@ -100,9 +107,9 @@ func (w *waterfall) render(width, rows int) string {
 	for i := 0; i < rows; i++ {
 		idx := have - rows + i // bottom row is the newest frame
 		if idx < 0 {
-			b.WriteString(wfBlank.Render(strings.Repeat(" ", width)))
+			b.WriteString(spectrumLineCursor(nil, width, cursorCol))
 		} else {
-			b.WriteString(spectrumLine(w.rows[idx], width))
+			b.WriteString(spectrumLineCursor(w.rows[idx], width, cursorCol))
 		}
 		if i < rows-1 {
 			b.WriteByte('\n')
@@ -111,14 +118,59 @@ func (w *waterfall) render(width, rows int) string {
 	return b.String()
 }
 
+// wfCursor styles the demod-channel marker column: bright white on the panel
+// background so it reads over any waterfall color.
+var wfCursor = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(ui.ColorPanel).Bold(true)
+
+// cursorColumn maps an absolute RF frequency to a display column in a
+// `width`-wide waterfall line, via the current frame's freqStart/freqStep axis.
+// Returns -1 when there is no axis yet or the frequency falls outside the shown
+// span, so callers can skip drawing a marker cleanly.
+func (w *waterfall) cursorColumn(width int, freqHz float64) int {
+	if width <= 0 || w.freqStep == 0 || len(w.rows) == 0 {
+		return -1
+	}
+	nBins := len(w.rows[len(w.rows)-1])
+	if nBins == 0 {
+		return -1
+	}
+	bin := (freqHz - float64(w.freqStart)) / float64(w.freqStep)
+	if bin < 0 || bin >= float64(nBins) {
+		return -1
+	}
+	// spectrumLine samples bin[x*nBins/width] at column x; invert that so the
+	// marker lands on the column that renders the target bin.
+	col := int(bin * float64(width) / float64(nBins))
+	if col < 0 {
+		col = 0
+	}
+	if col >= width {
+		col = width - 1
+	}
+	return col
+}
+
 // spectrumLine renders one frame's bins into `width` density glyphs.
 func spectrumLine(bins []byte, width int) string {
+	return spectrumLineCursor(bins, width, -1)
+}
+
+// spectrumLineCursor is spectrumLine with a marker glyph forced at cursorCol
+// (a display column). cursorCol < 0 draws no marker, so spectrumLine passes -1.
+func spectrumLineCursor(bins []byte, width, cursorCol int) string {
 	if len(bins) == 0 {
-		return wfBlank.Render(strings.Repeat(" ", width))
+		if cursorCol < 0 || cursorCol >= width {
+			return wfBlank.Render(strings.Repeat(" ", width))
+		}
+		// No signal yet, but still show where the demod channel sits.
+		return wfBlank.Render(strings.Repeat(" ", cursorCol)) +
+			wfCursor.Render("│") +
+			wfBlank.Render(strings.Repeat(" ", width-cursorCol-1))
 	}
 	// Color each glyph by intensity, coalescing consecutive same-color cells into
 	// one styled span so a line emits few escape codes. Silent cells render on the
-	// black background so the line is solid black end to end.
+	// black background so the line is solid black end to end. The cursor column
+	// breaks any run and emits its own marker span.
 	var out strings.Builder
 	var run strings.Builder
 	cur := -1 // current colormap index, -1 == uncolored
@@ -134,6 +186,12 @@ func spectrumLine(bins []byte, width int) string {
 		run.Reset()
 	}
 	for x := 0; x < width; x++ {
+		if x == cursorCol {
+			flush()
+			out.WriteString(wfCursor.Render("│"))
+			cur = -1
+			continue
+		}
 		v := bins[x*len(bins)/width]
 		g := ramp[int(v)*(len(ramp)-1)/255]
 		col := -1
@@ -192,6 +250,24 @@ func enableSpectrumCmd(c client.ModemClient, ch uint32, binCount uint32) tea.Cmd
 		defer cancel()
 		resp, err := c.ConfigureSpectrum(ctx, &pb.ConfigureSpectrumRequest{
 			Channel: ch, Enable: true, BinCount: binCount, FreqHiHz: 3000,
+		})
+		if err != nil {
+			return rpcErrMsg{err}
+		}
+		return spectrumCfgMsg{resp}
+	}
+}
+
+// enableRFSpectrumCmd starts the wideband RF waterfall for an SDR-bound channel.
+// Unlike enableSpectrumCmd it leaves the passband window unset (freq_hi_hz == 0):
+// the daemon drives the axis from the source type and emits RF-referenced frames
+// spanning the full captured band, so a passband clamp would zoom to a few kHz.
+func enableRFSpectrumCmd(c client.ModemClient, ch uint32, binCount uint32) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := rpcCtx()
+		defer cancel()
+		resp, err := c.ConfigureSpectrum(ctx, &pb.ConfigureSpectrumRequest{
+			Channel: ch, Enable: true, BinCount: binCount,
 		})
 		if err != nil {
 			return rpcErrMsg{err}
