@@ -497,6 +497,34 @@ mod tests {
         }
     }
 
+    // GRA-318 fail-closed guard: the RSID DSP table is the source of truth for
+    // every mode that *can* generate a TX burst. Walk it — any table-mapped mode
+    // whose `rsid_tx_key` is `None` must be a deliberate suppression, and today
+    // that set is exactly CW and JT65. A future mode that gains an `rsid_key`
+    // (and so a table entry) therefore can't silently start emitting or silently
+    // be suppressed without this test forcing the choice.
+    #[test]
+    fn only_cw_and_jt65_suppress_tx_rsid_among_table_modes() {
+        use omnimodem_dsp::frontend::rsid::{TABLE1, TABLE2};
+        let suppressed = ["cw", "jt65"];
+        for e in TABLE1.iter().chain(TABLE2.iter()) {
+            let Some(mode) = e.mode else { continue };
+            let cfg = ModeConfig::parse(mode)
+                .unwrap_or_else(|| panic!("table mode {mode:?} does not parse"));
+            let key = cfg
+                .rsid_key()
+                .unwrap_or_else(|| panic!("{} ({mode}) has no rsid_key", e.tag));
+            if cfg.rsid_tx_key().is_none() {
+                assert!(
+                    suppressed.contains(&key.as_str()),
+                    "{} ({mode}) suppresses TX RSID but is not in the intended CW/JT65 set — \
+                     if intentional, add it to `suppressed` with a reason and update rsid_tx_key",
+                    e.tag,
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_rsid_mode_string_parses_and_round_trips() {
         use omnimodem_dsp::frontend::rsid::{TABLE1, TABLE2};
