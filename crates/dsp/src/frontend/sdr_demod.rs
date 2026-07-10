@@ -38,12 +38,20 @@ const WFM_DEVIATION_HZ: f32 = 75_000.0;
 /// the channel rate that is ≤ the capture rate.
 const WFM_TARGET_IF_HZ: u32 = 180_000;
 /// SSB audio bandwidth (Hz); the sideband-select band-pass passes one 0..BW side.
+/// Centring the passband at BW/2 rolls off the lowest audio (~100 Hz down a few
+/// dB) and softens opposite-sideband rejection near the carrier — standard for a
+/// voice-grade SSB filter. 129 taps give a steep enough skirt at the audio rate.
 const SSB_BANDWIDTH_HZ: f32 = 2_800.0;
+/// Tap count of the SSB sideband-select complex band-pass.
+const SSB_TAPS: usize = 129;
 
 /// Pick the WFM IF rate: the largest multiple of `channel_rate` that is ≤
 /// `capture_rate` and at least `WFM_TARGET_IF_HZ`, falling back to the capture
-/// rate. Keeping it a multiple of the audio rate makes the audio decimation a
-/// clean integer ratio.
+/// rate. A multiple of the audio rate keeps the audio decimation a clean integer
+/// ratio; this holds for every supported capture rate (all ≥ 240 kHz ≫ the 48 kHz
+/// audio rate). In the degenerate `capture_rate < channel_rate` case the result
+/// is just the capture rate, and the audio resampler falls back to its general
+/// rational ratio — correct, if no longer a clean integer.
 fn wfm_if_rate(capture_rate: u32, channel_rate: u32) -> u32 {
     let want_mult = WFM_TARGET_IF_HZ.div_ceil(channel_rate).max(1);
     let cap_mult = (capture_rate / channel_rate).max(1);
@@ -65,8 +73,7 @@ struct SidebandFilter {
 impl SidebandFilter {
     fn new(rate: f32, sign: f32) -> Self {
         // Low-pass prototype at BW/2, shifted up by BW/2 → passband [0, BW].
-        let num_taps = 129;
-        let proto = design_lowpass(num_taps, SSB_BANDWIDTH_HZ / 2.0, rate);
+        let proto = design_lowpass(SSB_TAPS, SSB_BANDWIDTH_HZ / 2.0, rate);
         let center = sign * SSB_BANDWIDTH_HZ / 2.0;
         let taps: Vec<Cplx> = proto
             .iter()
