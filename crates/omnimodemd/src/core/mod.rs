@@ -497,6 +497,10 @@ fn configure_audio(
     if matches!(device_id, DeviceId::RtlTcp { .. }) {
         let control = live.sdr_controls.entry(id).or_default().clone();
         rx_backend.attach_sdr_context(id, telemetry.clone(), control);
+    } else {
+        // Rebinding to a non-SDR device: drop any stale control cell so a later
+        // rebind to an SDR starts fresh rather than resurrecting old tune/gain.
+        live.sdr_controls.remove(&id);
     }
     let capture = rx_backend.open_capture(sample_rate)?;
     let rx_rate = capture.sample_rate;

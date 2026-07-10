@@ -349,6 +349,19 @@ fn apply_hardware(
     Ok(())
 }
 
+/// Merge a carried odd byte (a split IQ pair left over from the previous read)
+/// with a freshly read chunk into a whole-pair byte buffer, returning the paired
+/// bytes and any new leftover byte to carry into the next read.
+fn merge_iq_bytes(carry: Option<u8>, chunk: &[u8]) -> (Vec<u8>, Option<u8>) {
+    let mut bytes = Vec::with_capacity(chunk.len() + 1);
+    if let Some(c) = carry {
+        bytes.push(c);
+    }
+    bytes.extend_from_slice(chunk);
+    let next = if bytes.len() % 2 == 1 { bytes.pop() } else { None };
+    (bytes, next)
+}
+
 /// Emit one RF-referenced waterfall line per complete STFT frame of the raw IQ.
 /// `freq_start_hz` is absolute RF: bin[0] = hardware center − rate/2.
 fn emit_waterfall(
@@ -359,16 +372,18 @@ fn emit_waterfall(
     channel: ChannelId,
     telemetry: &broadcast::Sender<TelemetryEvent>,
 ) {
+    // Geometry is invariant for a given center; build it once per block, not per
+    // FFT frame.
+    let plan = SpectrumPlan::new_centered(
+        WATERFALL_NFFT,
+        capture_rate as f32,
+        center_hz as f32,
+        WATERFALL_BINS,
+        -(capture_rate as f32) / 2.0,
+        (capture_rate as f32) / 2.0,
+    );
     for frame in stft.feed(iq) {
         let dbfs = full_spectrum_dbfs(&frame, stft.window_sum());
-        let plan = SpectrumPlan::new_centered(
-            WATERFALL_NFFT,
-            capture_rate as f32,
-            center_hz as f32,
-            WATERFALL_BINS,
-            -(capture_rate as f32) / 2.0,
-            (capture_rate as f32) / 2.0,
-        );
         let bins = plan.render(&dbfs);
         let timestamp_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -408,6 +423,13 @@ impl AudioBackend for RtlTcpBackend {
         let mut cmd_sock = sock
             .try_clone()
             .map_err(|e| AudioError::Io(e.to_string()))?;
+        // A third handle for the stop hook: dropping the CaptureHandle must
+        // unblock a thread parked in `sock.read()`. Setting the flag alone is not
+        // enough — a still-open but silent server would leave the read parked
+        // indefinitely — so the hook also shuts the socket down.
+        let shutdown_sock = sock
+            .try_clone()
+            .map_err(|e| AudioError::Io(e.to_string()))?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         let stop = Arc::new(AtomicBool::new(false));
@@ -444,15 +466,10 @@ impl AudioBackend for RtlTcpBackend {
                         Err(_) => break,
                     };
 
-                    // Reassemble a whole-pair byte stream, prepending any carry.
-                    let mut bytes: Vec<u8> = Vec::with_capacity(n + 1);
-                    if let Some(c) = carry.take() {
-                        bytes.push(c);
-                    }
-                    bytes.extend_from_slice(&buf[..n]);
-                    if bytes.len() % 2 == 1 {
-                        carry = bytes.pop();
-                    }
+                    // Reassemble a whole-pair byte stream, carrying a split IQ
+                    // pair across this read boundary.
+                    let (bytes, next_carry) = merge_iq_bytes(carry.take(), &buf[..n]);
+                    carry = next_carry;
 
                     let iq = u8_iq_to_cplx(&bytes);
                     if iq.is_empty() {
@@ -492,6 +509,9 @@ impl AudioBackend for RtlTcpBackend {
         let stop_on_drop = stop;
         Ok(CaptureHandle::new(rx, channel_rate, move || {
             stop_on_drop.store(true, Ordering::Relaxed);
+            // Unblock a read parked on a silent-but-open server; a genuine EOF
+            // (Ok(0)) also breaks the loop, so this is belt-and-suspenders.
+            let _ = shutdown_sock.shutdown(std::net::Shutdown::Both);
         }))
     }
 
@@ -541,6 +561,30 @@ mod tests {
     #[test]
     fn tuner_name_unknown_fallback() {
         assert_eq!(tuner_name(999), "unknown");
+    }
+
+    #[test]
+    fn merge_iq_bytes_carries_split_pair_across_reads() {
+        // Even chunk, no carry: nothing left over.
+        let (b, c) = merge_iq_bytes(None, &[10, 20, 30, 40]);
+        assert_eq!(b, vec![10, 20, 30, 40]);
+        assert_eq!(c, None);
+
+        // Odd chunk: the trailing byte is held back for the next read.
+        let (b, c) = merge_iq_bytes(None, &[10, 20, 30]);
+        assert_eq!(b, vec![10, 20]);
+        assert_eq!(c, Some(30));
+
+        // The carried byte is prepended and re-paired on the next read; a new
+        // odd length carries again.
+        let (b, c) = merge_iq_bytes(Some(30), &[40, 50]);
+        assert_eq!(b, vec![30, 40]);
+        assert_eq!(c, Some(50));
+
+        // Carry + odd chunk that makes an even total: fully consumed.
+        let (b, c) = merge_iq_bytes(Some(1), &[2, 3, 4]);
+        assert_eq!(b, vec![1, 2, 3, 4]);
+        assert_eq!(c, None);
     }
 
     #[test]
