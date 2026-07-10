@@ -18,12 +18,15 @@ use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
 use omnimodem_dsp::frontend::sdr_demod::{DemodKind, SdrDemod};
 use omnimodem_dsp::frontend::spectrum::{full_spectrum_dbfs, SpectrumPlan};
 use omnimodem_dsp::frontend::squelch::PowerSquelch;
+use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 /// Default dongle capture (sample) rate. 240 kHz captures a comfortable slice of
@@ -39,6 +42,29 @@ const SQUELCH_HYSTERESIS_DB: f32 = 6.0;
 const WATERFALL_NFFT: usize = 1024;
 /// Requested waterfall bin count (rendered uint8 line width).
 const WATERFALL_BINS: usize = 256;
+
+/// Exponential reconnect backoff after a dropped `rtl_tcp` link. Mirrors
+/// `cpal_backend::REBUILD_BACKOFF` (that module is `#[cfg(not(test))]`, so the
+/// schedule is re-declared here rather than shared).
+const RECONNECT_BACKOFF: &[Duration] = &[
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+];
+/// Clear the backoff after a connection that streamed stably this long.
+const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
+/// Bound the connect + header read so a half-open / stalled server cannot park the
+/// capture thread indefinitely — the stop hook can only shut down the *live*
+/// streaming socket, not one still mid-handshake, so these steps must self-limit
+/// for `stop` to be honored promptly after a reconnect.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Log at most one overrun warning per this many dropped chunks, so a persistent
+/// lag does not flood the log while still surfacing the running total.
+const OVERRUN_LOG_EVERY: u64 = 64;
 
 // ---------------------------------------------------------------------------
 // Header
@@ -345,6 +371,11 @@ struct SdrControlInner {
     /// Tuner capabilities, published by the capture thread once the header is
     /// parsed. `None` until a capture has connected.
     caps: Mutex<Option<TunerCaps>>,
+    /// Cumulative count of audio chunks the capture thread dropped because the
+    /// consumer (modem) fell behind. Observability only — not part of
+    /// `generation` (a drop is not a control change). See the drop-oldest
+    /// overrun policy in the capture thread.
+    dropped_chunks: AtomicU64,
 }
 
 /// A clonable handle to one channel's SDR runtime control — the RX analogue of
@@ -373,6 +404,7 @@ impl Default for SdrControl {
                 demod_mode: AtomicU8::new(DemodMode::Nbfm as u8),
                 capture_rate: AtomicU32::new(DEFAULT_CAPTURE_RATE),
                 caps: Mutex::new(None),
+                dropped_chunks: AtomicU64::new(0),
             }),
         }
     }
@@ -476,6 +508,15 @@ impl SdrControl {
         *self.inner.caps.lock().unwrap() = Some(caps);
     }
 
+    /// Cumulative audio chunks dropped under consumer overrun (drop-oldest).
+    pub fn dropped_chunks(&self) -> u64 {
+        self.inner.dropped_chunks.load(Ordering::Relaxed)
+    }
+    /// Record one dropped chunk; returns the new cumulative total.
+    pub fn incr_dropped(&self) -> u64 {
+        self.inner.dropped_chunks.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     /// Build a `PowerSquelch` from the current threshold (disabled at/under the
     /// sentinel).
     pub fn effective_squelch(&self) -> PowerSquelch {
@@ -552,6 +593,120 @@ fn send_initial_commands(
     }
     sock.write_all(&RtlCmd::CenterFreq(control.center_hz() as u32).encode()).map_err(io)?;
     Ok(())
+}
+
+/// Connect to `addr`, read and validate the 12-byte greeting, publish the tuner
+/// capabilities it reveals, and send the dongle its initial parameters from the
+/// current control snapshot. Returns the read socket plus a cloned command
+/// socket. Reused for both the initial connect and every reconnect, so a
+/// re-established link always comes up fully re-tuned from `SdrControl` (the
+/// single source of truth that survives a dropped connection).
+fn connect_and_handshake(
+    addr: &str,
+    control: &SdrControl,
+) -> Result<(TcpStream, TcpStream), AudioError> {
+    let mut sock = connect_with_timeout(addr, CONNECT_TIMEOUT)?;
+    // Bound the header read: a server that accepts but never sends the greeting
+    // must not park the thread (it isn't in the shutdown slot until handshake
+    // completes, so the stop hook cannot reach it).
+    sock.set_read_timeout(Some(HEADER_READ_TIMEOUT))
+        .map_err(|e| AudioError::Io(e.to_string()))?;
+    let mut header = [0u8; 12];
+    sock.read_exact(&mut header).map_err(|e| AudioError::Io(e.to_string()))?;
+    // Restore blocking reads for the streaming loop, which is instead unblocked by
+    // the stop hook shutting the (now published) socket down.
+    sock.set_read_timeout(None).map_err(|e| AudioError::Io(e.to_string()))?;
+    let hdr = parse_header(&header)?;
+    control.set_caps(caps_from_header(&hdr));
+    send_initial_commands(&mut sock, control.capture_rate(), control)?;
+    let cmd_sock = sock.try_clone().map_err(|e| AudioError::Io(e.to_string()))?;
+    Ok((sock, cmd_sock))
+}
+
+/// Connect to `addr` with a bounded timeout, trying each resolved socket address.
+/// `TcpStream::connect` blocks with no ceiling on a half-open host, which would
+/// leave a reconnecting capture thread unable to observe `stop`; `connect_timeout`
+/// needs a resolved `SocketAddr`, so resolve first and try them in turn.
+fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, AudioError> {
+    let resolved = addr
+        .to_socket_addrs()
+        .map_err(|e| AudioError::Io(format!("rtl_tcp resolve {addr}: {e}")))?;
+    let mut last_err: Option<std::io::Error> = None;
+    for sa in resolved {
+        match TcpStream::connect_timeout(&sa, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(AudioError::Io(format!(
+        "rtl_tcp connect {addr}: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no addresses resolved".to_string())
+    )))
+}
+
+/// Sleep one reconnect-backoff step, waking every 100 ms to honor `stop`, then
+/// advance the index. Mirrors `cpal_backend::backoff_wait`.
+fn backoff_wait(idx: &mut usize, stop: &AtomicBool) {
+    let dur = RECONNECT_BACKOFF[(*idx).min(RECONNECT_BACKOFF.len() - 1)];
+    let mut waited = Duration::ZERO;
+    while waited < dur && !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(100));
+        waited += Duration::from_millis(100);
+    }
+    *idx = (*idx + 1).min(RECONNECT_BACKOFF.len() - 1);
+}
+
+/// Outcome of a non-blocking audio delivery attempt.
+enum Delivery {
+    /// The consumer is still connected (chunk queued, or dropped under overrun).
+    Live,
+    /// The consumer dropped its receiver — the capture is terminal.
+    ConsumerGone,
+}
+
+/// Deliver `chunk` to the bounded consumer channel without ever blocking the
+/// socket read. `backlog` stages whatever the channel won't accept right now; when
+/// the *backlog* grows past `CHUNK_QUEUE_DEPTH` its oldest chunk is dropped (a live
+/// modem wants fresh audio, not stale backlog) and counted on `control`. Note the
+/// dropped chunk is the oldest *un-accepted* one — the strictly-oldest chunks are
+/// already in the consumer channel — so worst-case buffering is the channel depth
+/// plus the backlog depth (~2·`CHUNK_QUEUE_DEPTH`), which bounds latency without a
+/// second thread. Returns `ConsumerGone` once the receiver is gone.
+fn deliver_audio(
+    tx: &SyncSender<AudioChunk>,
+    backlog: &mut VecDeque<AudioChunk>,
+    chunk: AudioChunk,
+    control: &SdrControl,
+) -> Delivery {
+    backlog.push_back(chunk);
+    // Push as much of the backlog as the consumer will take right now.
+    while let Some(front) = backlog.pop_front() {
+        match tx.try_send(front) {
+            Ok(()) => {}
+            Err(TrySendError::Full(front)) => {
+                backlog.push_front(front);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => return Delivery::ConsumerGone,
+        }
+    }
+    // Bound the staged backlog by dropping the oldest chunks the consumer is too
+    // slow to accept, so latency stays bounded and capture keeps reading.
+    while backlog.len() > CHUNK_QUEUE_DEPTH {
+        backlog.pop_front();
+        let total = control.incr_dropped();
+        // Surface the onset (first-ever drop) immediately, then rate-limit so a
+        // sustained lag reports its running total without flooding the log.
+        if total == 1 || total.is_multiple_of(OVERRUN_LOG_EVERY) {
+            tracing::warn!(
+                dropped = total,
+                "rtl_tcp capture overrun: consumer lagging, dropped oldest queued audio"
+            );
+        }
+    }
+    Delivery::Live
 }
 
 /// Re-apply hardware parameters after a control change: ppm, direct-sampling,
@@ -634,33 +789,25 @@ impl AudioBackend for RtlTcpBackend {
         let channel_rate = requested_rate.min(MAX_SAMPLE_RATE);
 
         let addr = format!("{}:{}", self.host, self.port);
-        let mut sock = TcpStream::connect(&addr)
-            .map_err(|e| AudioError::Io(format!("rtl_tcp connect {addr}: {e}")))?;
-
-        // Read + validate the 12-byte greeting before anything else. Publish the
-        // tuner capabilities it reveals so `GetSdrCaps` can answer once bound.
-        let mut header = [0u8; 12];
-        sock.read_exact(&mut header).map_err(|e| AudioError::Io(e.to_string()))?;
-        let hdr = parse_header(&header)?;
-        self.control.set_caps(caps_from_header(&hdr));
 
         // Seed the shared capture rate from this backend's configured default
         // (unity in production); the control cell is authoritative thereafter, so
         // `ConfigureSdr` can change the rate on a running capture.
         self.control.set_capture_rate(self.capture_rate);
-        send_initial_commands(&mut sock, self.capture_rate, &self.control)?;
 
-        // A second handle for the capture thread to issue retune/gain commands.
-        let mut cmd_sock = sock
-            .try_clone()
-            .map_err(|e| AudioError::Io(e.to_string()))?;
-        // A third handle for the stop hook: dropping the CaptureHandle must
-        // unblock a thread parked in `sock.read()`. Setting the flag alone is not
-        // enough — a still-open but silent server would leave the read parked
-        // indefinitely — so the hook also shuts the socket down.
-        let shutdown_sock = sock
-            .try_clone()
-            .map_err(|e| AudioError::Io(e.to_string()))?;
+        // Initial connect is synchronous so a bad address / non-rtl_tcp server
+        // fails fast and the tuner caps publish before we return. This connection
+        // becomes the supervisor loop's first iteration; every later drop
+        // reconnects with backoff and re-applies the same params.
+        let (sock, cmd_sock) = connect_and_handshake(&addr, &self.control)?;
+
+        // The stop hook must unblock a thread parked in `sock.read()`, and it must
+        // do so for whichever connection is currently live (reconnect swaps the
+        // socket). Share a slot the capture thread refreshes on every (re)connect.
+        let shutdown_slot: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(
+            sock.try_clone().ok(),
+        ));
+        let shutdown_thread = shutdown_slot.clone();
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         let stop = Arc::new(AtomicBool::new(false));
@@ -674,94 +821,134 @@ impl AudioBackend for RtlTcpBackend {
         std::thread::Builder::new()
             .name("omni-rtl-capture".into())
             .spawn(move || {
-                // The dongle rate is authoritative from the control cell so
-                // `ConfigureSdr` can change it live; it starts at the seeded value.
-                let mut cur_rate = control.capture_rate();
-                let mut cur_mode = control.demod_mode();
-                let mut rx_chain = SdrDemod::new(
-                    cur_mode.to_dsp(),
-                    cur_rate,
-                    channel_rate,
-                    control.offset_hz(),
-                    deviation_hz,
-                    control.effective_squelch(),
-                );
+                // Waterfall state, read buffer, overrun backlog, and reconnect
+                // backoff all persist across reconnects (they track the consumer /
+                // spectrum, not a single connection).
                 let mut stft = ComplexStft::new(WATERFALL_NFFT, WATERFALL_NFFT);
-                let mut seen_gen = control.generation();
-                // Read buffer sized for ~one waterfall frame of IQ (2 bytes/sample).
                 let mut buf = vec![0u8; WATERFALL_NFFT * 2];
-                // Carry a split IQ pair across TCP read boundaries.
-                let mut carry: Option<u8> = None;
+                let mut backlog: VecDeque<AudioChunk> = VecDeque::new();
+                let mut backoff = 0usize;
+                // The established initial connection seeds the first iteration; the
+                // supervisor reconnects thereafter.
+                let mut seed = Some((sock, cmd_sock));
 
-                while !stop_thread.load(Ordering::Relaxed) {
-                    let n = match sock.read(&mut buf) {
-                        Ok(0) => break, // server closed
-                        Ok(n) => n,
-                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
+                'supervisor: while !stop_thread.load(Ordering::Relaxed) {
+                    let (mut sock, mut cmd_sock) = match seed.take() {
+                        Some(pair) => pair,
+                        None => match connect_and_handshake(&addr, &control) {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                tracing::warn!(%addr, error = %e, "rtl_tcp reconnect failed");
+                                backoff_wait(&mut backoff, &stop_thread);
+                                continue;
+                            }
+                        },
                     };
+                    // Publish this connection's socket so the stop hook can shut it
+                    // down, and reset the read boundary carry for the fresh stream.
+                    *shutdown_thread.lock().unwrap() = sock.try_clone().ok();
+                    let connected_at = Instant::now();
 
-                    // Reassemble a whole-pair byte stream, carrying a split IQ
-                    // pair across this read boundary.
-                    let (bytes, next_carry) = merge_iq_bytes(carry.take(), &buf[..n]);
-                    carry = next_carry;
+                    // Rebuild the RX chain from current control: params may have
+                    // changed while the link was down, and the dongle was just
+                    // re-commanded to match by `connect_and_handshake`.
+                    let mut cur_rate = control.capture_rate();
+                    let mut cur_mode = control.demod_mode();
+                    let mut rx_chain = SdrDemod::new(
+                        cur_mode.to_dsp(),
+                        cur_rate,
+                        channel_rate,
+                        control.offset_hz(),
+                        deviation_hz,
+                        control.effective_squelch(),
+                    );
+                    let mut seen_gen = control.generation();
+                    let mut carry: Option<u8> = None;
 
-                    let iq = u8_iq_to_cplx(&bytes);
-                    if iq.is_empty() {
-                        continue;
-                    }
+                    while !stop_thread.load(Ordering::Relaxed) {
+                        let n = match sock.read(&mut buf) {
+                            Ok(0) => break, // server closed — reconnect
+                            Ok(n) => n,
+                            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(_) => break, // read error — reconnect
+                        };
 
-                    // Reconcile runtime control changes before demodulating.
-                    let gen = control.generation();
-                    if gen != seen_gen {
-                        seen_gen = gen;
-                        // A capture-rate or demod-mode change rebuilds the whole RX
-                        // chain: the decimation ratio and NCO base rate depend on
-                        // the rate, and the back-end (and WFM's wide IF) depend on
-                        // the mode. A rate change also re-commands the dongle.
-                        let want_rate = control.capture_rate();
-                        let want_mode = control.demod_mode();
-                        let rate_changed = want_rate != cur_rate && want_rate != 0;
-                        if rate_changed || want_mode != cur_mode {
-                            if rate_changed {
-                                cur_rate = want_rate;
-                            }
-                            cur_mode = want_mode;
-                            rx_chain = SdrDemod::new(
-                                cur_mode.to_dsp(),
-                                cur_rate,
-                                channel_rate,
-                                control.offset_hz(),
-                                deviation_hz,
-                                control.effective_squelch(),
-                            );
-                            if rate_changed {
-                                let _ = cmd_sock.write_all(&RtlCmd::SampleRate(cur_rate).encode());
-                            }
-                        } else {
-                            rx_chain.retune(control.offset_hz());
-                            rx_chain.set_squelch(control.effective_squelch());
+                        // Reassemble a whole-pair byte stream, carrying a split IQ
+                        // pair across this read boundary.
+                        let (bytes, next_carry) = merge_iq_bytes(carry.take(), &buf[..n]);
+                        carry = next_carry;
+
+                        let iq = u8_iq_to_cplx(&bytes);
+                        if iq.is_empty() {
+                            continue;
                         }
-                        let _ = apply_hardware(&mut cmd_sock, &control);
+
+                        // Reconcile runtime control changes before demodulating.
+                        let gen = control.generation();
+                        if gen != seen_gen {
+                            seen_gen = gen;
+                            // A capture-rate or demod-mode change rebuilds the whole
+                            // RX chain: the decimation ratio and NCO base rate depend
+                            // on the rate, and the back-end (and WFM's wide IF) depend
+                            // on the mode. A rate change also re-commands the dongle.
+                            let want_rate = control.capture_rate();
+                            let want_mode = control.demod_mode();
+                            let rate_changed = want_rate != cur_rate && want_rate != 0;
+                            if rate_changed || want_mode != cur_mode {
+                                if rate_changed {
+                                    cur_rate = want_rate;
+                                }
+                                cur_mode = want_mode;
+                                rx_chain = SdrDemod::new(
+                                    cur_mode.to_dsp(),
+                                    cur_rate,
+                                    channel_rate,
+                                    control.offset_hz(),
+                                    deviation_hz,
+                                    control.effective_squelch(),
+                                );
+                                if rate_changed {
+                                    let _ = cmd_sock.write_all(&RtlCmd::SampleRate(cur_rate).encode());
+                                }
+                            } else {
+                                rx_chain.retune(control.offset_hz());
+                                rx_chain.set_squelch(control.effective_squelch());
+                            }
+                            let _ = apply_hardware(&mut cmd_sock, &control);
+                        }
+
+                        if let Some(tele) = telemetry.as_ref() {
+                            emit_waterfall(
+                                &mut stft, &iq, cur_rate, control.center_hz(), channel, tele,
+                            );
+                        }
+
+                        let audio = rx_chain.push_iq(&iq);
+                        if audio.is_empty() {
+                            continue;
+                        }
+                        let chunk: AudioChunk = audio
+                            .iter()
+                            .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                            .collect();
+                        // Never block the socket read: stage + drop-oldest on lag.
+                        if let Delivery::ConsumerGone =
+                            deliver_audio(&tx, &mut backlog, chunk, &control)
+                        {
+                            break 'supervisor; // consumer dropped — terminal
+                        }
                     }
 
-                    if let Some(tele) = telemetry.as_ref() {
-                        emit_waterfall(
-                            &mut stft, &iq, cur_rate, control.center_hz(), channel, tele,
-                        );
+                    // The connection ended (not a consumer drop). Reset the backoff
+                    // if it had streamed stably, then reconnect unless we're stopping.
+                    if connected_at.elapsed() >= BACKOFF_RESET_AFTER {
+                        backoff = 0;
                     }
-
-                    let audio = rx_chain.push_iq(&iq);
-                    if audio.is_empty() {
-                        continue;
+                    if stop_thread.load(Ordering::Relaxed) {
+                        break;
                     }
-                    let chunk: AudioChunk = audio
-                        .iter()
-                        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-                        .collect();
-                    if tx.send(chunk).is_err() {
-                        break; // consumer dropped
-                    }
+                    tracing::warn!(%addr, "rtl_tcp link dropped; reconnecting");
+                    backoff_wait(&mut backoff, &stop_thread);
                 }
             })
             .map_err(|e| AudioError::Io(e.to_string()))?;
@@ -769,9 +956,12 @@ impl AudioBackend for RtlTcpBackend {
         let stop_on_drop = stop;
         Ok(CaptureHandle::new(rx, channel_rate, move || {
             stop_on_drop.store(true, Ordering::Relaxed);
-            // Unblock a read parked on a silent-but-open server; a genuine EOF
-            // (Ok(0)) also breaks the loop, so this is belt-and-suspenders.
-            let _ = shutdown_sock.shutdown(std::net::Shutdown::Both);
+            // Unblock a read parked on a silent-but-open server by shutting down
+            // whichever connection is currently live; a genuine EOF (Ok(0)) also
+            // breaks the loop, so this is belt-and-suspenders.
+            if let Some(s) = shutdown_slot.lock().unwrap().as_ref() {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
         }))
     }
 
@@ -938,6 +1128,19 @@ mod tests {
     }
 
     #[test]
+    fn dropped_chunks_counter_starts_zero_and_increments_through_clone() {
+        let c = SdrControl::default();
+        let worker = c.clone();
+        assert_eq!(c.dropped_chunks(), 0);
+        // A drop is observability, not a control change: generation must not move.
+        let g0 = worker.generation();
+        assert_eq!(worker.incr_dropped(), 1);
+        assert_eq!(worker.incr_dropped(), 2);
+        assert_eq!(c.dropped_chunks(), 2);
+        assert_eq!(worker.generation(), g0);
+    }
+
+    #[test]
     fn caps_default_none_then_visible_through_clone() {
         let c = SdrControl::default();
         let worker = c.clone();
@@ -1063,15 +1266,26 @@ mod tests {
         let cap = backend.open_capture(48_000).unwrap();
         assert_eq!(cap.sample_rate, 48_000);
 
+        // Drain the burst. The server serves one connection then closes, and the
+        // capture now *reconnects* (Phase D) rather than terminating, so we collect
+        // until the stream goes quiet instead of waiting for a disconnect.
+        let total = drain_burst(&cap.rx);
+        assert!(total > 0, "expected demodulated audio samples, got none");
+    }
+
+    /// Accumulate delivered audio-sample counts until the stream is quiet (a short
+    /// recv timeout) or the sender disconnects. Used by the single-burst fake-server
+    /// tests, where the capture keeps running (and retrying) after the burst.
+    fn drain_burst(rx: &std::sync::mpsc::Receiver<AudioChunk>) -> usize {
         let mut total = 0usize;
         loop {
-            match cap.rx.recv_timeout(Duration::from_secs(2)) {
+            match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(chunk) => total += chunk.len(),
-                Err(RecvTimeoutError::Timeout) => panic!("capture stalled"),
+                Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        assert!(total > 0, "expected demodulated audio samples, got none");
+        total
     }
 
     /// AM-modulate a `tone_hz` sine at `offset_hz` into u8 IQ at `rate`.
@@ -1100,14 +1314,7 @@ mod tests {
         backend.control.set_demod_mode(DemodMode::Am);
         let cap = backend.open_capture(48_000).unwrap();
 
-        let mut total = 0usize;
-        loop {
-            match cap.rx.recv_timeout(Duration::from_secs(2)) {
-                Ok(chunk) => total += chunk.len(),
-                Err(RecvTimeoutError::Timeout) => panic!("AM capture stalled"),
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
+        let total = drain_burst(&cap.rx);
         assert!(total > 0, "expected demodulated AM audio, got none");
     }
 
@@ -1261,6 +1468,193 @@ mod tests {
         assert!(ds_ok, "runtime DirectSampling(Q) command not observed");
     }
 
+    /// The 12-byte R820T greeting the fake servers all send.
+    fn fake_header() -> [u8; 12] {
+        let mut h = [0u8; 12];
+        h[0..4].copy_from_slice(b"RTL0");
+        h[4..8].copy_from_slice(&5u32.to_be_bytes());
+        h[8..12].copy_from_slice(&29u32.to_be_bytes());
+        h
+    }
+
+    /// True if the recorded 5-byte command stream contains `[op | u32 BE arg]`.
+    fn cmd_present(cmds: &Arc<Mutex<Vec<u8>>>, op: u8, arg: u32) -> bool {
+        cmds.lock().unwrap().chunks_exact(5).any(|f| {
+            f[0] == op && u32::from_be_bytes([f[1], f[2], f[3], f[4]]) == arg
+        })
+    }
+
+    /// A fake server that serves ONE connection (header + `iq0`) then drops it to
+    /// simulate a link loss, then accepts a SECOND connection, records the
+    /// re-applied commands into the returned buffer, and streams `iq1` until stop.
+    fn spawn_reconnecting_server(
+        iq0: Vec<u8>,
+        iq1: Vec<u8>,
+    ) -> (u16, Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cmds2 = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let cmds2_srv = cmds2.clone();
+        let stop_srv = stop.clone();
+        std::thread::spawn(move || {
+            // Connection 0: header + IQ, then hard-drop to force a reconnect.
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.write_all(&fake_header());
+                let mut drain = sock.try_clone().unwrap();
+                std::thread::spawn(move || {
+                    let mut sink = [0u8; 64];
+                    while let Ok(n) = drain.read(&mut sink) {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                });
+                let _ = sock.write_all(&iq0);
+                // Let the client finish its handshake and demodulate the burst
+                // before we hard-drop the link (a fast Both-shutdown would race the
+                // client's initial command writes into a broken pipe).
+                std::thread::sleep(Duration::from_millis(200));
+                let _ = sock.shutdown(std::net::Shutdown::Both);
+            }
+            // Connection 1: record the re-applied commands, stream IQ until stop.
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.write_all(&fake_header());
+                let mut drain = sock.try_clone().unwrap();
+                let rec = cmds2_srv.clone();
+                std::thread::spawn(move || {
+                    let mut sink = [0u8; 64];
+                    while let Ok(n) = drain.read(&mut sink) {
+                        if n == 0 {
+                            break;
+                        }
+                        rec.lock().unwrap().extend_from_slice(&sink[..n]);
+                    }
+                });
+                while !stop_srv.load(Ordering::Relaxed) {
+                    if sock.write_all(&iq1).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        });
+        (port, cmds2, stop)
+    }
+
+    #[test]
+    fn capture_reconnects_and_reapplies_params_after_link_drop() {
+        // A transient link loss must not lose the operator's tune/gain: the
+        // supervisor reconnects and re-applies every hardware param from control.
+        let iq0 = fm_iq_u8(DEFAULT_CAPTURE_RATE as f32, 30_000.0, 1_200.0, DEFAULT_DEVIATION_HZ, 24_000);
+        let iq1 = vec![127u8; 4096];
+        let (port, cmds2, stop) = spawn_reconnecting_server(iq0, iq1);
+
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let control = backend.control();
+        // Operator state that must survive the reconnect.
+        control.set_center_hz(144_500_000.0);
+        control.set_offset_hz(30_000.0);
+        control.set_gain(false, 30.0);
+
+        let cap = backend.open_capture(48_000).unwrap();
+
+        // Audio flows on the first connection.
+        assert!(
+            cap.rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "no audio before the link drop"
+        );
+
+        // After the drop the supervisor reconnects (100 ms backoff) and re-applies
+        // the tune. Poll the second connection's recorded commands, draining audio
+        // each iteration to keep the bounded queue moving.
+        let mut reconnected = false;
+        for _ in 0..300 {
+            if cmd_present(&cmds2, 0x01, 144_500_000) {
+                reconnected = true;
+                break;
+            }
+            let _ = cap.rx.recv_timeout(Duration::from_millis(20));
+        }
+        assert!(reconnected, "did not observe re-applied CenterFreq on the reconnect");
+
+        // Manual gain mode + level were re-applied too (GainMode(manual)=0x03,1 and
+        // TunerGain=0x04, 30.0 dB → 300 tenths).
+        assert!(cmd_present(&cmds2, 0x03, 1), "GainMode(manual) not re-applied");
+        assert!(cmd_present(&cmds2, 0x04, 300), "TunerGain(30 dB) not re-applied");
+
+        // Audio resumes on the reconnected link.
+        assert!(
+            cap.rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "audio did not resume after reconnect"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        drop(cap);
+    }
+
+    /// A fake server that blasts constant IQ as fast as the socket accepts it, so a
+    /// non-draining consumer forces the capture into overrun.
+    fn spawn_fast_stream_server() -> (u16, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_srv = stop.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.write_all(&fake_header());
+                let mut drain = sock.try_clone().unwrap();
+                std::thread::spawn(move || {
+                    let mut sink = [0u8; 64];
+                    while let Ok(n) = drain.read(&mut sink) {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                });
+                let chunk = vec![127u8; 16 * 1024];
+                while !stop_srv.load(Ordering::Relaxed) {
+                    if sock.write_all(&chunk).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (port, stop)
+    }
+
+    #[test]
+    fn overrun_drops_oldest_and_keeps_capturing() {
+        // With the consumer never draining, the bounded queue fills and the
+        // capture must drop-oldest and keep reading rather than block the socket.
+        let (port, stop) = spawn_fast_stream_server();
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let control = backend.control();
+        control.set_offset_hz(30_000.0);
+        let cap = backend.open_capture(48_000).unwrap();
+
+        // Deliberately do NOT drain `cap.rx`. Drops must start accumulating.
+        let mut saw_drops = false;
+        for _ in 0..300 {
+            if control.dropped_chunks() > 0 {
+                saw_drops = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_drops, "expected overrun drops with a stalled consumer");
+
+        // The counter keeps climbing: the capture thread is still producing (it did
+        // not block on the full channel).
+        let d1 = control.dropped_chunks();
+        std::thread::sleep(Duration::from_millis(100));
+        let d2 = control.dropped_chunks();
+        assert!(d2 > d1, "capture stopped producing under overrun (blocked?)");
+
+        stop.store(true, Ordering::Relaxed);
+        drop(cap);
+    }
+
     #[test]
     fn bad_header_fails_capture() {
         // A server that sends a wrong magic must make open_capture error.
@@ -1272,6 +1666,33 @@ mod tests {
         });
         let backend = RtlTcpBackend::new("127.0.0.1", port);
         assert!(backend.open_capture(48_000).is_err());
+    }
+
+    #[test]
+    fn stalled_header_times_out_instead_of_hanging() {
+        // A server that accepts the connection but never sends the 12-byte greeting
+        // must not park the capture indefinitely: the bounded header-read timeout
+        // makes `open_capture` fail (well within the timeout budget) rather than
+        // hang forever. Guards the reconnect-honors-stop invariant at the handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hold = std::thread::spawn(move || {
+            // Accept and then sit silent until the client gives up and closes.
+            let (sock, _) = listener.accept().unwrap();
+            let mut sink = [0u8; 64];
+            let mut s = sock;
+            let _ = s.read(&mut sink);
+        });
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let started = std::time::Instant::now();
+        let result = backend.open_capture(48_000);
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "stalled header should fail open_capture");
+        assert!(
+            elapsed < HEADER_READ_TIMEOUT + Duration::from_secs(5),
+            "open_capture hung past the header-read timeout ({elapsed:?})"
+        );
+        drop(hold);
     }
 
     #[test]

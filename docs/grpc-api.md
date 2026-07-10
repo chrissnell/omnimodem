@@ -126,7 +126,18 @@ the `SpectrumFrame` fields you'll then receive. Idempotent per channel.
 These drive a channel bound to an `rtltcp:host:port` device (via `ConfigureAudio`).
 On a non-SDR channel every one returns `FAILED_PRECONDITION`. Each mutating call
 also broadcasts an `SdrState` event (see `SubscribeEvents`) so multiple/late-joining
-clients stay in sync. See the RTL-SDR design doc for the tuning model.
+clients stay in sync. See the RTL-SDR design doc for the tuning model, and
+[`sdr-rtl-tcp.md`](sdr-rtl-tcp.md) for the operator's guide.
+
+**Arbitration & robustness.** Control is **last-writer-wins**: there is no lock or
+owner, so the most recent `SetSdrTune`/`SetSdrGain`/`ConfigureSdr` wins and every
+change broadcasts `SdrState` (plus snapshot-on-subscribe) so all clients reconcile.
+The capture **auto-reconnects** on a dropped `rtl_tcp` link (exponential backoff,
+re-applying the full tune/gain/ppm/rate/bias-tee/direct-sampling from the shared
+state), and drops the **oldest** queued audio under consumer overrun rather than
+stalling the socket — dropped chunks are counted and logged. *(Note: `SdrState` today
+carries center/offset/freq/gain/demod/squelch; `ppm`/`bias_tee`/`direct_sampling` are
+applied but not yet echoed in the event — a documented Phase-C follow-up.)*
 
 #### `SetSdrTune(SetSdrTuneRequest) → SetSdrTuneResponse`
 Point-and-shoot tuning: set the absolute demod frequency (`freq_hz`). The daemon

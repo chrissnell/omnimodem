@@ -66,6 +66,19 @@ every downstream mode (AFSK1200/APRS first) works unmodified. Playback is
   `SdrControl` from `core::configure_audio`, which the device factory (keyed only on
   identity) cannot supply. For an SDR channel the RX worker's audio-passband spectrum
   tap is held off, so there is exactly one waterfall producer per channel.
+- **Reconnect supervisor (Phase D)** — the capture thread wraps connect → header →
+  read loop in a backoff-reconnect supervisor (`connect_and_handshake` + `backoff_wait`,
+  mirroring `cpal_backend`'s `REBUILD_BACKOFF`/`BACKOFF_RESET_AFTER`). A dropped link
+  reconnects and re-applies every hardware param from `SdrControl` (the single source
+  of truth, which survives the drop), so the operator's tune is never lost. The stop
+  hook shuts down whichever socket is currently live via a shared `Arc<Mutex<Option<
+  TcpStream>>>` slot.
+- **Overrun = drop-oldest (Phase D)** — delivery never blocks the socket read: a
+  `VecDeque` backlog absorbs what the bounded consumer channel won't take, and past
+  `CHUNK_QUEUE_DEPTH` the oldest chunk is dropped and counted on
+  `SdrControl::dropped_chunks` (rate-limited `tracing::warn`). Multi-client control is
+  last-writer-wins; `emit_sdr_state` broadcasts on every mutating RPC. Operator-facing
+  detail lives in [`../sdr-rtl-tcp.md`](../sdr-rtl-tcp.md).
 
 ### The 48 kHz ceiling
 

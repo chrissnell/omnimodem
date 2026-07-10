@@ -12,6 +12,7 @@ design doc, the plan files, and the proto keep their existing roles.
 | How to integrate a frontend — the gRPC contract, RPC by RPC | [`../grpc-api.md`](../grpc-api.md) and [`../../proto/omnimodem.proto`](../../proto/omnimodem.proto) |
 | Feature overview / project pitch | [`../../README.md`](../../README.md) |
 | Build and run the daemon + TUI | [`../running.md`](../running.md) |
+| Set up an RTL-SDR (`rtl_tcp`) input — tuning, waterfall, demod, gain, reconnect | [`../sdr-rtl-tcp.md`](../sdr-rtl-tcp.md) |
 | Why a subsystem was built that way (design rationale) | [`../design/2026-06-17-omnimodem-design.md`](../design/2026-06-17-omnimodem-design.md) and `../plans/*.md` |
 | What a single function does | The code |
 
