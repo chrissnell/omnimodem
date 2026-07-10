@@ -108,3 +108,9 @@ Independent of the mode: any channel can set `rsid_tx`/`rsid_rx`
 prepends the active mode's RSID (Reed-Solomon Identifier) burst before each TX and/or
 runs the RSID detector over received audio, surfacing matches as `RsidDetected`
 events (fldigi-compatible tags). Detector/generator: `frontend/rsid.rs`.
+
+`rsid_tx` is sticky per channel, so it survives a mode switch. TX gating uses
+`ModeConfig::rsid_tx_key` (not `rsid_key`): CW never prepends a burst even when the
+flag carried over from a prior digital mode — RSID is a sound-card-mode identifier and
+is meaningless ahead of CW (GRA-318). RX detection still uses the full `rsid_key` table,
+so CW remains identifiable on receive.
