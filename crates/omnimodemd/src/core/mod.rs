@@ -19,6 +19,7 @@ pub mod tx_worker;
 pub(crate) use gain::AudioGain;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
+use crate::audio::rtlsdr::SdrControl;
 use crate::core::clock::ClockSource;
 use crate::core::rx_worker::RxWorker;
 use crate::core::tx_worker::{TxJob, TxWorker, TxWorkerCfg};
@@ -132,6 +133,9 @@ struct LiveBindings {
     gains: HashMap<ChannelId, AudioGain>,
     /// Per-channel spectrum (waterfall) control, shared with the RX worker.
     spectra: HashMap<ChannelId, spectrum::SpectrumControl>,
+    /// Per-channel SDR runtime control, shared with an `rtl_tcp` capture thread.
+    /// Present only for SDR-bound channels; gRPC (Plan 3) mutates it live.
+    sdr_controls: HashMap<ChannelId, SdrControl>,
 }
 
 /// The core loop. Blocks on `recv_timeout`; on a command, handles it; on the
@@ -217,7 +221,7 @@ fn restore_live_bindings(
         }
         if let Err(e) = configure_audio(
             supervisor, enumerator, audio_factory, live, cfg.id, cfg.device_id.clone(),
-            cfg.sample_rate, cfg.fanout, cfg.tx_device_id.clone(), cfg.tx_sample_rate,
+            cfg.sample_rate, cfg.fanout, cfg.tx_device_id.clone(), cfg.tx_sample_rate, telemetry,
         ) {
             tracing::warn!(channel = cfg.id.0, error = %e, "skipping audio restore on startup");
             continue;
@@ -267,7 +271,7 @@ fn handle_command(
         } => {
             let res = configure_audio(
                 supervisor, enumerator, audio_factory, live, id, device_id, sample_rate, fanout,
-                tx_device_id, tx_sample_rate,
+                tx_device_id, tx_sample_rate, telemetry,
             );
             if res.is_ok() {
                 try_spawn_workers(id, supervisor, live, interlock, lease, frames, telemetry);
@@ -450,6 +454,7 @@ fn configure_audio(
     fanout: u32,
     tx_device_id: DeviceId,
     tx_sample_rate: u32,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
 ) -> Result<ConfigureAudioOk, CoreError> {
     if !supervisor.has_channel(id) {
         return Err(CoreError::UnknownChannel(id));
@@ -460,9 +465,19 @@ fn configure_audio(
     )?;
 
     // Resolve durable ids to live devices (refresh first so a never-listed
-    // device still binds). Capture (RX) and playback (TX) may differ.
+    // device still binds). Capture (RX) and playback (TX) may differ. An
+    // `rtl_tcp` SDR endpoint needs no physical enumeration — synthesize a
+    // capture-only descriptor so an ad-hoc `rtltcp:host:port` binds directly.
     supervisor.device_cache_mut().refresh(enumerator);
     let resolve = |sup: &mut Supervisor, dev: &DeviceId| -> Result<_, CoreError> {
+        if let DeviceId::RtlTcp { host, port } = dev {
+            return Ok(crate::device::DeviceDescriptor {
+                id: dev.clone(),
+                label: format!("rtl_tcp {host}:{port}"),
+                has_capture: true,
+                has_playback: false,
+            });
+        }
         sup.device_cache_mut()
             .resolve(dev)
             .cloned()
@@ -474,7 +489,16 @@ fn configure_audio(
     };
 
     let rx_desc = resolve(supervisor, &device_id)?;
-    let capture = (audio_factory)(&rx_desc).open_capture(sample_rate)?;
+    let mut rx_backend = (audio_factory)(&rx_desc);
+    // For an SDR device, inject the per-channel control cell + telemetry sink so
+    // the capture thread can honor runtime tune/gain/squelch and emit the RF
+    // waterfall. The control persists across rebinds (settings survive a mode
+    // switch); a departing device clears it in poll_hotplug.
+    if matches!(device_id, DeviceId::RtlTcp { .. }) {
+        let control = live.sdr_controls.entry(id).or_default().clone();
+        rx_backend.attach_sdr_context(id, telemetry.clone(), control);
+    }
+    let capture = rx_backend.open_capture(sample_rate)?;
     let rx_rate = capture.sample_rate;
     live.captures.insert(id, capture);
 
@@ -494,6 +518,13 @@ fn configure_audio(
         Err(crate::audio::AudioError::NoUsableFormat { device }) => {
             tracing::warn!(channel = id.0, %device, "TX device has no usable playback; channel is RX-only");
             live.sinks.remove(&id); // drop any stale sink from a prior bind
+            0
+        }
+        // An SDR (rtl_tcp) TX device is receive-only — bind the channel RX-only
+        // rather than failing the whole configure, same as a mic-only device.
+        Err(crate::audio::AudioError::Unsupported) => {
+            tracing::warn!(channel = id.0, "TX device is receive-only (SDR); channel is RX-only");
+            live.sinks.remove(&id);
             0
         }
         Err(e) => return Err(e.into()),
@@ -554,8 +585,16 @@ fn try_spawn_workers(
     let rig = live.audio.get(&channel).map(|b| b.rx_dev.clone());
     // Shared runtime gain for this channel (cloned into the workers).
     let gain = live.gains.entry(channel).or_default().clone();
-    // Shared spectrum control (cloned into the RX worker; default OFF).
-    let spectrum = live.spectra.entry(channel).or_default().clone();
+    // Shared spectrum control (cloned into the RX worker; default OFF). For an
+    // SDR channel the RF waterfall is produced by the capture thread, so hand the
+    // RX worker a throwaway control that can never enable its audio-passband tap —
+    // keeping exactly one spectrum producer per channel.
+    let is_sdr = matches!(rig, Some(DeviceId::RtlTcp { .. }));
+    let spectrum = if is_sdr {
+        spectrum::SpectrumControl::default()
+    } else {
+        live.spectra.entry(channel).or_default().clone()
+    };
     // Per-channel RSID enables: (tx = prepend our burst, rx = detect inbound).
     let (rsid_tx, rsid_rx) = supervisor.channel_rsid(channel);
 
@@ -843,6 +882,7 @@ fn poll_hotplug(
                     // Drop the spectrum control so a replugged device starts with
                     // the waterfall OFF rather than silently resuming the FFT.
                     live.spectra.remove(&c);
+                    live.sdr_controls.remove(&c); // gone SDR endpoint loses its control cell
                     lease.release_all(c); // free any lease held on the gone rig
                 }
                 let ptt_chans: Vec<ChannelId> = live
