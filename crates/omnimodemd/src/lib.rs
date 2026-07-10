@@ -51,6 +51,12 @@ pub fn production_core(
     let enumerator = Box::new(RealEnumerator);
     let factory: core::AudioBackendFactory =
         Box::new(|desc: &DeviceDescriptor| -> Box<dyn AudioBackend> {
+            // An rtl_tcp SDR endpoint is bound by its host:port identity, not by
+            // hardware enumeration. The core injects the per-channel telemetry
+            // sink + SdrControl via attach_sdr_context before open_capture.
+            if let ids::DeviceId::RtlTcp { host, port } = &desc.id {
+                return Box::new(audio::rtlsdr::RtlTcpBackend::new(host.clone(), *port));
+            }
             for (id, backend) in audio::cpal_backend::enumerate_default_host() {
                 if id == desc.id {
                     return Box::new(backend);

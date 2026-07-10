@@ -6,6 +6,7 @@ pub mod backend;
 pub mod file;
 pub mod fanout;
 pub mod resample;
+pub mod rtlsdr;
 pub mod stdin;
 
 #[cfg(not(test))]

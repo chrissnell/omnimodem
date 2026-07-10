@@ -29,6 +29,10 @@ pub enum DeviceId {
     Topology { bus: u8, ports: String },
     /// A `/dev/serial/by-id/<id>` symlink target (durable by construction).
     Serial { by_id: String },
+    /// An `rtl_tcp` SDR endpoint (`host:port`). The endpoint *is* the audio
+    /// device; RF parameters are set separately via the SDR control path. A user
+    /// can bind an ad-hoc `rtltcp:host:port` without pre-registration.
+    RtlTcp { host: String, port: u16 },
     /// Non-physical backend (file/stdin/loopback) or a Phase-1 fixture.
     Placeholder { tag: String },
 }
@@ -49,6 +53,7 @@ impl DeviceId {
             DeviceId::AlsaCard { card_name } => format!("alsa:{card_name}"),
             DeviceId::Topology { bus, ports } => format!("topo:{bus}-{ports}"),
             DeviceId::Serial { by_id } => format!("serial:{by_id}"),
+            DeviceId::RtlTcp { host, port } => format!("rtltcp:{host}:{port}"),
             DeviceId::Placeholder { tag } => format!("virtual:{tag}"),
         }
     }
@@ -71,6 +76,13 @@ impl DeviceId {
                 Some(DeviceId::Topology { bus: bus.parse().ok()?, ports: ports.to_string() })
             }
             "serial" => Some(DeviceId::Serial { by_id: body.to_string() }),
+            "rtltcp" => {
+                // rtltcp:<host>:<port> — split on the last ':' so an IPv4 host or
+                // a DNS name works. Bare (unbracketed) IPv6 literals are out of
+                // scope; use a hostname or bracket-free form.
+                let (host, port) = body.rsplit_once(':')?;
+                Some(DeviceId::RtlTcp { host: host.to_string(), port: port.parse().ok()? })
+            }
             "virtual" => Some(DeviceId::Placeholder { tag: body.to_string() }),
             _ => None,
         }
@@ -93,7 +105,19 @@ mod device_id_tests {
         roundtrip(DeviceId::AlsaCard { card_name: "Device".into() });
         roundtrip(DeviceId::Topology { bus: 1, ports: "1.4.2".into() });
         roundtrip(DeviceId::Serial { by_id: "usb-FTDI_FT232R_AB0CDEFG-if00-port0".into() });
+        roundtrip(DeviceId::RtlTcp { host: "192.168.1.50".into(), port: 1234 });
         roundtrip(DeviceId::placeholder());
+    }
+
+    #[test]
+    fn rtltcp_canonical_and_parse() {
+        let id = DeviceId::RtlTcp { host: "127.0.0.1".into(), port: 1234 };
+        assert_eq!(id.to_canonical_string(), "rtltcp:127.0.0.1:1234");
+        assert_eq!(DeviceId::parse("rtltcp:127.0.0.1:1234"), Some(id));
+        // A DNS hostname round-trips too.
+        roundtrip(DeviceId::RtlTcp { host: "sdr.local".into(), port: 5678 });
+        // A non-numeric port is rejected.
+        assert_eq!(DeviceId::parse("rtltcp:host:notaport"), None);
     }
 
     #[test]

@@ -87,6 +87,21 @@ pub trait AudioBackend: Send {
     fn open_playback(&self, requested_rate: u32) -> Result<PlaybackHandle, AudioError>;
     /// The identity this backend represents.
     fn device_id(&self) -> DeviceId;
+
+    /// Inject per-channel SDR runtime context — the channel id, the telemetry
+    /// sink for the RF waterfall, and the shared [`SdrControl`] cell — after
+    /// construction and before `open_capture`. The core supplies these because
+    /// the device factory (keyed only on identity) cannot. Non-SDR backends
+    /// ignore it (default no-op); the `rtl_tcp` backend stores them so its
+    /// capture thread can emit an RF-referenced spectrum and honor runtime
+    /// tune/gain/squelch.
+    fn attach_sdr_context(
+        &mut self,
+        _channel: crate::ids::ChannelId,
+        _telemetry: tokio::sync::broadcast::Sender<crate::core::event::TelemetryEvent>,
+        _control: super::rtlsdr::SdrControl,
+    ) {
+    }
 }
 
 /// A backend with no hardware: capture yields the silence the test feeds it,
