@@ -167,7 +167,9 @@ pub fn caps_from_header(h: &RtlHeader) -> TunerCaps {
 
 /// Nearest entry in a discrete gain table to `want` (dB). Returns `want`
 /// unchanged when the table is empty (unknown tuner). Used by `SetSdrGain` to
-/// report the gain the dongle will actually snap to.
+/// report the gain the dongle will actually snap to. A non-finite `want` is not
+/// expected here — the gRPC handler rejects it — so the `Equal` fallback (which
+/// would return the first entry) is a harmless belt-and-suspenders default.
 pub fn snap_gain(table: &[f32], want: f32) -> f32 {
     table
         .iter()
@@ -966,6 +968,95 @@ mod tests {
         let caps = caps_cell.caps().expect("caps published after connect");
         assert_eq!(caps.tuner, "R820T");
         assert_eq!(caps_cell.capture_rate(), DEFAULT_CAPTURE_RATE);
+    }
+
+    /// A fake server that streams IQ continuously (so the capture loop keeps
+    /// reading) and records every 5-byte command the client sends, until `stop`.
+    fn spawn_recording_server() -> (u16, Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cmds = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let cmds_srv = cmds.clone();
+        let stop_srv = stop.clone();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut header = [0u8; 12];
+            header[0..4].copy_from_slice(b"RTL0");
+            header[4..8].copy_from_slice(&5u32.to_be_bytes());
+            header[8..12].copy_from_slice(&29u32.to_be_bytes());
+            sock.write_all(&header).unwrap();
+            // Record the client's control commands on a side thread.
+            let mut drain = sock.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 64];
+                while let Ok(n) = drain.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    cmds_srv.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            });
+            // Keep feeding IQ so the capture loop wakes and reconciles control
+            // changes (a parked read would never see a mid-stream rate change).
+            let chunk = vec![127u8; 512];
+            while !stop_srv.load(Ordering::Relaxed) {
+                if sock.write_all(&chunk).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        (port, cmds, stop)
+    }
+
+    #[test]
+    fn live_capture_rate_change_resends_sample_rate() {
+        // A runtime capture-rate change must re-command the dongle's sample rate on
+        // the running capture (and rebuild the decimation chain). Assert the new
+        // SampleRate command reaches the server.
+        let (port, cmds, stop) = spawn_recording_server();
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let control = backend.control();
+        let cap = backend.open_capture(48_000).unwrap();
+
+        // Scan the recorded byte stream (a concatenation of 5-byte frames) for a
+        // SampleRate (opcode 0x02) command carrying `rate`. The server records
+        // commands asynchronously, so poll — draining audio each iteration both
+        // paces the wait and keeps the capture loop's bounded queue unblocked.
+        let saw_sample_rate = |rate: u32| -> bool {
+            cmds.lock().unwrap().chunks_exact(5).any(|f| {
+                f[0] == 0x02 && u32::from_be_bytes([f[1], f[2], f[3], f[4]]) == rate
+            })
+        };
+        let wait_for_rate = |rate: u32, iters: usize| -> bool {
+            for _ in 0..iters {
+                if saw_sample_rate(rate) {
+                    return true;
+                }
+                let _ = cap.rx.recv_timeout(Duration::from_millis(10));
+            }
+            saw_sample_rate(rate)
+        };
+
+        // The initial SampleRate(240000) is sent during `open_capture`.
+        assert!(wait_for_rate(DEFAULT_CAPTURE_RATE, 200), "initial SampleRate not observed");
+
+        // Wait until the capture thread has produced audio, proving it latched the
+        // initial rate + generation before we change them. Without this, a
+        // late-starting thread would initialise straight to the new rate and never
+        // emit the runtime re-command.
+        assert!(
+            cap.rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "capture produced no audio at the initial rate"
+        );
+
+        // Change the rate at runtime; the capture thread must re-command it.
+        control.set_capture_rate(1_024_000);
+        let ok = wait_for_rate(1_024_000, 300);
+        stop.store(true, Ordering::Relaxed);
+        drop(cap);
+        assert!(ok, "runtime SampleRate(1024000) command not observed");
     }
 
     #[test]

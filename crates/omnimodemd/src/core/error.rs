@@ -24,6 +24,9 @@ pub enum CoreError {
     /// `rtl_tcp` SDR source.
     #[error("channel {0:?} is not bound to an SDR source")]
     SdrRequired(ChannelId),
+    /// A caller-supplied value was rejected (e.g. an unsupported SDR capture rate).
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
     #[error("core shutting down")]
     Closed,
 }

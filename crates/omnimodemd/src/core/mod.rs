@@ -598,9 +598,9 @@ fn configure_sdr(
         control.capture_rate()
     } else {
         if !supported_sample_rates().contains(&capture_rate) {
-            return Err(CoreError::Audio(crate::audio::AudioError::Io(format!(
+            return Err(CoreError::InvalidArgument(format!(
                 "unsupported capture rate {capture_rate} Hz"
-            ))));
+            )));
         }
         control.set_capture_rate(capture_rate);
         capture_rate

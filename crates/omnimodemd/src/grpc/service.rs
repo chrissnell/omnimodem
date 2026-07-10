@@ -401,14 +401,17 @@ impl ModemControl for ControlService {
         request: Request<proto::ConfigureSdrRequest>,
     ) -> Result<Response<proto::ConfigureSdrResponse>, Status> {
         let req = request.into_inner();
-        // `demod_mode` arrives as the proto enum's i32; the core maps the u8.
-        let demod_mode = u8::try_from(req.demod_mode)
-            .map_err(|_| Status::invalid_argument("unknown demod_mode"))?;
+        // Reject a `demod_mode` that is not a defined `DemodMode` value up front —
+        // an undefined code must not silently fold into NBFM. Defined-but-
+        // unimplemented modes (AM/WFM/SSB) still pass here and the core returns
+        // UNIMPLEMENTED for them.
+        let demod_mode = proto::DemodMode::try_from(req.demod_mode)
+            .map_err(|_| Status::invalid_argument(format!("unknown demod_mode {}", req.demod_mode)))?;
         let (tx, rx) = oneshot::channel();
         self.send_command(Command::ConfigureSdr {
             channel: ChannelId(req.channel),
             capture_rate: req.capture_rate,
-            demod_mode,
+            demod_mode: demod_mode as u8,
             squelch_db: req.squelch_db,
             ppm: req.ppm,
             bias_tee: req.bias_tee,

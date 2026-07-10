@@ -184,6 +184,44 @@ async fn sdr_control_roundtrip() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unimplemented);
+
+    // An undefined demod_mode code must be rejected, not silently folded to NBFM.
+    let err = client
+        .configure_sdr(ConfigureSdrRequest {
+            channel: 0,
+            capture_rate: 0,
+            demod_mode: 99,
+            squelch_db: -30.0,
+            ppm: 0,
+            bias_tee: false,
+            direct_sampling: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // An unsupported capture rate is a client error (INVALID_ARGUMENT), not INTERNAL.
+    let err = client
+        .configure_sdr(ConfigureSdrRequest {
+            channel: 0,
+            capture_rate: 12_345, // not in the tuner's rate table
+            demod_mode: DemodMode::DemodNbfm as i32,
+            squelch_db: -30.0,
+            ppm: 0,
+            bias_tee: false,
+            direct_sampling: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // Auto gain reports 0 dB (AGC engaged); it must not error.
+    let gain = client
+        .set_sdr_gain(SetSdrGainRequest { channel: 0, auto: true, gain_db: 0.0 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(gain.actual_gain_db, 0.0);
 }
 
 #[tokio::test]

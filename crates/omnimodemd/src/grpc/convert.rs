@@ -28,6 +28,7 @@ pub fn core_error_to_status(e: CoreError) -> Status {
         },
         CoreError::Unimplemented(_) => Status::unimplemented(e.to_string()),
         CoreError::SdrRequired(_) => Status::failed_precondition(e.to_string()),
+        CoreError::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
         CoreError::Closed => Status::unavailable(e.to_string()),
     }
 }
