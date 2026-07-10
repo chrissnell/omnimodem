@@ -402,9 +402,8 @@ impl ModemControl for ControlService {
     ) -> Result<Response<proto::ConfigureSdrResponse>, Status> {
         let req = request.into_inner();
         // Reject a `demod_mode` that is not a defined `DemodMode` value up front —
-        // an undefined code must not silently fold into NBFM. Defined-but-
-        // unimplemented modes (AM/WFM/SSB) still pass here and the core returns
-        // UNIMPLEMENTED for them.
+        // an undefined code must not silently fold into NBFM. Every defined mode
+        // (NBFM/AM/WFM/SSB) is implemented and passes through to the core.
         let demod_mode = proto::DemodMode::try_from(req.demod_mode)
             .map_err(|_| Status::invalid_argument(format!("unknown demod_mode {}", req.demod_mode)))?;
         let (tx, rx) = oneshot::channel();

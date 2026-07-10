@@ -1,7 +1,8 @@
 //! `rtl_tcp` SDR backend: connect to an `rtl_tcp` server (local or remote), tune
 //! the dongle, read raw u8 IQ, demodulate to mono audio via the DSP crate's
-//! `NbfmReceiver`, and stream a wideband RF waterfall — all behind the existing
-//! `AudioBackend` seam so every downstream mode works unmodified.
+//! `SdrDemod` (dispatching on the selected demod mode), and stream a wideband RF
+//! waterfall — all behind the existing `AudioBackend` seam so every downstream
+//! mode works unmodified.
 //!
 //! Wire protocol (`librtlsdr` `rtl_tcp.c`): on connect the server writes a
 //! 12-byte header (magic `RTL0` + tuner type + gain count), then streams
@@ -14,7 +15,7 @@ use crate::core::event::TelemetryEvent;
 use crate::ids::{ChannelId, DeviceId};
 use omnimodem_dsp::frontend::complex_stft::ComplexStft;
 use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
-use omnimodem_dsp::frontend::nbfm::NbfmReceiver;
+use omnimodem_dsp::frontend::sdr_demod::{DemodKind, SdrDemod};
 use omnimodem_dsp::frontend::spectrum::{full_spectrum_dbfs, SpectrumPlan};
 use omnimodem_dsp::frontend::squelch::PowerSquelch;
 use std::io::{Read, Write};
@@ -248,9 +249,8 @@ impl RtlCmd {
 // Runtime control cell
 // ---------------------------------------------------------------------------
 
-/// Selectable demodulator. NBFM is implemented in Phase A; the rest ship in the
-/// enum so the control surface is stable, and return "unimplemented" until their
-/// phase lands.
+/// Selectable demodulator. All modes are implemented (NBFM in Phase A; AM/WFM/SSB
+/// in Phase B) and dispatched by the capture thread via [`SdrDemod`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DemodMode {
@@ -269,6 +269,17 @@ impl DemodMode {
             3 => DemodMode::Usb,
             4 => DemodMode::Lsb,
             _ => DemodMode::Nbfm,
+        }
+    }
+
+    /// Map to the DSP crate's mode enum, which drives [`SdrDemod`]'s back-end.
+    pub fn to_dsp(self) -> DemodKind {
+        match self {
+            DemodMode::Nbfm => DemodKind::Nbfm,
+            DemodMode::Am => DemodKind::Am,
+            DemodMode::Wfm => DemodKind::Wfm,
+            DemodMode::Usb => DemodKind::Usb,
+            DemodMode::Lsb => DemodKind::Lsb,
         }
     }
 }
@@ -609,7 +620,9 @@ impl AudioBackend for RtlTcpBackend {
                 // The dongle rate is authoritative from the control cell so
                 // `ConfigureSdr` can change it live; it starts at the seeded value.
                 let mut cur_rate = control.capture_rate();
-                let mut rx_chain = NbfmReceiver::new(
+                let mut cur_mode = control.demod_mode();
+                let mut rx_chain = SdrDemod::new(
+                    cur_mode.to_dsp(),
                     cur_rate,
                     channel_rate,
                     control.offset_hz(),
@@ -645,20 +658,29 @@ impl AudioBackend for RtlTcpBackend {
                     let gen = control.generation();
                     if gen != seen_gen {
                         seen_gen = gen;
-                        // A capture-rate change rebuilds the whole RX chain (the
-                        // decimation ratio and NCO base rate both depend on it) and
-                        // re-commands the dongle's sample rate.
+                        // A capture-rate or demod-mode change rebuilds the whole RX
+                        // chain: the decimation ratio and NCO base rate depend on
+                        // the rate, and the back-end (and WFM's wide IF) depend on
+                        // the mode. A rate change also re-commands the dongle.
                         let want_rate = control.capture_rate();
-                        if want_rate != cur_rate && want_rate != 0 {
-                            cur_rate = want_rate;
-                            rx_chain = NbfmReceiver::new(
+                        let want_mode = control.demod_mode();
+                        let rate_changed = want_rate != cur_rate && want_rate != 0;
+                        if rate_changed || want_mode != cur_mode {
+                            if rate_changed {
+                                cur_rate = want_rate;
+                            }
+                            cur_mode = want_mode;
+                            rx_chain = SdrDemod::new(
+                                cur_mode.to_dsp(),
                                 cur_rate,
                                 channel_rate,
                                 control.offset_hz(),
                                 deviation_hz,
                                 control.effective_squelch(),
                             );
-                            let _ = cmd_sock.write_all(&RtlCmd::SampleRate(cur_rate).encode());
+                            if rate_changed {
+                                let _ = cmd_sock.write_all(&RtlCmd::SampleRate(cur_rate).encode());
+                            }
                         } else {
                             rx_chain.retune(control.offset_hz());
                             rx_chain.set_squelch(control.effective_squelch());
@@ -953,6 +975,43 @@ mod tests {
             }
         }
         assert!(total > 0, "expected demodulated audio samples, got none");
+    }
+
+    /// AM-modulate a `tone_hz` sine at `offset_hz` into u8 IQ at `rate`.
+    fn am_iq_u8(rate: f32, offset_hz: f32, tone_hz: f32, m: f32, n: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            let t = k as f32 / rate;
+            let env = 1.0 + m * (std::f32::consts::TAU * tone_hz * t).sin();
+            let carr = std::f32::consts::TAU * offset_hz * t;
+            let i = ((env * carr.cos() * 0.45 * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8;
+            let q = ((env * carr.sin() * 0.45 * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8;
+            out.push(i);
+            out.push(q);
+        }
+        out
+    }
+
+    #[test]
+    fn capture_am_mode_delivers_audio() {
+        // With the demod mode set to AM before capture, an AM-modulated stream must
+        // still produce audio through the `SdrDemod` dispatch (not just NBFM).
+        let iq = am_iq_u8(DEFAULT_CAPTURE_RATE as f32, 30_000.0, 1_000.0, 0.5, 48_000);
+        let port = spawn_fake_server(iq);
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        backend.control.set_offset_hz(30_000.0);
+        backend.control.set_demod_mode(DemodMode::Am);
+        let cap = backend.open_capture(48_000).unwrap();
+
+        let mut total = 0usize;
+        loop {
+            match cap.rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(chunk) => total += chunk.len(),
+                Err(RecvTimeoutError::Timeout) => panic!("AM capture stalled"),
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(total > 0, "expected demodulated AM audio, got none");
     }
 
     #[test]

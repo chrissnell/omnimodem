@@ -593,15 +593,14 @@ message ConfigureSpectrumResponse {
   float  freq_step_hz  = 5;  // matches SpectrumFrame.freq_step_hz
 }
 
-// SDR demodulator. The enum ships COMPLETE in Phase A so external clients can code
-// against the full set; only DEMOD_NBFM is implemented — the rest return
-// UNIMPLEMENTED until their phase (AM/WFM/SSB land in Phase B).
+// SDR demodulator. All modes are implemented: DEMOD_NBFM landed in Phase A;
+// DEMOD_AM/DEMOD_WFM/DEMOD_USB/DEMOD_LSB landed in Phase B.
 enum DemodMode {
-  DEMOD_NBFM = 0;   // narrowband FM (Phase A)
-  DEMOD_AM   = 1;   // Phase B
-  DEMOD_WFM  = 2;   // Phase B
-  DEMOD_USB  = 3;   // Phase B
-  DEMOD_LSB  = 4;   // Phase B
+  DEMOD_NBFM = 0;   // narrowband FM
+  DEMOD_AM   = 1;   // amplitude (envelope + DC block)
+  DEMOD_WFM  = 2;   // wideband FM
+  DEMOD_USB  = 3;   // upper sideband
+  DEMOD_LSB  = 4;   // lower sideband
 }
 
 message SetSdrTuneRequest {
