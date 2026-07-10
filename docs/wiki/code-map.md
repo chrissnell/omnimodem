@@ -61,6 +61,7 @@ that string is then parsed by `ModeConfig::parse`.
 |---|---|---|
 | `AudioBackend` trait + capture/playback handles + null backend | `audio/backend.rs` | `AudioBackend`, `CaptureHandle`, `PlaybackHandle` |
 | cpal hardware backend (stream rebuild + backoff) | `audio/cpal_backend.rs` | `enumerate_default_host` |
+| `rtl_tcp` SDR backend (IQ→audio, tune/gain control, RF waterfall, reconnect + drop-oldest overrun) | `audio/rtlsdr.rs` | `RtlTcpBackend`, `SdrControl`, `connect_and_handshake`, `deliver_audio` |
 | ALSA rate/format hardening (48 kHz ceiling, `plughw` trap) | `audio/alsa.rs` | rate/format selection helpers |
 | Module constants + rate ceiling | `audio/mod.rs` | `MAX_SAMPLE_RATE` |
 | File backend (deterministic test replay) | `audio/file.rs` | `FileBackend` |

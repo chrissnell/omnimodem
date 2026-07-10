@@ -82,6 +82,10 @@ rtl_tcp 192.168.1.50:1234 Rooftop R820T
 rtl_tcp 127.0.0.1:1234
 ```
 
+For the full RTL-SDR setup — starting `rtl_tcp`, binding, tuning, the waterfall,
+demod modes, gain/squelch/ppm, and the reconnect/overrun behavior — see the operator's
+guide [`sdr-rtl-tcp.md`](sdr-rtl-tcp.md).
+
 ## Test
 
 ```sh

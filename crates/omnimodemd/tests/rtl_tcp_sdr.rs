@@ -107,11 +107,14 @@ fn fake_rtl_tcp_stream_decodes_aprs_frame() {
     let cap = backend.open_capture(CHANNEL_RATE).unwrap();
     assert_eq!(cap.sample_rate, CHANNEL_RATE);
 
+    // Drain the burst. The fake server serves one connection then closes; with the
+    // Phase-D reconnect supervisor the capture keeps running (and retries) instead
+    // of disconnecting, so collect until the stream goes quiet.
     let mut samples: Vec<f32> = Vec::new();
     loop {
-        match cap.rx.recv_timeout(Duration::from_secs(5)) {
+        match cap.rx.recv_timeout(Duration::from_secs(2)) {
             Ok(chunk) => samples.extend(chunk.iter().map(|&s| s as f32 / 32768.0)),
-            Err(RecvTimeoutError::Timeout) => panic!("capture stalled"),
+            Err(RecvTimeoutError::Timeout) => break,
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
