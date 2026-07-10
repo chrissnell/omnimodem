@@ -21,6 +21,7 @@ pub(crate) use gain::AudioGain;
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use crate::audio::rtlsdr::{
     plan_tune, snap_gain, supported_sample_rates, DemodMode, SdrControl,
+    DIRECT_SAMPLING_MAX_HZ, DIRECT_SAMPLING_Q_BRANCH,
 };
 use crate::core::clock::ClockSource;
 use crate::core::rx_worker::RxWorker;
@@ -86,6 +87,18 @@ pub fn spawn(
     enumerator: Box<dyn DeviceEnumerator>,
     audio_factory: AudioBackendFactory,
 ) -> (CoreHandle, std::thread::JoinHandle<()>) {
+    spawn_with_devices(supervisor, enumerator, audio_factory, Vec::new())
+}
+
+/// Like [`spawn`], but seeds the config-file-registered devices merged into
+/// `ListDevices`. Production loads these from the daemon config; tests and the
+/// no-config path use the empty [`spawn`].
+pub fn spawn_with_devices(
+    supervisor: Supervisor,
+    enumerator: Box<dyn DeviceEnumerator>,
+    audio_factory: AudioBackendFactory,
+    registered_devices: Vec<crate::device::DeviceDescriptor>,
+) -> (CoreHandle, std::thread::JoinHandle<()>) {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(COMMAND_QUEUE_DEPTH);
     let (frame_tx, _) = broadcast::channel(FRAME_RING);
     let (tele_tx, _) = broadcast::channel(TELEMETRY_RING);
@@ -98,7 +111,9 @@ pub fn spawn(
 
     let join = std::thread::Builder::new()
         .name("omnimodem-core".into())
-        .spawn(move || run(supervisor, enumerator, audio_factory, cmd_rx, frame_tx, tele_tx))
+        .spawn(move || {
+            run(supervisor, enumerator, audio_factory, registered_devices, cmd_rx, frame_tx, tele_tx)
+        })
         .expect("spawn core thread");
 
     (handle, join)
@@ -141,20 +156,26 @@ struct LiveBindings {
     /// Per-channel SDR runtime control, shared with an `rtl_tcp` capture thread.
     /// Present only for SDR-bound channels; gRPC (Plan 3) mutates it live.
     sdr_controls: HashMap<ChannelId, SdrControl>,
+    /// Devices pre-registered in the daemon config file (currently `rtl_tcp`
+    /// endpoints). Merged into `ListDevices` alongside the live enumeration so a
+    /// frontend can present network SDRs that no hardware scan would surface.
+    registered_devices: Vec<crate::device::DeviceDescriptor>,
 }
 
 /// The core loop. Blocks on `recv_timeout`; on a command, handles it; on the
 /// idle tick, polls hotplug. Exits on `Shutdown` or a closed channel.
+#[allow(clippy::too_many_arguments)]
 fn run(
     mut supervisor: Supervisor,
     enumerator: Box<dyn DeviceEnumerator>,
     audio_factory: AudioBackendFactory,
+    registered_devices: Vec<crate::device::DeviceDescriptor>,
     commands: Receiver<Command>,
     frames: broadcast::Sender<FrameEvent>,
     telemetry: broadcast::Sender<TelemetryEvent>,
 ) {
     let mut next_tx_id: u64 = 1;
-    let mut live = LiveBindings::default();
+    let mut live = LiveBindings { registered_devices, ..LiveBindings::default() };
     let interlock = supervisor.interlock();
     let lease = TxLeaseRegistry::new();
     // Persistence restores a channel's *config*, but not its live audio/PTT
@@ -325,7 +346,15 @@ fn handle_command(
         }
 
         Command::ListDevices { reply } => {
-            let devices = supervisor.device_cache_mut().refresh(enumerator);
+            let mut devices = supervisor.device_cache_mut().refresh(enumerator);
+            // Merge config-file-registered endpoints (e.g. remote `rtl_tcp` SDRs)
+            // that no hardware scan produces. A registered id that the live
+            // enumeration already surfaced is not duplicated.
+            for reg in &live.registered_devices {
+                if !devices.iter().any(|d| d.id == reg.id) {
+                    devices.push(reg.clone());
+                }
+            }
             let _ = reply.send(devices);
         }
 
@@ -564,10 +593,12 @@ fn set_sdr_gain(
     Ok(SdrGainOk { actual_gain_db: applied })
 }
 
-/// Configure an SDR channel's source parameters. All demod modes are supported;
-/// bias-tee and direct-sampling remain deferred to Phase C and still reject with
-/// `Unimplemented`. Applies capture rate / demod mode / squelch / ppm and echoes
-/// the effective capture rate.
+/// Configure an SDR channel's source parameters: capture rate, demod mode,
+/// squelch, ppm, bias-tee, and direct-sampling. All demod modes (NBFM/AM/WFM/SSB)
+/// are supported; the dongle-extras controls are applied to the shared
+/// `SdrControl`, where the capture thread sends them to the dongle on its next
+/// block. Direct sampling (`bool`) maps to the Q-branch (mode 2) — the branch
+/// consumer HF-capable dongles wire their HF input to. Echoes the effective rate.
 #[allow(clippy::too_many_arguments)]
 fn configure_sdr(
     live: &mut LiveBindings,
@@ -583,18 +614,9 @@ fn configure_sdr(
     let control = sdr_control(live, channel)?;
 
     // Every demod mode (NBFM/AM/WFM/SSB) is implemented; the capture thread
-    // dispatches on the mode via `SdrDemod`.
+    // dispatches on the mode via `SdrDemod`. Bias-tee and direct-sampling are
+    // applied below (Phase C) — no control is rejected here anymore.
     let mode = DemodMode::from_u8(demod_mode);
-    // Bias-tee / direct-sampling are Phase C: accepted in the message but not yet
-    // wired. Requesting either errors; leaving them false is a no-op.
-    if bias_tee {
-        return Err(CoreError::Unimplemented("bias_tee is deferred to Phase C".into()));
-    }
-    if direct_sampling {
-        return Err(CoreError::Unimplemented(
-            "direct_sampling is deferred to Phase C".into(),
-        ));
-    }
 
     // Capture rate: 0 = unchanged; otherwise it must be a rate the dongle accepts.
     let actual_capture_rate = if capture_rate == 0 {
@@ -612,6 +634,8 @@ fn configure_sdr(
     control.set_demod_mode(mode);
     control.set_squelch_db(squelch_db);
     control.set_ppm(ppm);
+    control.set_bias_tee(bias_tee);
+    control.set_direct_sampling(if direct_sampling { DIRECT_SAMPLING_Q_BRANCH } else { 0 });
     emit_sdr_state(telemetry, channel, control);
     Ok(ConfigureSdrOk { actual_capture_rate })
 }
@@ -630,10 +654,17 @@ fn get_sdr_caps(live: &LiveBindings, channel: ChannelId) -> Result<SdrCapsOk, Co
         bias_tee_supported: false,
         direct_sampling_supported: false,
     });
+    // Direct sampling bypasses the tuner to reach HF, so when it is active the
+    // usable range widens down to DC up to the ADC Nyquist ceiling.
+    let (freq_min_hz, freq_max_hz) = if control.direct_sampling() != 0 {
+        (0.0, caps.freq_max_hz.max(DIRECT_SAMPLING_MAX_HZ))
+    } else {
+        (caps.freq_min_hz, caps.freq_max_hz)
+    };
     Ok(SdrCapsOk {
         tuner: caps.tuner,
-        freq_min_hz: caps.freq_min_hz,
-        freq_max_hz: caps.freq_max_hz,
+        freq_min_hz,
+        freq_max_hz,
         sample_rates: caps.sample_rates,
         gains_db: caps.gains_db,
         bias_tee_supported: caps.bias_tee_supported,
@@ -1621,6 +1652,78 @@ mod tests {
                 .send(Command::GetSdrCaps { channel: ChannelId(0), reply: tx })
                 .unwrap();
             assert!(matches!(rx.await.unwrap(), Err(CoreError::SdrRequired(_))));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn configure_sdr_applies_bias_tee_and_direct_sampling_and_widens_caps() {
+        // Phase C: bias-tee and direct-sampling flow through to the shared control,
+        // and direct-sampling widens the reported tunable range down to HF.
+        use crate::audio::rtlsdr::{caps_from_header, RtlHeader};
+        let mut live = LiveBindings::default();
+        let ctrl = SdrControl::default();
+        ctrl.set_caps(caps_from_header(&RtlHeader { tuner_type: 5, tuner_gain_count: 29 }));
+        live.sdr_controls.insert(ChannelId(0), ctrl.clone());
+        let (tele, _keep) = broadcast::channel(16);
+
+        // Baseline: without direct-sampling the range is the tuner's normal span.
+        let base = get_sdr_caps(&live, ChannelId(0)).unwrap();
+        assert!(base.freq_min_hz > 0.0);
+        assert!(base.bias_tee_supported && base.direct_sampling_supported);
+
+        let ok = configure_sdr(
+            &mut live, ChannelId(0), 0, 0, -200.0, 0, true, true, &tele,
+        )
+        .unwrap();
+        assert_eq!(ok.actual_capture_rate, ctrl.capture_rate());
+        assert!(ctrl.bias_tee());
+        assert_eq!(ctrl.direct_sampling(), 2); // bool true → Q-branch
+
+        // Caps now advertise HF: floor at DC, ceiling at least the ADC Nyquist.
+        let caps = get_sdr_caps(&live, ChannelId(0)).unwrap();
+        assert_eq!(caps.freq_min_hz, 0.0);
+        assert!(caps.freq_max_hz >= DIRECT_SAMPLING_MAX_HZ);
+
+        // Turning direct-sampling back off restores the tuner's normal range.
+        configure_sdr(&mut live, ChannelId(0), 0, 0, -200.0, 0, false, false, &tele).unwrap();
+        assert!(!ctrl.bias_tee());
+        assert_eq!(ctrl.direct_sampling(), 0);
+        let restored = get_sdr_caps(&live, ChannelId(0)).unwrap();
+        assert_eq!(restored.freq_min_hz, base.freq_min_hz);
+    }
+
+    #[test]
+    fn list_devices_surfaces_registered_rtl_tcp_endpoints() {
+        // A config-registered rtl_tcp endpoint must appear in ListDevices even
+        // though no hardware enumeration produces it, alongside live devices.
+        let reg = DeviceDescriptor {
+            id: DeviceId::RtlTcp { host: "192.168.1.50".into(), port: 1234 },
+            label: "Rooftop".into(),
+            has_capture: true,
+            has_playback: false,
+        };
+        let store = Store::open_in_memory().unwrap();
+        let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();
+        let (core, join) = spawn_with_devices(
+            sup,
+            Box::new(FakeEnumerator::new(vec![named_device("Soundcard")])),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+            vec![reg.clone()],
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::ListDevices { reply: tx }).unwrap();
+            let devices = rx.await.unwrap();
+            assert!(
+                devices.iter().any(|d| d.id == reg.id && d.label == "Rooftop"),
+                "registered rtl_tcp endpoint missing from ListDevices"
+            );
+            // The enumerated soundcard is still present (registered devices are
+            // additive, not a replacement).
+            assert!(devices.iter().any(|d| matches!(&d.id, DeviceId::AlsaCard { .. })));
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();

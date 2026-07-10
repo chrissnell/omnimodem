@@ -151,8 +151,30 @@ pub fn supported_sample_rates() -> Vec<u32> {
     ]
 }
 
-/// Compose the published capabilities from a parsed header. Bias-tee and
-/// direct-sampling are Phase C, so both are reported unsupported for now.
+/// Whether the tuner exposes a switchable bias-tee. The bias-tee is a board
+/// feature gated on the R820-class tuners librtlsdr drives it for (R820T/R820T2
+/// report type 5; R828D/R860 report type 6).
+pub fn bias_tee_supported(tuner_type: u32) -> bool {
+    matches!(tuner_type, 5 | 6)
+}
+
+/// Direct sampling bypasses the tuner and samples the RTL2832U ADC directly to
+/// reach HF, so every dongle supports it regardless of tuner chip.
+pub fn direct_sampling_supported(_tuner_type: u32) -> bool {
+    true
+}
+
+/// Highest frequency (Hz) reachable in direct-sampling mode: the RTL2832U's
+/// ~28.8 MHz ADC clock sets the Nyquist ceiling.
+pub const DIRECT_SAMPLING_MAX_HZ: f64 = 28_800_000.0;
+
+/// Direct-sampling Q-branch mode. RTL-SDR Blog V3 (and most consumer HF-capable
+/// dongles) wire the HF input to the Q ADC, so the `ConfigureSdr` `bool` maps to
+/// this branch when enabled.
+pub const DIRECT_SAMPLING_Q_BRANCH: u32 = 2;
+
+/// Compose the published capabilities from a parsed header. Bias-tee support is
+/// tuner-dependent; direct sampling is universal (an ADC feature).
 pub fn caps_from_header(h: &RtlHeader) -> TunerCaps {
     let (freq_min_hz, freq_max_hz) = tuner_freq_range(h.tuner_type);
     TunerCaps {
@@ -161,8 +183,8 @@ pub fn caps_from_header(h: &RtlHeader) -> TunerCaps {
         freq_max_hz,
         sample_rates: supported_sample_rates(),
         gains_db: tuner_gains_db(h.tuner_type),
-        bias_tee_supported: false,
-        direct_sampling_supported: false,
+        bias_tee_supported: bias_tee_supported(h.tuner_type),
+        direct_sampling_supported: direct_sampling_supported(h.tuner_type),
     }
 }
 
@@ -228,6 +250,10 @@ pub enum RtlCmd {
     TunerGain(i32),
     /// 0x05 — set frequency correction (ppm).
     FreqCorrection(i32),
+    /// 0x09 — set direct sampling: 0 = off, 1 = I-branch, 2 = Q-branch.
+    DirectSampling(u32),
+    /// 0x0e — set bias-tee: true powers the inline LNA/antenna over coax.
+    BiasTee(bool),
 }
 
 impl RtlCmd {
@@ -239,6 +265,8 @@ impl RtlCmd {
             RtlCmd::GainMode(manual) => (0x03, manual as u32),
             RtlCmd::TunerGain(tenths) => (0x04, tenths as u32),
             RtlCmd::FreqCorrection(ppm) => (0x05, ppm as u32),
+            RtlCmd::DirectSampling(mode) => (0x09, mode),
+            RtlCmd::BiasTee(on) => (0x0e, on as u32),
         };
         let b = arg.to_be_bytes();
         [op, b[0], b[1], b[2], b[3]]
@@ -304,6 +332,11 @@ struct SdrControlInner {
     squelch_db: AtomicU32,
     /// Frequency correction (ppm).
     ppm: AtomicI32,
+    /// Bias-tee enable: powers an inline LNA/antenna over the coax.
+    bias_tee: AtomicBool,
+    /// Direct-sampling mode: 0 = off, 1 = I-branch, 2 = Q-branch. Non-zero
+    /// bypasses the tuner to reach HF.
+    direct_sampling: AtomicU32,
     /// Demod mode (`DemodMode as u8`).
     demod_mode: AtomicU8,
     /// Dongle capture (sample) rate (Hz). Set by `ConfigureSdr`; the capture
@@ -335,6 +368,8 @@ impl Default for SdrControl {
                 gain_db: AtomicU32::new(0.0f32.to_bits()),
                 squelch_db: AtomicU32::new(SQUELCH_DISABLED_DB.to_bits()),
                 ppm: AtomicI32::new(0),
+                bias_tee: AtomicBool::new(false),
+                direct_sampling: AtomicU32::new(0),
                 demod_mode: AtomicU8::new(DemodMode::Nbfm as u8),
                 capture_rate: AtomicU32::new(DEFAULT_CAPTURE_RATE),
                 caps: Mutex::new(None),
@@ -396,6 +431,23 @@ impl SdrControl {
     }
     pub fn set_ppm(&self, ppm: i32) {
         self.inner.ppm.store(ppm, Ordering::Relaxed);
+        self.bump();
+    }
+
+    pub fn bias_tee(&self) -> bool {
+        self.inner.bias_tee.load(Ordering::Relaxed)
+    }
+    pub fn set_bias_tee(&self, on: bool) {
+        self.inner.bias_tee.store(on, Ordering::Relaxed);
+        self.bump();
+    }
+
+    /// Direct-sampling mode (0 = off, 1 = I-branch, 2 = Q-branch).
+    pub fn direct_sampling(&self) -> u32 {
+        self.inner.direct_sampling.load(Ordering::Relaxed)
+    }
+    pub fn set_direct_sampling(&self, mode: u32) {
+        self.inner.direct_sampling.store(mode, Ordering::Relaxed);
         self.bump();
     }
 
@@ -491,6 +543,8 @@ fn send_initial_commands(
     let io = |e: std::io::Error| AudioError::Io(e.to_string());
     sock.write_all(&RtlCmd::SampleRate(capture_rate).encode()).map_err(io)?;
     sock.write_all(&RtlCmd::FreqCorrection(control.ppm()).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::DirectSampling(control.direct_sampling()).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::BiasTee(control.bias_tee()).encode()).map_err(io)?;
     sock.write_all(&RtlCmd::GainMode(!control.gain_auto()).encode()).map_err(io)?;
     if !control.gain_auto() {
         let tenths = (control.gain_db() * 10.0).round() as i32;
@@ -500,14 +554,17 @@ fn send_initial_commands(
     Ok(())
 }
 
-/// Re-apply hardware parameters after a control change: gain mode/level, ppm, and
-/// center frequency. NCO offset and squelch are handled in-thread (no socket).
+/// Re-apply hardware parameters after a control change: ppm, direct-sampling,
+/// bias-tee, gain mode/level, and center frequency. NCO offset and squelch are
+/// handled in-thread (no socket).
 fn apply_hardware(
     sock: &mut TcpStream,
     control: &SdrControl,
 ) -> Result<(), AudioError> {
     let io = |e: std::io::Error| AudioError::Io(e.to_string());
     sock.write_all(&RtlCmd::FreqCorrection(control.ppm()).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::DirectSampling(control.direct_sampling()).encode()).map_err(io)?;
+    sock.write_all(&RtlCmd::BiasTee(control.bias_tee()).encode()).map_err(io)?;
     sock.write_all(&RtlCmd::GainMode(!control.gain_auto()).encode()).map_err(io)?;
     if !control.gain_auto() {
         let tenths = (control.gain_db() * 10.0).round() as i32;
@@ -805,6 +862,31 @@ mod tests {
         assert_eq!(RtlCmd::TunerGain(496).encode(), [0x04, 0, 0, 0x01, 0xF0]);
         // -1 ppm two's-complement round-trips through the u32 BE arg.
         assert_eq!(RtlCmd::FreqCorrection(-1).encode(), [0x05, 0xFF, 0xFF, 0xFF, 0xFF]);
+        // Phase C: direct sampling (0x09) and bias-tee (0x0e).
+        assert_eq!(RtlCmd::DirectSampling(0).encode(), [0x09, 0, 0, 0, 0]);
+        assert_eq!(RtlCmd::DirectSampling(1).encode(), [0x09, 0, 0, 0, 1]);
+        assert_eq!(RtlCmd::DirectSampling(2).encode(), [0x09, 0, 0, 0, 2]);
+        assert_eq!(RtlCmd::BiasTee(true).encode(), [0x0e, 0, 0, 0, 1]);
+        assert_eq!(RtlCmd::BiasTee(false).encode(), [0x0e, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn control_bias_tee_and_direct_sampling_visible_and_bump() {
+        let c = SdrControl::default();
+        let worker = c.clone();
+        // Defaults are off.
+        assert!(!worker.bias_tee());
+        assert_eq!(worker.direct_sampling(), 0);
+
+        let g0 = worker.generation();
+        c.set_bias_tee(true);
+        assert!(worker.bias_tee());
+        assert_ne!(worker.generation(), g0);
+
+        let g1 = worker.generation();
+        c.set_direct_sampling(2);
+        assert_eq!(worker.direct_sampling(), 2);
+        assert_ne!(worker.generation(), g1);
     }
 
     #[test]
@@ -864,9 +946,24 @@ mod tests {
         let caps = worker.caps().expect("caps published");
         assert_eq!(caps.tuner, "R820T");
         assert_eq!(caps.gains_db.len(), 29);
-        assert!(!caps.bias_tee_supported);
+        // R820T is a bias-tee-capable, direct-sampling-capable tuner.
+        assert!(caps.bias_tee_supported);
+        assert!(caps.direct_sampling_supported);
         assert!(caps.sample_rates.contains(&DEFAULT_CAPTURE_RATE));
         assert!(caps.freq_min_hz < caps.freq_max_hz);
+    }
+
+    #[test]
+    fn caps_bias_tee_gated_on_tuner_direct_sampling_universal() {
+        // R820T (5) / R828D (6): bias-tee supported. E4000 (1): not.
+        assert!(bias_tee_supported(5));
+        assert!(bias_tee_supported(6));
+        assert!(!bias_tee_supported(1));
+        assert!(!bias_tee_supported(0));
+        // Direct sampling is an ADC feature — every dongle has it.
+        assert!(direct_sampling_supported(1));
+        assert!(direct_sampling_supported(5));
+        assert!(direct_sampling_supported(0));
     }
 
     #[test]
@@ -1116,6 +1213,52 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         drop(cap);
         assert!(ok, "runtime SampleRate(1024000) command not observed");
+    }
+
+    #[test]
+    fn live_bias_tee_and_direct_sampling_reach_the_dongle() {
+        // Phase C: toggling bias-tee / direct-sampling on a running capture must
+        // send the exact 0x0e / 0x09 command frames over the socket.
+        let (port, cmds, stop) = spawn_recording_server();
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let control = backend.control();
+        let cap = backend.open_capture(48_000).unwrap();
+
+        // Scan the concatenated 5-byte frame stream for an exact [op | u32 BE arg].
+        let saw_cmd = |op: u8, arg: u32| -> bool {
+            cmds.lock().unwrap().chunks_exact(5).any(|f| {
+                f[0] == op && u32::from_be_bytes([f[1], f[2], f[3], f[4]]) == arg
+            })
+        };
+        let wait_for = |op: u8, arg: u32, iters: usize| -> bool {
+            for _ in 0..iters {
+                if saw_cmd(op, arg) {
+                    return true;
+                }
+                let _ = cap.rx.recv_timeout(Duration::from_millis(10));
+            }
+            saw_cmd(op, arg)
+        };
+
+        // Connect handshake seeds bias-tee off (0x0e,0) and direct-sampling off
+        // (0x09,0).
+        assert!(wait_for(0x0e, 0, 200), "initial BiasTee(off) not observed");
+        assert!(wait_for(0x09, 0, 200), "initial DirectSampling(off) not observed");
+
+        // Prove the capture thread latched the initial generation before we mutate.
+        assert!(
+            cap.rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "capture produced no audio before the control change"
+        );
+
+        control.set_bias_tee(true);
+        control.set_direct_sampling(2);
+        let bias_ok = wait_for(0x0e, 1, 300);
+        let ds_ok = wait_for(0x09, 2, 300);
+        stop.store(true, Ordering::Relaxed);
+        drop(cap);
+        assert!(bias_ok, "runtime BiasTee(on) command not observed");
+        assert!(ds_ok, "runtime DirectSampling(Q) command not observed");
     }
 
     #[test]

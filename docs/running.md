@@ -64,7 +64,23 @@ Or pass the TUI an explicit path/address:
 - `OMNIMODEM_RUNTIME_DIR` — where the socket + state DB live (default `<tempdir>/omnimodem`).
 - `OMNIMODEM_ROUTABLE_ADDR` — bind a routable mTLS TCP endpoint instead of the UDS (requires TLS material).
 - `OMNIMODEM_PROMETHEUS_ADDR` — expose the Prometheus metrics exporter.
+- `OMNIMODEM_CONFIG` — path to the daemon config file (default `$OMNIMODEM_RUNTIME_DIR/omnimodem.conf`). A missing file is fine.
 - `RUST_LOG` — log level (default `info`).
+
+### Daemon config file
+
+An optional, line-oriented file registers `rtl_tcp` SDR endpoints so `ListDevices`
+surfaces them for selection — useful for remote dongles that no hardware scan can
+find. `#` starts a comment; blank lines are ignored. Malformed lines are skipped
+with a warning rather than failing daemon start. Registration is a convenience:
+any `rtltcp:host:port` can still be bound ad-hoc via `ConfigureAudio` without a
+config entry.
+
+```text
+# <runtime_dir>/omnimodem.conf
+rtl_tcp 192.168.1.50:1234 Rooftop R820T
+rtl_tcp 127.0.0.1:1234
+```
 
 ## Test
 

@@ -8,6 +8,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod proto;
 
+pub mod config;
+
 pub mod ids;
 
 pub mod audio;
@@ -43,6 +45,7 @@ use std::path::Path;
 #[cfg(not(test))]
 pub fn production_core(
     store: persist::Store,
+    registered_devices: Vec<device::DeviceDescriptor>,
 ) -> Result<(core::CoreHandle, std::thread::JoinHandle<()>), persist::StoreError> {
     use audio::backend::{AudioBackend, NullBackend};
     use device::{DeviceDescriptor, RealEnumerator};
@@ -64,7 +67,7 @@ pub fn production_core(
             }
             Box::new(NullBackend::new(audio::MAX_SAMPLE_RATE))
         });
-    Ok(core::spawn(supervisor, enumerator, factory))
+    Ok(core::spawn_with_devices(supervisor, enumerator, factory, registered_devices))
 }
 
 /// Spawn the full control plane (core + gRPC) listening on a UDS at `path`.
@@ -80,7 +83,7 @@ pub async fn serve_uds_no_authz(
     use tokio_stream::wrappers::UnixListenerStream;
 
     let store = persist::Store::open(db_path)?;
-    let (core, _join) = production_core(store)?;
+    let (core, _join) = production_core(store, Vec::new())?;
     let svc = ControlService::new(core);
 
     let _ = std::fs::remove_file(sock_path);
@@ -103,7 +106,7 @@ pub async fn serve_uds_authz_for_test(
     sock_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = persist::Store::open(db_path)?;
-    let (core, _join) = production_core(store)?;
+    let (core, _join) = production_core(store, Vec::new())?;
     let svc = grpc::ControlService::new(core);
     authz::serve_uds(svc, sock_path).await
 }

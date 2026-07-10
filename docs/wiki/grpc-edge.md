@@ -107,8 +107,12 @@ Two controls take effect on the running RX worker without tearing it down:
   the capture thread polls. `SetSdrTune` splits an absolute frequency into hardware
   center + NCO offset via `rtlsdr::plan_tune`. The capture thread publishes tuner
   caps (`GetSdrCaps`) into the cell at connect, and each mutating call broadcasts an
-  `SdrState` telemetry event. Only NBFM is wired in Phase A; other demod modes and
-  bias-tee/direct-sampling return `UNIMPLEMENTED`.
+  `SdrState` telemetry event. Only NBFM is wired; other demod modes return
+  `UNIMPLEMENTED`. Bias-tee and direct-sampling (Phase C) are applied to the shared
+  cell and sent to the dongle on the next capture block; enabling direct-sampling
+  widens the range `GetSdrCaps` reports down to HF. `ListDevices` also merges any
+  `rtl_tcp` endpoints registered in the daemon config file (`config.rs`, seeded via
+  `core::spawn_with_devices`) alongside the live hardware enumeration.
 
 ## TX arbitration: interlock vs lease
 
