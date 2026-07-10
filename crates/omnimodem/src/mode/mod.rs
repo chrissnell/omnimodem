@@ -291,16 +291,23 @@ impl ModeConfig {
     }
 
     /// The RSID key to *announce on TX* for this mode, or `None` when the mode
-    /// must not prepend an identifier burst. This is `rsid_key` for the digital
-    /// modes, but `None` for CW: RSID is a sound-card-mode auto-switch
-    /// identifier, so prepending its MFSK warble ahead of CW keying is never
-    /// useful — it just puts an unwanted digital preamble on the air (GRA-318).
+    /// must not prepend an identifier burst. This is `rsid_key` for the fldigi
+    /// sound-card digital modes, but `None` for modes RSID has no business
+    /// preceding (GRA-318):
+    ///
+    /// - **CW** is keyed by ear, not auto-switched by receiver software.
+    /// - **JT65** is a WSJT-X slot mode that carries its own sync; an fldigi RSID
+    ///   burst ahead of it is both meaningless and would shift the timed slot.
+    ///   Every other WSJT-X mode (FT8/FT4/JT9/JT4/WSPR/FST4/JS8/MSK144) already
+    ///   has no `rsid_key`, so JT65 was the sole leak.
+    ///
     /// The per-channel `rsid_tx` flag is sticky across mode switches, so a
-    /// channel that had RSID on for (say) Olivia carried the burst into CW.
-    /// RX detection still uses the full `rsid_key` table.
+    /// channel that had RSID on for (say) Olivia carried the burst into these
+    /// modes. RX detection still uses the full `rsid_key` table, so CW and JT65
+    /// remain identifiable on receive.
     pub fn rsid_tx_key(&self) -> Option<String> {
         match self {
-            ModeConfig::Cw { .. } => None,
+            ModeConfig::Cw { .. } | ModeConfig::Jt65 => None,
             _ => self.rsid_key(),
         }
     }
@@ -448,20 +455,46 @@ impl omnimodem_dsp::mode::Modulator for NullMode {
 mod tests {
     use super::*;
 
-    // GRA-318: CW must not announce an RSID burst on TX even though it carries an
-    // `rsid_key` for RX detection — the sticky per-channel `rsid_tx` flag used to
-    // carry a prior digital mode's RSID into CW, prefixing every CW send with an
-    // MFSK warble. Every other RSID mode still announces its key.
+    // GRA-318: RSID is an fldigi sound-card-mode identifier. It must never be
+    // announced ahead of CW (keyed by ear) or any WSJT-X mode (their own sync +
+    // timed slots) — the sticky per-channel `rsid_tx` flag used to carry a prior
+    // digital mode's RSID into these on a mode switch, prefixing the send with an
+    // MFSK warble. This locks the emitting set: no non-fldigi mode may announce.
     #[test]
-    fn cw_has_no_tx_rsid_but_keeps_its_detection_key() {
-        let cw = ModeConfig::Cw { wpm: 20, tone_hz: 700.0 };
-        assert_eq!(cw.rsid_key().as_deref(), Some("cw"));
-        assert_eq!(cw.rsid_tx_key(), None);
+    fn tx_rsid_never_announces_on_cw_or_wsjtx_modes() {
+        // Modes that must NOT prepend a TX burst, regardless of rsid_tx.
+        let never = [
+            ModeConfig::Cw { wpm: 20, tone_hz: 700.0 },
+            ModeConfig::Ft8,
+            ModeConfig::Ft4,
+            ModeConfig::Jt65,
+            ModeConfig::Jt9,
+            ModeConfig::Wspr,
+            ModeConfig::Fst4 { tr_s: 15 },
+            ModeConfig::Js8 { submode: "normal".into() },
+            ModeConfig::Jt4 { submode: "jt4a".into() },
+            ModeConfig::Msk144 { freq_hz: 1500.0 },
+        ];
+        for m in &never {
+            assert_eq!(m.rsid_tx_key(), None, "{m:?} must not announce RSID on TX");
+        }
 
-        // A representative digital mode still announces on TX.
-        let olivia = ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 };
-        assert_eq!(olivia.rsid_tx_key(), olivia.rsid_key());
-        assert!(olivia.rsid_tx_key().is_some());
+        // CW and JT65 still carry a detection key so RX can identify them.
+        assert_eq!(ModeConfig::Cw { wpm: 20, tone_hz: 700.0 }.rsid_key().as_deref(), Some("cw"));
+        assert_eq!(ModeConfig::Jt65.rsid_key().as_deref(), Some("jt65"));
+
+        // Representative fldigi sound-card modes DO announce, unchanged.
+        for m in [
+            ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 },
+            ModeConfig::Contestia { tones: 8, bandwidth_hz: 250 },
+            ModeConfig::Psk { submode: "psk31".into(), center_hz: 1000.0 },
+            ModeConfig::Mfsk { submode: "mfsk16".into(), center_hz: 1500.0 },
+            ModeConfig::Thor { submode: "thor22".into(), center_hz: 1500.0 },
+            ModeConfig::Rtty { baud: 45.45, shift_hz: 170.0, center_hz: 2210.0, reverse: false },
+        ] {
+            assert_eq!(m.rsid_tx_key(), m.rsid_key(), "{m:?} TX key must match its detection key");
+            assert!(m.rsid_tx_key().is_some(), "{m:?} should announce RSID on TX");
+        }
     }
 
     #[test]
