@@ -290,6 +290,21 @@ impl ModeConfig {
         }
     }
 
+    /// The RSID key to *announce on TX* for this mode, or `None` when the mode
+    /// must not prepend an identifier burst. This is `rsid_key` for the digital
+    /// modes, but `None` for CW: RSID is a sound-card-mode auto-switch
+    /// identifier, so prepending its MFSK warble ahead of CW keying is never
+    /// useful — it just puts an unwanted digital preamble on the air (GRA-318).
+    /// The per-channel `rsid_tx` flag is sticky across mode switches, so a
+    /// channel that had RSID on for (say) Olivia carried the burst into CW.
+    /// RX detection still uses the full `rsid_key` table.
+    pub fn rsid_tx_key(&self) -> Option<String> {
+        match self {
+            ModeConfig::Cw { .. } => None,
+            _ => self.rsid_key(),
+        }
+    }
+
     /// The audio offset (Hz) at which this mode's RSID burst is transmitted —
     /// the mode's carrier where it has one, else a sensible default.
     pub fn rsid_center_hz(&self) -> f32 {
@@ -432,6 +447,22 @@ impl omnimodem_dsp::mode::Modulator for NullMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // GRA-318: CW must not announce an RSID burst on TX even though it carries an
+    // `rsid_key` for RX detection — the sticky per-channel `rsid_tx` flag used to
+    // carry a prior digital mode's RSID into CW, prefixing every CW send with an
+    // MFSK warble. Every other RSID mode still announces its key.
+    #[test]
+    fn cw_has_no_tx_rsid_but_keeps_its_detection_key() {
+        let cw = ModeConfig::Cw { wpm: 20, tone_hz: 700.0 };
+        assert_eq!(cw.rsid_key().as_deref(), Some("cw"));
+        assert_eq!(cw.rsid_tx_key(), None);
+
+        // A representative digital mode still announces on TX.
+        let olivia = ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 };
+        assert_eq!(olivia.rsid_tx_key(), olivia.rsid_key());
+        assert!(olivia.rsid_tx_key().is_some());
+    }
 
     #[test]
     fn every_rsid_mode_string_parses_and_round_trips() {
