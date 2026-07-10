@@ -19,7 +19,9 @@ pub mod tx_worker;
 pub(crate) use gain::AudioGain;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
-use crate::audio::rtlsdr::SdrControl;
+use crate::audio::rtlsdr::{
+    plan_tune, snap_gain, supported_sample_rates, DemodMode, SdrControl,
+};
 use crate::core::clock::ClockSource;
 use crate::core::rx_worker::RxWorker;
 use crate::core::tx_worker::{TxJob, TxWorker, TxWorkerCfg};
@@ -32,7 +34,10 @@ use crate::ptt::lease::TxLeaseRegistry;
 use crate::ptt::sequence::{drive_tx_cycle, TxCycleOutcome};
 use crate::ptt::{PttDriver, PttError};
 use crate::supervisor::Supervisor;
-use command::{Command, ConfigureAudioOk, ConfigureSpectrumOk};
+use command::{
+    Command, ConfigureAudioOk, ConfigureSdrOk, ConfigureSpectrumOk, SdrCapsOk, SdrGainOk,
+    SdrTuneOk,
+};
 use error::CoreError;
 use event::{FrameEvent, TelemetryEvent};
 use std::collections::HashMap;
@@ -396,6 +401,38 @@ fn handle_command(
             let _ = reply.send(res);
         }
 
+        Command::SetSdrTune { channel, freq_hz, reply } => {
+            let res = set_sdr_tune(live, channel, freq_hz, telemetry);
+            let _ = reply.send(res);
+        }
+
+        Command::SetSdrGain { channel, auto, gain_db, reply } => {
+            let res = set_sdr_gain(live, channel, auto, gain_db, telemetry);
+            let _ = reply.send(res);
+        }
+
+        Command::ConfigureSdr {
+            channel,
+            capture_rate,
+            demod_mode,
+            squelch_db,
+            ppm,
+            bias_tee,
+            direct_sampling,
+            reply,
+        } => {
+            let res = configure_sdr(
+                live, channel, capture_rate, demod_mode, squelch_db, ppm, bias_tee,
+                direct_sampling, telemetry,
+            );
+            let _ = reply.send(res);
+        }
+
+        Command::GetSdrCaps { channel, reply } => {
+            let res = get_sdr_caps(live, channel);
+            let _ = reply.send(res);
+        }
+
         Command::Shutdown => {} // handled in run()
     }
 }
@@ -439,6 +476,165 @@ fn configure_spectrum(
         rate_hz: setup.rate_hz,
         freq_start_hz: setup.plan.freq_start_hz,
         freq_step_hz: setup.plan.freq_step_hz,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SDR (rtl_tcp) runtime control
+// ---------------------------------------------------------------------------
+
+/// The channel's SDR control cell, or `SdrRequired` when the channel is not bound
+/// to an `rtl_tcp` source (the cell exists only for SDR-bound channels).
+fn sdr_control<'a>(
+    live: &'a LiveBindings,
+    channel: ChannelId,
+) -> Result<&'a SdrControl, CoreError> {
+    live.sdr_controls.get(&channel).ok_or(CoreError::SdrRequired(channel))
+}
+
+/// Broadcast the channel's current SDR state so multiple/late-joining clients stay
+/// in sync. Called after every mutating SDR RPC.
+fn emit_sdr_state(
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+    channel: ChannelId,
+    control: &SdrControl,
+) {
+    let center_hz = control.center_hz();
+    let offset_hz = control.offset_hz() as f64;
+    let _ = telemetry.send(TelemetryEvent::SdrState {
+        channel,
+        center_hz,
+        offset_hz,
+        freq_hz: center_hz + offset_hz,
+        gain_auto: control.gain_auto(),
+        gain_db: control.gain_db(),
+        demod_mode: control.demod_mode() as u8,
+        squelch_db: control.squelch_db(),
+    });
+}
+
+/// Tune an SDR channel to an absolute frequency, splitting into hardware center +
+/// NCO offset (the gqrx model). Mutates the shared control (the capture thread
+/// picks it up on its next block) and broadcasts the new state.
+fn set_sdr_tune(
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    freq_hz: f64,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) -> Result<SdrTuneOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+    let (center, offset) = plan_tune(control.center_hz(), control.capture_rate(), freq_hz);
+    control.set_center_hz(center);
+    control.set_offset_hz(offset);
+    emit_sdr_state(telemetry, channel, control);
+    let offset = offset as f64;
+    Ok(SdrTuneOk { actual_freq_hz: center + offset, center_hz: center, offset_hz: offset })
+}
+
+/// Set an SDR channel's gain: auto AGC, or a manual value snapped to the tuner's
+/// discrete gain table (when caps are known). Echoes the applied gain.
+fn set_sdr_gain(
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    auto: bool,
+    gain_db: f32,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) -> Result<SdrGainOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+    let applied = if auto {
+        control.set_gain(true, 0.0);
+        0.0
+    } else {
+        // Snap to the nearest table entry so the echoed gain is what the dongle
+        // will actually use; an unknown tuner (no table) passes the value through.
+        let snapped = match control.caps() {
+            Some(caps) => snap_gain(&caps.gains_db, gain_db),
+            None => gain_db,
+        };
+        control.set_gain(false, snapped);
+        snapped
+    };
+    emit_sdr_state(telemetry, channel, control);
+    Ok(SdrGainOk { actual_gain_db: applied })
+}
+
+/// Configure an SDR channel's source parameters. Rejects unimplemented Phase-A
+/// features (non-NBFM demod modes, bias-tee, direct-sampling) with `Unimplemented`;
+/// applies capture rate / squelch / ppm and echoes the effective capture rate.
+#[allow(clippy::too_many_arguments)]
+fn configure_sdr(
+    live: &mut LiveBindings,
+    channel: ChannelId,
+    capture_rate: u32,
+    demod_mode: u8,
+    squelch_db: f32,
+    ppm: i32,
+    bias_tee: bool,
+    direct_sampling: bool,
+    telemetry: &broadcast::Sender<TelemetryEvent>,
+) -> Result<ConfigureSdrOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+
+    // Phase A implements only NBFM; the enum ships complete but the rest defer.
+    let mode = DemodMode::from_u8(demod_mode);
+    if mode != DemodMode::Nbfm {
+        return Err(CoreError::Unimplemented(format!(
+            "demod mode {mode:?} lands in Phase B; only NBFM is implemented"
+        )));
+    }
+    // Bias-tee / direct-sampling are Phase C: accepted in the message but not yet
+    // wired. Requesting either errors; leaving them false is a no-op.
+    if bias_tee {
+        return Err(CoreError::Unimplemented("bias_tee is deferred to Phase C".into()));
+    }
+    if direct_sampling {
+        return Err(CoreError::Unimplemented(
+            "direct_sampling is deferred to Phase C".into(),
+        ));
+    }
+
+    // Capture rate: 0 = unchanged; otherwise it must be a rate the dongle accepts.
+    let actual_capture_rate = if capture_rate == 0 {
+        control.capture_rate()
+    } else {
+        if !supported_sample_rates().contains(&capture_rate) {
+            return Err(CoreError::Audio(crate::audio::AudioError::Io(format!(
+                "unsupported capture rate {capture_rate} Hz"
+            ))));
+        }
+        control.set_capture_rate(capture_rate);
+        capture_rate
+    };
+
+    control.set_demod_mode(mode);
+    control.set_squelch_db(squelch_db);
+    control.set_ppm(ppm);
+    emit_sdr_state(telemetry, channel, control);
+    Ok(ConfigureSdrOk { actual_capture_rate })
+}
+
+/// Read an SDR channel's tuner capabilities (published by the capture thread at
+/// connect). `SdrRequired` if the channel is not SDR-bound; a bound channel whose
+/// capture has not yet parsed the header reports an empty/unknown tuner.
+fn get_sdr_caps(live: &LiveBindings, channel: ChannelId) -> Result<SdrCapsOk, CoreError> {
+    let control = sdr_control(live, channel)?;
+    let caps = control.caps().unwrap_or_else(|| crate::audio::rtlsdr::TunerCaps {
+        tuner: "unknown".into(),
+        freq_min_hz: 0.0,
+        freq_max_hz: 0.0,
+        sample_rates: supported_sample_rates(),
+        gains_db: Vec::new(),
+        bias_tee_supported: false,
+        direct_sampling_supported: false,
+    });
+    Ok(SdrCapsOk {
+        tuner: caps.tuner,
+        freq_min_hz: caps.freq_min_hz,
+        freq_max_hz: caps.freq_max_hz,
+        sample_rates: caps.sample_rates,
+        gains_db: caps.gains_db,
+        bias_tee_supported: caps.bias_tee_supported,
+        direct_sampling_supported: caps.direct_sampling_supported,
     })
 }
 

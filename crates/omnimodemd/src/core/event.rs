@@ -79,4 +79,17 @@ pub enum TelemetryEvent {
         /// True for the transmitted (TX) spectrum, false for received (RX).
         transmit: bool,
     },
+    /// Current SDR tuner/demod state for a channel (lossy: only the latest
+    /// matters). Broadcast on each SetSdrTune/SetSdrGain/ConfigureSdr so multiple
+    /// and late-joining clients stay in sync. `demod_mode` is `DemodMode as u8`.
+    SdrState {
+        channel: ChannelId,
+        center_hz: f64,
+        offset_hz: f64,
+        freq_hz: f64,
+        gain_auto: bool,
+        gain_db: f32,
+        demod_mode: u8,
+        squelch_db: f32,
+    },
 }

@@ -260,7 +260,7 @@ pub enum DemodMode {
 }
 
 impl DemodMode {
-    fn from_u8(v: u8) -> DemodMode {
+    pub fn from_u8(v: u8) -> DemodMode {
         match v {
             1 => DemodMode::Am,
             2 => DemodMode::Wfm,

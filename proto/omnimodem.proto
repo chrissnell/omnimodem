@@ -67,6 +67,30 @@ service ModemControl {
   // so the FFT costs nothing when no one is watching. Echoes the actual clamped
   // params; takes effect on the running RX worker. Idempotent per channel.
   rpc ConfigureSpectrum(ConfigureSpectrumRequest) returns (ConfigureSpectrumResponse);
+
+  // --- SDR (rtl_tcp) runtime control (Phase A) ------------------------------
+  // These drive an SDR-bound channel's tuner/demod at runtime. The channel must
+  // be bound to an `rtltcp:host:port` device (via ConfigureAudio) first, else
+  // FAILED_PRECONDITION.
+
+  // Point-and-shoot tuning: set the absolute demod frequency. The daemon splits
+  // it into a hardware center + NCO offset (the gqrx wideband model) so small
+  // moves are instant and lossless. Echoes the resolved center/offset.
+  rpc SetSdrTune(SetSdrTuneRequest) returns (SetSdrTuneResponse);
+
+  // Set tuner gain: automatic hardware AGC, or a manual gain snapped to the
+  // tuner's discrete table (see GetSdrCaps). Echoes the gain actually applied.
+  rpc SetSdrGain(SetSdrGainRequest) returns (SetSdrGainResponse);
+
+  // Source-wide SDR config: capture rate, demod mode, squelch, ppm. Only NBFM is
+  // implemented in Phase A (other DemodMode values return UNIMPLEMENTED);
+  // bias_tee/direct_sampling are Phase C (requesting either returns UNIMPLEMENTED,
+  // leaving them false is a no-op). Echoes the actual capture rate.
+  rpc ConfigureSdr(ConfigureSdrRequest) returns (ConfigureSdrResponse);
+
+  // Query the bound tuner's capabilities (tuner name, RF range, valid capture
+  // rates, discrete gain table) for building UIs and validating requests.
+  rpc GetSdrCaps(GetSdrCapsRequest) returns (GetSdrCapsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +334,22 @@ message Event {
     ChannelMetrics channel_metrics = 12; // LOSSY
     SpectrumFrame spectrum_frame = 13;   // LOSSY class
     RsidDetected rsid_detected = 14;     // LOSSY class
+    SdrState sdr_state = 15;             // LOSSY class
   }
+}
+
+// Current SDR tuner/demod state for a channel. LOSSY class — broadcast whenever a
+// SetSdrTune/SetSdrGain/ConfigureSdr changes it, so multiple/late-joining clients
+// stay in sync with the effective tune, gain, demod mode, and squelch.
+message SdrState {
+  uint32    channel     = 1;
+  double    center_hz   = 2;   // hardware center frequency
+  double    offset_hz   = 3;   // NCO channel-select offset from center
+  double    freq_hz     = 4;   // effective demod frequency (center + offset)
+  bool      gain_auto   = 5;   // true: hardware AGC; false: manual gain_db
+  float     gain_db     = 6;   // manual tuner gain (meaningful when !gain_auto)
+  DemodMode demod_mode  = 7;
+  float     squelch_db  = 8;   // dBFS open threshold; <= -200 means disabled
 }
 
 // A received RSID burst was identified. LOSSY class — advisory, the operator
@@ -552,4 +591,58 @@ message ConfigureSpectrumResponse {
   uint32 rate_hz       = 3;  // actual achievable lines/sec (see hop constraint)
   float  freq_start_hz = 4;  // matches SpectrumFrame.freq_start_hz
   float  freq_step_hz  = 5;  // matches SpectrumFrame.freq_step_hz
+}
+
+// SDR demodulator. The enum ships COMPLETE in Phase A so external clients can code
+// against the full set; only DEMOD_NBFM is implemented — the rest return
+// UNIMPLEMENTED until their phase (AM/WFM/SSB land in Phase B).
+enum DemodMode {
+  DEMOD_NBFM = 0;   // narrowband FM (Phase A)
+  DEMOD_AM   = 1;   // Phase B
+  DEMOD_WFM  = 2;   // Phase B
+  DEMOD_USB  = 3;   // Phase B
+  DEMOD_LSB  = 4;   // Phase B
+}
+
+message SetSdrTuneRequest {
+  uint32 channel = 1;
+  double freq_hz = 2;   // absolute demod frequency (Hz)
+}
+message SetSdrTuneResponse {
+  double actual_freq_hz = 1;  // resolved effective frequency (center + offset)
+  double center_hz      = 2;  // hardware center chosen by the split
+  double offset_hz      = 3;  // NCO offset chosen by the split
+}
+
+message SetSdrGainRequest {
+  uint32 channel = 1;
+  bool   auto    = 2;   // true: hardware AGC (gain_db ignored)
+  float  gain_db = 3;   // manual tuner gain; snapped to the tuner's table
+}
+message SetSdrGainResponse {
+  float actual_gain_db = 1;  // gain actually applied (0 when auto)
+}
+
+message ConfigureSdrRequest {
+  uint32    channel         = 1;
+  uint32    capture_rate    = 2;  // dongle sample rate (Hz); 0 = unchanged
+  DemodMode demod_mode      = 3;  // only DEMOD_NBFM implemented in Phase A
+  float     squelch_db      = 4;  // dBFS open threshold; <= -200 disables squelch
+  int32     ppm             = 5;  // frequency correction (ppm)
+  bool      bias_tee        = 6;  // Phase C: true returns UNIMPLEMENTED
+  bool      direct_sampling = 7;  // Phase C: true returns UNIMPLEMENTED
+}
+message ConfigureSdrResponse {
+  uint32 actual_capture_rate = 1;
+}
+
+message GetSdrCapsRequest { uint32 channel = 1; }
+message GetSdrCapsResponse {
+  string          tuner        = 1;   // "R820T", "E4000", ...
+  double          freq_min_hz  = 2;
+  double          freq_max_hz  = 3;
+  repeated uint32 sample_rates = 4;   // valid capture rates
+  repeated float  gains_db     = 5;   // discrete tuner gain table
+  bool   bias_tee_supported        = 6;
+  bool   direct_sampling_supported = 7;
 }

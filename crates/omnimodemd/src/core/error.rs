@@ -16,6 +16,14 @@ pub enum CoreError {
     Audio(#[from] crate::audio::AudioError),
     #[error("ptt error: {0}")]
     Ptt(#[from] crate::ptt::PttError),
+    /// A requested capability exists in the API but is not yet implemented (e.g. a
+    /// non-NBFM demod mode, or bias-tee/direct-sampling in Phase A).
+    #[error("not implemented: {0}")]
+    Unimplemented(String),
+    /// The RPC targets an SDR-only control but the channel is not bound to an
+    /// `rtl_tcp` SDR source.
+    #[error("channel {0:?} is not bound to an SDR source")]
+    SdrRequired(ChannelId),
     #[error("core shutting down")]
     Closed,
 }
