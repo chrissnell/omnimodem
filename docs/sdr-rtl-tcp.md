@@ -102,10 +102,11 @@ The `rtl_tcp` input is built to run unattended:
   outage never tears down the channel or loses where you were listening; RX just
   resumes. Reconnect attempts and drops are logged (`RUST_LOG=info`).
 - **Overrun handling.** If the decoder can't keep up with the incoming audio (a very
-  busy machine, a slow mode), the capture **drops the oldest queued audio and keeps
-  reading** rather than stalling the dongle — so you stay near real-time instead of
-  falling further and further behind. Dropped audio is counted and logged (a warning
-  every 64 dropped chunks) so overruns are visible, not silent.
+  busy machine, a slow mode), the capture **drops the oldest queued-but-undelivered
+  audio and keeps reading** rather than stalling the dongle — so latency stays bounded
+  and you stay near real-time instead of falling further and further behind. Dropped
+  audio is counted and logged (on the first drop, then throttled to one warning per 64
+  dropped chunks) so overruns are visible, not silent.
 - **Multiple clients (last-writer-wins).** The tune/gain/mode state is shared per
   channel, so if two clients (say two TUI windows, or a script and the TUI) both
   control the same SDR channel, the **most recent** `SetSdrTune` / `SetSdrGain` /

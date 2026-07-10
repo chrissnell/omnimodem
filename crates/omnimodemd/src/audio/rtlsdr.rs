@@ -20,7 +20,7 @@ use omnimodem_dsp::frontend::spectrum::{full_spectrum_dbfs, SpectrumPlan};
 use omnimodem_dsp::frontend::squelch::PowerSquelch;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
@@ -56,6 +56,12 @@ const RECONNECT_BACKOFF: &[Duration] = &[
 ];
 /// Clear the backoff after a connection that streamed stably this long.
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
+/// Bound the connect + header read so a half-open / stalled server cannot park the
+/// capture thread indefinitely — the stop hook can only shut down the *live*
+/// streaming socket, not one still mid-handshake, so these steps must self-limit
+/// for `stop` to be honored promptly after a reconnect.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Log at most one overrun warning per this many dropped chunks, so a persistent
 /// lag does not flood the log while still surfacing the running total.
 const OVERRUN_LOG_EVERY: u64 = 64;
@@ -599,15 +605,45 @@ fn connect_and_handshake(
     addr: &str,
     control: &SdrControl,
 ) -> Result<(TcpStream, TcpStream), AudioError> {
-    let mut sock = TcpStream::connect(addr)
-        .map_err(|e| AudioError::Io(format!("rtl_tcp connect {addr}: {e}")))?;
+    let mut sock = connect_with_timeout(addr, CONNECT_TIMEOUT)?;
+    // Bound the header read: a server that accepts but never sends the greeting
+    // must not park the thread (it isn't in the shutdown slot until handshake
+    // completes, so the stop hook cannot reach it).
+    sock.set_read_timeout(Some(HEADER_READ_TIMEOUT))
+        .map_err(|e| AudioError::Io(e.to_string()))?;
     let mut header = [0u8; 12];
     sock.read_exact(&mut header).map_err(|e| AudioError::Io(e.to_string()))?;
+    // Restore blocking reads for the streaming loop, which is instead unblocked by
+    // the stop hook shutting the (now published) socket down.
+    sock.set_read_timeout(None).map_err(|e| AudioError::Io(e.to_string()))?;
     let hdr = parse_header(&header)?;
     control.set_caps(caps_from_header(&hdr));
     send_initial_commands(&mut sock, control.capture_rate(), control)?;
     let cmd_sock = sock.try_clone().map_err(|e| AudioError::Io(e.to_string()))?;
     Ok((sock, cmd_sock))
+}
+
+/// Connect to `addr` with a bounded timeout, trying each resolved socket address.
+/// `TcpStream::connect` blocks with no ceiling on a half-open host, which would
+/// leave a reconnecting capture thread unable to observe `stop`; `connect_timeout`
+/// needs a resolved `SocketAddr`, so resolve first and try them in turn.
+fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, AudioError> {
+    let resolved = addr
+        .to_socket_addrs()
+        .map_err(|e| AudioError::Io(format!("rtl_tcp resolve {addr}: {e}")))?;
+    let mut last_err: Option<std::io::Error> = None;
+    for sa in resolved {
+        match TcpStream::connect_timeout(&sa, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(AudioError::Io(format!(
+        "rtl_tcp connect {addr}: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no addresses resolved".to_string())
+    )))
 }
 
 /// Sleep one reconnect-backoff step, waking every 100 ms to honor `stop`, then
@@ -631,10 +667,13 @@ enum Delivery {
 }
 
 /// Deliver `chunk` to the bounded consumer channel without ever blocking the
-/// socket read. `backlog` stages whatever the channel won't accept right now;
-/// when it grows past `CHUNK_QUEUE_DEPTH` the **oldest** queued chunk is dropped
-/// (a live modem wants fresh audio, not a stale backlog) and counted on
-/// `control`. Returns `ConsumerGone` once the receiver is gone.
+/// socket read. `backlog` stages whatever the channel won't accept right now; when
+/// the *backlog* grows past `CHUNK_QUEUE_DEPTH` its oldest chunk is dropped (a live
+/// modem wants fresh audio, not stale backlog) and counted on `control`. Note the
+/// dropped chunk is the oldest *un-accepted* one — the strictly-oldest chunks are
+/// already in the consumer channel — so worst-case buffering is the channel depth
+/// plus the backlog depth (~2·`CHUNK_QUEUE_DEPTH`), which bounds latency without a
+/// second thread. Returns `ConsumerGone` once the receiver is gone.
 fn deliver_audio(
     tx: &SyncSender<AudioChunk>,
     backlog: &mut VecDeque<AudioChunk>,
@@ -658,10 +697,12 @@ fn deliver_audio(
     while backlog.len() > CHUNK_QUEUE_DEPTH {
         backlog.pop_front();
         let total = control.incr_dropped();
-        if total.is_multiple_of(OVERRUN_LOG_EVERY) {
+        // Surface the onset (first-ever drop) immediately, then rate-limit so a
+        // sustained lag reports its running total without flooding the log.
+        if total == 1 || total.is_multiple_of(OVERRUN_LOG_EVERY) {
             tracing::warn!(
                 dropped = total,
-                "rtl_tcp capture overrun: consumer lagging, dropped oldest audio"
+                "rtl_tcp capture overrun: consumer lagging, dropped oldest queued audio"
             );
         }
     }
@@ -1625,6 +1666,33 @@ mod tests {
         });
         let backend = RtlTcpBackend::new("127.0.0.1", port);
         assert!(backend.open_capture(48_000).is_err());
+    }
+
+    #[test]
+    fn stalled_header_times_out_instead_of_hanging() {
+        // A server that accepts the connection but never sends the 12-byte greeting
+        // must not park the capture indefinitely: the bounded header-read timeout
+        // makes `open_capture` fail (well within the timeout budget) rather than
+        // hang forever. Guards the reconnect-honors-stop invariant at the handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hold = std::thread::spawn(move || {
+            // Accept and then sit silent until the client gives up and closes.
+            let (sock, _) = listener.accept().unwrap();
+            let mut sink = [0u8; 64];
+            let mut s = sock;
+            let _ = s.read(&mut sink);
+        });
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let started = std::time::Instant::now();
+        let result = backend.open_capture(48_000);
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "stalled header should fail open_capture");
+        assert!(
+            elapsed < HEADER_READ_TIMEOUT + Duration::from_secs(5),
+            "open_capture hung past the header-read timeout ({elapsed:?})"
+        );
+        drop(hold);
     }
 
     #[test]
