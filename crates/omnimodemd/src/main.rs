@@ -37,6 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("{warning}");
     }
 
+    tracing::info!(
+        version = omnimodemd::VERSION,
+        runtime_dir = %runtime_dir.display(),
+        "omnimodemd starting",
+    );
     let store = Store::open(&db_path)?;
     let (core_handle, _join) = omnimodemd::production_core(store)?;
 
