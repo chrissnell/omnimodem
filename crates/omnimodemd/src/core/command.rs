@@ -95,7 +95,73 @@ pub enum Command {
         freq_hi_hz: f32,
         reply: oneshot::Sender<Result<ConfigureSpectrumOk, CoreError>>,
     },
+    /// Tune an SDR-bound channel to an absolute frequency. The core splits it into
+    /// a hardware center + NCO offset and mutates the channel's `SdrControl`.
+    SetSdrTune {
+        channel: ChannelId,
+        freq_hz: f64,
+        reply: oneshot::Sender<Result<SdrTuneOk, CoreError>>,
+    },
+    /// Set an SDR-bound channel's tuner gain (auto AGC or a manual, table-snapped
+    /// value).
+    SetSdrGain {
+        channel: ChannelId,
+        auto: bool,
+        gain_db: f32,
+        reply: oneshot::Sender<Result<SdrGainOk, CoreError>>,
+    },
+    /// Configure an SDR-bound channel's source parameters. `demod_mode` is the
+    /// `DemodMode as u8`; non-NBFM modes and `bias_tee`/`direct_sampling` are
+    /// rejected as unimplemented in Phase A.
+    ConfigureSdr {
+        channel: ChannelId,
+        capture_rate: u32,
+        demod_mode: u8,
+        squelch_db: f32,
+        ppm: i32,
+        bias_tee: bool,
+        direct_sampling: bool,
+        reply: oneshot::Sender<Result<ConfigureSdrOk, CoreError>>,
+    },
+    /// Read an SDR-bound channel's tuner capabilities (published by the capture
+    /// thread at connect).
+    GetSdrCaps {
+        channel: ChannelId,
+        reply: oneshot::Sender<Result<SdrCapsOk, CoreError>>,
+    },
     Shutdown,
+}
+
+/// Resolved tune split echoed by `SetSdrTune`.
+#[derive(Debug, Clone, Copy)]
+pub struct SdrTuneOk {
+    pub actual_freq_hz: f64,
+    pub center_hz: f64,
+    pub offset_hz: f64,
+}
+
+/// The gain actually applied by `SetSdrGain` (0.0 when auto).
+#[derive(Debug, Clone, Copy)]
+pub struct SdrGainOk {
+    pub actual_gain_db: f32,
+}
+
+/// The capture rate in effect after `ConfigureSdr`.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigureSdrOk {
+    pub actual_capture_rate: u32,
+}
+
+/// Tuner capabilities echoed by `GetSdrCaps`.
+#[derive(Debug, Clone)]
+pub struct SdrCapsOk {
+    pub tuner: String,
+    pub freq_min_hz: f64,
+    pub freq_max_hz: f64,
+    pub sample_rates: Vec<u32>,
+    pub gains_db: Vec<f32>,
+    pub bias_tee_supported: bool,
+    pub direct_sampling_supported: bool,
 }
 
 /// Actual, clamped spectrum params echoed by `ConfigureSpectrum` (all zero when

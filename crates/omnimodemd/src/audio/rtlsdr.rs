@@ -22,7 +22,7 @@ use std::net::TcpStream;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// Default dongle capture (sample) rate. 240 kHz captures a comfortable slice of
@@ -79,6 +79,138 @@ pub fn tuner_name(t: u32) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Tuner capabilities
+// ---------------------------------------------------------------------------
+
+/// What a bound `rtl_tcp` tuner can do, derived from the connect-time header
+/// (tuner type) plus per-tuner static tables — `rtl_tcp` reports the tuner and a
+/// gain-table *count*, but not the frequency range or the gain values, so those
+/// come from librtlsdr's known tables. Published into [`SdrControl`] by the
+/// capture thread and read by `GetSdrCaps`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TunerCaps {
+    pub tuner: String,
+    pub freq_min_hz: f64,
+    pub freq_max_hz: f64,
+    pub sample_rates: Vec<u32>,
+    pub gains_db: Vec<f32>,
+    pub bias_tee_supported: bool,
+    pub direct_sampling_supported: bool,
+}
+
+/// Tunable RF range (Hz) for a tuner-type code. Conservative published ranges
+/// from librtlsdr; the default covers the common R820-class span.
+pub fn tuner_freq_range(t: u32) -> (f64, f64) {
+    match t {
+        1 => (52_000_000.0, 2_200_000_000.0),   // E4000 (has an internal gap)
+        2 | 3 => (22_000_000.0, 1_100_000_000.0), // FC0012/FC0013
+        4 => (146_000_000.0, 924_000_000.0),     // FC2580
+        5 | 6 => (24_000_000.0, 1_766_000_000.0), // R820T / R828D
+        _ => (24_000_000.0, 1_766_000_000.0),
+    }
+}
+
+/// Discrete tuner gain table (dB) for a tuner-type code — the values librtlsdr
+/// exposes for manual gain. `SetSdrGain` snaps a requested gain to the nearest
+/// entry.
+pub fn tuner_gains_db(t: u32) -> Vec<f32> {
+    match t {
+        // R820T / R828D: the canonical 29-step table (librtlsdr `r82xx`).
+        5 | 6 => vec![
+            0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7,
+            22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4,
+            43.9, 44.5, 48.0, 49.6,
+        ],
+        // E4000: librtlsdr's 14-step table.
+        1 => vec![
+            -1.0, 1.5, 4.0, 6.5, 9.0, 11.5, 14.0, 16.5, 19.0, 21.5, 24.0, 29.0,
+            34.0, 42.0,
+        ],
+        // FC0012/FC0013/FC2580 and unknown: a coarse fallback ramp.
+        _ => vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0],
+    }
+}
+
+/// The capture (sample) rates `rtl_tcp`/librtlsdr accepts, plus omnimodem's
+/// 240 kHz default. `ConfigureSdr` validates a requested rate against this set.
+pub fn supported_sample_rates() -> Vec<u32> {
+    vec![
+        DEFAULT_CAPTURE_RATE,
+        250_000,
+        1_024_000,
+        1_536_000,
+        1_792_000,
+        1_920_000,
+        2_048_000,
+        2_160_000,
+        2_400_000,
+        2_560_000,
+        2_880_000,
+        3_200_000,
+    ]
+}
+
+/// Compose the published capabilities from a parsed header. Bias-tee and
+/// direct-sampling are Phase C, so both are reported unsupported for now.
+pub fn caps_from_header(h: &RtlHeader) -> TunerCaps {
+    let (freq_min_hz, freq_max_hz) = tuner_freq_range(h.tuner_type);
+    TunerCaps {
+        tuner: tuner_name(h.tuner_type).to_string(),
+        freq_min_hz,
+        freq_max_hz,
+        sample_rates: supported_sample_rates(),
+        gains_db: tuner_gains_db(h.tuner_type),
+        bias_tee_supported: false,
+        direct_sampling_supported: false,
+    }
+}
+
+/// Nearest entry in a discrete gain table to `want` (dB). Returns `want`
+/// unchanged when the table is empty (unknown tuner). Used by `SetSdrGain` to
+/// report the gain the dongle will actually snap to. A non-finite `want` is not
+/// expected here — the gRPC handler rejects it — so the `Equal` fallback (which
+/// would return the first entry) is a harmless belt-and-suspenders default.
+pub fn snap_gain(table: &[f32], want: f32) -> f32 {
+    table
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            (a - want).abs().partial_cmp(&(b - want).abs()).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(want)
+}
+
+// ---------------------------------------------------------------------------
+// Tune planning (the "gqrx" center + NCO split)
+// ---------------------------------------------------------------------------
+
+/// Fraction of the captured band, measured from center, the NCO offset may reach
+/// before a hardware re-center is forced. Keeping to the central 80% (±0.4·rate)
+/// stays clear of the anti-alias roll-off at the band edges.
+const TUNE_MAX_OFFSET_FRAC: f64 = 0.4;
+/// Where a re-center places the signal: a quarter-band above the new hardware
+/// center, so it avoids the dongle's DC spike (I/Q imbalance) at exact center.
+const TUNE_RECENTER_OFFSET_FRAC: f64 = 0.25;
+
+/// Split an absolute demod frequency into (hardware center, NCO offset) for the
+/// gqrx wideband model. When the target already sits within the usable span of
+/// the current center, only the NCO moves (instant, lossless); otherwise the
+/// hardware re-centers so the signal lands a quarter-band up, clear of the DC
+/// spike. `center + offset == target` always holds.
+pub fn plan_tune(center_hz: f64, capture_rate: u32, target_hz: f64) -> (f64, f32) {
+    let rate = capture_rate as f64;
+    let max_offset = rate * TUNE_MAX_OFFSET_FRAC;
+    if center_hz != 0.0 && (target_hz - center_hz).abs() <= max_offset {
+        // In band: keep the hardware where it is, retune only the NCO.
+        (center_hz, (target_hz - center_hz) as f32)
+    } else {
+        // Out of band (or first tune from cold): re-center the hardware.
+        let offset = rate * TUNE_RECENTER_OFFSET_FRAC;
+        (target_hz - offset, offset as f32)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -130,7 +262,7 @@ pub enum DemodMode {
 }
 
 impl DemodMode {
-    fn from_u8(v: u8) -> DemodMode {
+    pub fn from_u8(v: u8) -> DemodMode {
         match v {
             1 => DemodMode::Am,
             2 => DemodMode::Wfm,
@@ -163,6 +295,12 @@ struct SdrControlInner {
     ppm: AtomicI32,
     /// Demod mode (`DemodMode as u8`).
     demod_mode: AtomicU8,
+    /// Dongle capture (sample) rate (Hz). Set by `ConfigureSdr`; the capture
+    /// thread re-applies it live. Also read by the tune split to size the band.
+    capture_rate: AtomicU32,
+    /// Tuner capabilities, published by the capture thread once the header is
+    /// parsed. `None` until a capture has connected.
+    caps: Mutex<Option<TunerCaps>>,
 }
 
 /// A clonable handle to one channel's SDR runtime control — the RX analogue of
@@ -187,6 +325,8 @@ impl Default for SdrControl {
                 squelch_db: AtomicU32::new(SQUELCH_DISABLED_DB.to_bits()),
                 ppm: AtomicI32::new(0),
                 demod_mode: AtomicU8::new(DemodMode::Nbfm as u8),
+                capture_rate: AtomicU32::new(DEFAULT_CAPTURE_RATE),
+                caps: Mutex::new(None),
             }),
         }
     }
@@ -254,6 +394,23 @@ impl SdrControl {
     pub fn set_demod_mode(&self, mode: DemodMode) {
         self.inner.demod_mode.store(mode as u8, Ordering::Relaxed);
         self.bump();
+    }
+
+    pub fn capture_rate(&self) -> u32 {
+        self.inner.capture_rate.load(Ordering::Relaxed)
+    }
+    pub fn set_capture_rate(&self, rate: u32) {
+        self.inner.capture_rate.store(rate, Ordering::Relaxed);
+        self.bump();
+    }
+
+    /// The tuner capabilities the capture thread published at connect (`None`
+    /// until a capture has connected and parsed the header).
+    pub fn caps(&self) -> Option<TunerCaps> {
+        self.inner.caps.lock().unwrap().clone()
+    }
+    pub fn set_caps(&self, caps: TunerCaps) {
+        *self.inner.caps.lock().unwrap() = Some(caps);
     }
 
     /// Build a `PowerSquelch` from the current threshold (disabled at/under the
@@ -412,11 +569,17 @@ impl AudioBackend for RtlTcpBackend {
         let mut sock = TcpStream::connect(&addr)
             .map_err(|e| AudioError::Io(format!("rtl_tcp connect {addr}: {e}")))?;
 
-        // Read + validate the 12-byte greeting before anything else.
+        // Read + validate the 12-byte greeting before anything else. Publish the
+        // tuner capabilities it reveals so `GetSdrCaps` can answer once bound.
         let mut header = [0u8; 12];
         sock.read_exact(&mut header).map_err(|e| AudioError::Io(e.to_string()))?;
-        parse_header(&header)?;
+        let hdr = parse_header(&header)?;
+        self.control.set_caps(caps_from_header(&hdr));
 
+        // Seed the shared capture rate from this backend's configured default
+        // (unity in production); the control cell is authoritative thereafter, so
+        // `ConfigureSdr` can change the rate on a running capture.
+        self.control.set_capture_rate(self.capture_rate);
         send_initial_commands(&mut sock, self.capture_rate, &self.control)?;
 
         // A second handle for the capture thread to issue retune/gain commands.
@@ -438,14 +601,16 @@ impl AudioBackend for RtlTcpBackend {
         let control = self.control.clone();
         let telemetry = self.telemetry.clone();
         let channel = self.channel;
-        let capture_rate = self.capture_rate;
         let deviation_hz = self.deviation_hz;
 
         std::thread::Builder::new()
             .name("omni-rtl-capture".into())
             .spawn(move || {
+                // The dongle rate is authoritative from the control cell so
+                // `ConfigureSdr` can change it live; it starts at the seeded value.
+                let mut cur_rate = control.capture_rate();
                 let mut rx_chain = NbfmReceiver::new(
-                    capture_rate,
+                    cur_rate,
                     channel_rate,
                     control.offset_hz(),
                     deviation_hz,
@@ -480,14 +645,30 @@ impl AudioBackend for RtlTcpBackend {
                     let gen = control.generation();
                     if gen != seen_gen {
                         seen_gen = gen;
-                        rx_chain.retune(control.offset_hz());
-                        rx_chain.set_squelch(control.effective_squelch());
+                        // A capture-rate change rebuilds the whole RX chain (the
+                        // decimation ratio and NCO base rate both depend on it) and
+                        // re-commands the dongle's sample rate.
+                        let want_rate = control.capture_rate();
+                        if want_rate != cur_rate && want_rate != 0 {
+                            cur_rate = want_rate;
+                            rx_chain = NbfmReceiver::new(
+                                cur_rate,
+                                channel_rate,
+                                control.offset_hz(),
+                                deviation_hz,
+                                control.effective_squelch(),
+                            );
+                            let _ = cmd_sock.write_all(&RtlCmd::SampleRate(cur_rate).encode());
+                        } else {
+                            rx_chain.retune(control.offset_hz());
+                            rx_chain.set_squelch(control.effective_squelch());
+                        }
                         let _ = apply_hardware(&mut cmd_sock, &control);
                     }
 
                     if let Some(tele) = telemetry.as_ref() {
                         emit_waterfall(
-                            &mut stft, &iq, capture_rate, control.center_hz(), channel, tele,
+                            &mut stft, &iq, cur_rate, control.center_hz(), channel, tele,
                         );
                     }
 
@@ -641,6 +822,68 @@ mod tests {
         assert!(c.effective_squelch().is_open());
     }
 
+    #[test]
+    fn capture_rate_defaults_and_set_bumps_generation() {
+        let c = SdrControl::default();
+        let worker = c.clone();
+        assert_eq!(c.capture_rate(), DEFAULT_CAPTURE_RATE);
+        let g0 = worker.generation();
+        c.set_capture_rate(1_024_000);
+        assert_eq!(worker.capture_rate(), 1_024_000);
+        assert_ne!(worker.generation(), g0);
+    }
+
+    #[test]
+    fn caps_default_none_then_visible_through_clone() {
+        let c = SdrControl::default();
+        let worker = c.clone();
+        assert!(c.caps().is_none());
+        c.set_caps(caps_from_header(&RtlHeader { tuner_type: 5, tuner_gain_count: 29 }));
+        let caps = worker.caps().expect("caps published");
+        assert_eq!(caps.tuner, "R820T");
+        assert_eq!(caps.gains_db.len(), 29);
+        assert!(!caps.bias_tee_supported);
+        assert!(caps.sample_rates.contains(&DEFAULT_CAPTURE_RATE));
+        assert!(caps.freq_min_hz < caps.freq_max_hz);
+    }
+
+    #[test]
+    fn snap_gain_picks_nearest_table_entry() {
+        let table = tuner_gains_db(5); // R820T
+        assert_eq!(snap_gain(&table, 0.0), 0.0);
+        assert_eq!(snap_gain(&table, 100.0), 49.6); // clamps to the top entry
+        assert_eq!(snap_gain(&table, 20.0), 19.7); // nearest of 19.7/20.7
+        // Empty table (unknown tuner) returns the request unchanged.
+        assert_eq!(snap_gain(&[], 13.3), 13.3);
+    }
+
+    #[test]
+    fn plan_tune_first_tune_recenters_and_hits_target() {
+        // Cold (center 0): re-center places the signal a quarter-band up.
+        let (center, offset) = plan_tune(0.0, 240_000, 144_390_000.0);
+        assert_eq!(offset, 60_000.0); // 0.25 * 240k
+        assert!(((center + offset as f64) - 144_390_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn plan_tune_in_band_moves_only_the_nco() {
+        // Already centered at 144.42M; ask for 144.39M (30 kHz away, in band).
+        let center0 = 144_420_000.0;
+        let (center, offset) = plan_tune(center0, 240_000, 144_390_000.0);
+        assert_eq!(center, center0); // hardware unchanged
+        assert_eq!(offset, -30_000.0);
+    }
+
+    #[test]
+    fn plan_tune_overshoot_recenters() {
+        // 200 kHz away exceeds the ±0.4·rate (±96 kHz) usable span → re-center.
+        let center0 = 144_390_000.0;
+        let (center, offset) = plan_tune(center0, 240_000, 144_590_000.0);
+        assert_ne!(center, center0);
+        assert_eq!(offset, 60_000.0);
+        assert!(((center + offset as f64) - 144_590_000.0).abs() < 1.0);
+    }
+
     use std::net::TcpListener;
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
@@ -710,6 +953,110 @@ mod tests {
             }
         }
         assert!(total > 0, "expected demodulated audio samples, got none");
+    }
+
+    #[test]
+    fn capture_publishes_tuner_caps() {
+        // The fake server advertises an R820T; caps must be published once the
+        // header is parsed, so a later GetSdrCaps can answer.
+        let iq = fm_iq_u8(DEFAULT_CAPTURE_RATE as f32, 30_000.0, 1_200.0, DEFAULT_DEVIATION_HZ, 4_000);
+        let port = spawn_fake_server(iq);
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let caps_cell = backend.control();
+        assert!(caps_cell.caps().is_none());
+        let _cap = backend.open_capture(48_000).unwrap();
+        let caps = caps_cell.caps().expect("caps published after connect");
+        assert_eq!(caps.tuner, "R820T");
+        assert_eq!(caps_cell.capture_rate(), DEFAULT_CAPTURE_RATE);
+    }
+
+    /// A fake server that streams IQ continuously (so the capture loop keeps
+    /// reading) and records every 5-byte command the client sends, until `stop`.
+    fn spawn_recording_server() -> (u16, Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cmds = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let cmds_srv = cmds.clone();
+        let stop_srv = stop.clone();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut header = [0u8; 12];
+            header[0..4].copy_from_slice(b"RTL0");
+            header[4..8].copy_from_slice(&5u32.to_be_bytes());
+            header[8..12].copy_from_slice(&29u32.to_be_bytes());
+            sock.write_all(&header).unwrap();
+            // Record the client's control commands on a side thread.
+            let mut drain = sock.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 64];
+                while let Ok(n) = drain.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    cmds_srv.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            });
+            // Keep feeding IQ so the capture loop wakes and reconciles control
+            // changes (a parked read would never see a mid-stream rate change).
+            let chunk = vec![127u8; 512];
+            while !stop_srv.load(Ordering::Relaxed) {
+                if sock.write_all(&chunk).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        (port, cmds, stop)
+    }
+
+    #[test]
+    fn live_capture_rate_change_resends_sample_rate() {
+        // A runtime capture-rate change must re-command the dongle's sample rate on
+        // the running capture (and rebuild the decimation chain). Assert the new
+        // SampleRate command reaches the server.
+        let (port, cmds, stop) = spawn_recording_server();
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let control = backend.control();
+        let cap = backend.open_capture(48_000).unwrap();
+
+        // Scan the recorded byte stream (a concatenation of 5-byte frames) for a
+        // SampleRate (opcode 0x02) command carrying `rate`. The server records
+        // commands asynchronously, so poll — draining audio each iteration both
+        // paces the wait and keeps the capture loop's bounded queue unblocked.
+        let saw_sample_rate = |rate: u32| -> bool {
+            cmds.lock().unwrap().chunks_exact(5).any(|f| {
+                f[0] == 0x02 && u32::from_be_bytes([f[1], f[2], f[3], f[4]]) == rate
+            })
+        };
+        let wait_for_rate = |rate: u32, iters: usize| -> bool {
+            for _ in 0..iters {
+                if saw_sample_rate(rate) {
+                    return true;
+                }
+                let _ = cap.rx.recv_timeout(Duration::from_millis(10));
+            }
+            saw_sample_rate(rate)
+        };
+
+        // The initial SampleRate(240000) is sent during `open_capture`.
+        assert!(wait_for_rate(DEFAULT_CAPTURE_RATE, 200), "initial SampleRate not observed");
+
+        // Wait until the capture thread has produced audio, proving it latched the
+        // initial rate + generation before we change them. Without this, a
+        // late-starting thread would initialise straight to the new rate and never
+        // emit the runtime re-command.
+        assert!(
+            cap.rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "capture produced no audio at the initial rate"
+        );
+
+        // Change the rate at runtime; the capture thread must re-command it.
+        control.set_capture_rate(1_024_000);
+        let ok = wait_for_rate(1_024_000, 300);
+        stop.store(true, Ordering::Relaxed);
+        drop(cap);
+        assert!(ok, "runtime SampleRate(1024000) command not observed");
     }
 
     #[test]
