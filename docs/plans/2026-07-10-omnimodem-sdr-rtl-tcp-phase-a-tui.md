@@ -159,3 +159,16 @@ Bubble Tea tests driving `sdrView` through a `Fake` (no daemon):
 Phase A is "done" only once APRS decodes end-to-end off a real/remote dongle with
 working click/step-tune in the TUI; that end-to-end confirmation is the parent
 issue's gate.
+
+---
+
+## Deferred follow-up (tracked for Phase C)
+
+**`ppm` in `SdrState`.** The code review flagged that `ConfigureSdr` applies ppm
+unconditionally while `SdrState` doesn't carry it, so the TUI can't adopt the
+daemon's ppm and can't sync it across concurrent clients (benign for a single
+Phase-A operator — the daemon boots ppm at 0 and the view authors it). The fix
+belongs with Phase C's "ppm wired end-to-end": add a `ppm` field to `SdrState` +
+`emit_sdr_state`, fold it into `chanLive`, and adopt it in `view_sdr.go` like
+squelch/gain. Recorded in the design doc's Phased-delivery section (Phase C row +
+follow-up note). The limitation is documented in `view_sdr.go` at the `ppm` field.

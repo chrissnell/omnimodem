@@ -238,12 +238,24 @@ phases exist only to sequence the work and land value early.
 |---|---|---|
 | **A — Core rx + NBFM + tuning + waterfall** | `RtlTcpBackend` (connect/header/IQ read), complex NCO channel-select, NBFM demod, decimation to audio, power squelch, RF waterfall tap, `SetSdrTune` / `SetSdrGain` / `ConfigureSdr` / `GetSdrCaps`, TUI tuning view. End-to-end: bind `rtltcp:host:port`, tune 144.390, decode APRS. | APRS decodes off a real/remote dongle; waterfall + click-tune work in TUI. |
 | **B — Demod-mode breadth** | AM, WFM, SSB (USB/LSB) demodulators behind the shipped `DemodMode` enum. | Each mode selectable at runtime and audibly/objectively correct on a known signal. |
-| **C — Dongle extras** | ppm correction wired end-to-end, bias-tee, direct-sampling (HF), config-file device registration in `ListDevices`. | Each exposed control verifiably changes dongle behavior. |
+| **C — Dongle extras** | ppm correction wired end-to-end (incl. **adding `ppm` to `SdrState` + `emit_sdr_state` so it round-trips like squelch/gain** — see note below), bias-tee, direct-sampling (HF), config-file device registration in `ListDevices`. | Each exposed control verifiably changes dongle behavior; ppm survives a client reconnect and stays in sync across multiple clients. |
 | **D — Hardening** | Auto-reconnect on dropped `rtl_tcp` link (mirrors the rigctld PTT driver), buffer/overrun handling, multi-client tune arbitration, docs + handbook page. | Survives server restarts; documented for end users and API consumers. |
 
 The `DemodMode` enum, all four control RPCs, and `GetSdrCaps` ship in Phase A so the
 **API surface is stable from the first release**; later phases fill in behavior, and
 unimplemented controls return `UNIMPLEMENTED` rather than changing the contract.
+
+**Phase C follow-up — `ppm` in `SdrState` (from the Plan-4 TUI review).** `SdrState`
+ships in Phase A carrying center/offset/freq/gain/demod/squelch, but **not `ppm`** —
+so `ConfigureSdr` applies ppm unconditionally with no round-trip, and a frontend
+cannot adopt the daemon's current ppm. For a single Phase-A operator this is benign
+(the daemon boots ppm at 0 and the TUI is the sole author), but with multiple
+concurrent clients ppm cannot be kept in sync, and it does not survive a client
+reconnect. When ppm is wired end-to-end in Phase C, add a `ppm` field to the
+`SdrState` message and populate it in `emit_sdr_state`, then have the TUI fold it
+into `chanLive` and adopt it in the SDR view exactly as squelch/gain are today
+(`clients/omnimodem-tui/internal/app/view_sdr.go`, `model.go`). This is additive
+(a new field tag) and back-compatible.
 
 ## Testing
 
