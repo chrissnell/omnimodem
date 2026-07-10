@@ -6,6 +6,7 @@
 //! KAT-, and BER-tests in CI. The daemon's `mode::registry` maps a parametric
 //! `ModeConfig` onto these constructors; nothing else learns mode specifics.
 
+pub mod adsb;
 pub mod afsk1200;
 pub mod contestia;
 pub mod cw;
