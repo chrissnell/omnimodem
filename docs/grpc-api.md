@@ -121,6 +121,42 @@ is target lines/sec (0 = default 15); `freq_lo_hz`/`freq_hi_hz` window the passb
 (0 = 0 Hz / Nyquist). The response echoes the **actual** clamped params, which match
 the `SpectrumFrame` fields you'll then receive. Idempotent per channel.
 
+### SDR (`rtl_tcp`) runtime control
+
+These drive a channel bound to an `rtltcp:host:port` device (via `ConfigureAudio`).
+On a non-SDR channel every one returns `FAILED_PRECONDITION`. Each mutating call
+also broadcasts an `SdrState` event (see `SubscribeEvents`) so multiple/late-joining
+clients stay in sync. See the RTL-SDR design doc for the tuning model.
+
+#### `SetSdrTune(SetSdrTuneRequest) → SetSdrTuneResponse`
+Point-and-shoot tuning: set the absolute demod frequency (`freq_hz`). The daemon
+splits it into a hardware **center** plus an **NCO offset** (the gqrx wideband
+model), so small moves within the captured band retune only the NCO — instant and
+lossless — while a move outside it re-centers the hardware. The response echoes the
+resolved `actual_freq_hz` (== `center_hz + offset_hz`).
+
+#### `SetSdrGain(SetSdrGainRequest) → SetSdrGainResponse`
+Set tuner gain: `auto=true` engages hardware AGC (`gain_db` ignored); otherwise
+`gain_db` is snapped to the nearest entry in the tuner's discrete gain table (see
+`GetSdrCaps`). The response echoes `actual_gain_db` (the snapped value, or `0` when
+auto).
+
+#### `ConfigureSdr(ConfigureSdrRequest) → ConfigureSdrResponse`
+Source-wide SDR config. `capture_rate` sets the dongle sample rate (`0` = unchanged;
+must be one of `GetSdrCaps.sample_rates`); `squelch_db` is the power-squelch open
+threshold in dBFS (`<= -200` disables it); `ppm` is the frequency correction.
+`demod_mode` is the `DemodMode` enum — **only `DEMOD_NBFM` is implemented in Phase
+A**; `DEMOD_AM`/`DEMOD_WFM`/`DEMOD_USB`/`DEMOD_LSB` return `UNIMPLEMENTED` until Phase
+B. `bias_tee`/`direct_sampling` are Phase C: requesting either returns
+`UNIMPLEMENTED`, leaving them `false` is a no-op. The response echoes
+`actual_capture_rate`.
+
+#### `GetSdrCaps(GetSdrCapsRequest) → GetSdrCapsResponse`
+Query the bound tuner's capabilities: `tuner` name (e.g. `R820T`), `freq_min_hz`/
+`freq_max_hz`, valid `sample_rates`, and the discrete `gains_db` table — derived from
+the `rtl_tcp` header plus per-tuner static tables. `bias_tee_supported` /
+`direct_sampling_supported` are `false` in Phase A.
+
 ### State & metrics
 
 #### `GetState(GetStateRequest) → ModemState`
@@ -156,6 +192,7 @@ both — treat the snapshot as authoritative and tolerate a duplicate follow-up.
 | `channel_metrics` | lossy | Same as `GetMetrics`, pushed. |
 | `spectrum_frame` | lossy | One waterfall line (see below). |
 | `rsid_detected` | lossy | An RSID burst was identified (tag, mode, freq, extended). |
+| `sdr_state` | lossy | An SDR channel's tune/gain/demod-mode/squelch changed (see SDR control). |
 
 ### Transmit
 

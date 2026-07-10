@@ -99,6 +99,16 @@ Two controls take effect on the running RX worker without tearing it down:
   worker polls once per chunk; `ConfigureSpectrum` bumps it and the worker
   reconciles (build/drop the FFT tap) on the next chunk. Off by default, so the FFT
   costs nothing when unwatched.
+- **SDR control** (`audio/rtlsdr.rs::SdrControl`): the same generation-counter
+  pattern for an `rtl_tcp` channel's tuner. The four SDR RPCs
+  (`SetSdrTune`/`SetSdrGain`/`ConfigureSdr`/`GetSdrCaps`) live in the
+  `SetAudioGain`-style path — `grpc/service.rs` → `Command` → the `set_sdr_*` /
+  `configure_sdr` / `get_sdr_caps` arms in `core/mod.rs` — mutating the shared cell
+  the capture thread polls. `SetSdrTune` splits an absolute frequency into hardware
+  center + NCO offset via `rtlsdr::plan_tune`. The capture thread publishes tuner
+  caps (`GetSdrCaps`) into the cell at connect, and each mutating call broadcasts an
+  `SdrState` telemetry event. Only NBFM is wired in Phase A; other demod modes and
+  bias-tee/direct-sampling return `UNIMPLEMENTED`.
 
 ## TX arbitration: interlock vs lease
 
