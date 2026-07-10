@@ -22,6 +22,10 @@ type ModemClient interface {
 	KeyPtt(context.Context, uint32, bool) error
 	SetAudioGain(context.Context, *pb.SetAudioGainRequest) error
 	ConfigureSpectrum(context.Context, *pb.ConfigureSpectrumRequest) (*pb.ConfigureSpectrumResponse, error)
+	SetSdrTune(context.Context, *pb.SetSdrTuneRequest) (*pb.SetSdrTuneResponse, error)
+	SetSdrGain(context.Context, *pb.SetSdrGainRequest) (*pb.SetSdrGainResponse, error)
+	ConfigureSdr(context.Context, *pb.ConfigureSdrRequest) (*pb.ConfigureSdrResponse, error)
+	GetSdrCaps(context.Context, *pb.GetSdrCapsRequest) (*pb.GetSdrCapsResponse, error)
 	SuggestUdevRule(context.Context, string) (*pb.SuggestUdevRuleResponse, error)
 	AcquireTxLease(context.Context, uint32) (*pb.TxLeaseResponse, error)
 	ReleaseTxLease(context.Context, uint32) error
@@ -93,6 +97,22 @@ func (g *grpcClient) SetAudioGain(ctx context.Context, req *pb.SetAudioGainReque
 
 func (g *grpcClient) ConfigureSpectrum(ctx context.Context, req *pb.ConfigureSpectrumRequest) (*pb.ConfigureSpectrumResponse, error) {
 	return g.c.ConfigureSpectrum(ctx, req)
+}
+
+func (g *grpcClient) SetSdrTune(ctx context.Context, req *pb.SetSdrTuneRequest) (*pb.SetSdrTuneResponse, error) {
+	return g.c.SetSdrTune(ctx, req)
+}
+
+func (g *grpcClient) SetSdrGain(ctx context.Context, req *pb.SetSdrGainRequest) (*pb.SetSdrGainResponse, error) {
+	return g.c.SetSdrGain(ctx, req)
+}
+
+func (g *grpcClient) ConfigureSdr(ctx context.Context, req *pb.ConfigureSdrRequest) (*pb.ConfigureSdrResponse, error) {
+	return g.c.ConfigureSdr(ctx, req)
+}
+
+func (g *grpcClient) GetSdrCaps(ctx context.Context, req *pb.GetSdrCapsRequest) (*pb.GetSdrCapsResponse, error) {
+	return g.c.GetSdrCaps(ctx, req)
 }
 
 func (g *grpcClient) SuggestUdevRule(ctx context.Context, dev string) (*pb.SuggestUdevRuleResponse, error) {

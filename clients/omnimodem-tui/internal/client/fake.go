@@ -16,6 +16,10 @@ type Fake struct {
 	AudioResp      *pb.ConfigureAudioResponse
 	SpectrumResp   *pb.ConfigureSpectrumResponse
 	LeaseResp      *pb.TxLeaseResponse
+	TuneResp       *pb.SetSdrTuneResponse
+	SdrGainResp    *pb.SetSdrGainResponse
+	SdrConfigResp  *pb.ConfigureSdrResponse
+	CapsResp       *pb.GetSdrCapsResponse
 	NextTransmitID uint64
 	Err            error // if set, every RPC returns it
 
@@ -25,6 +29,10 @@ type Fake struct {
 	PttCalls           []*pb.ConfigurePttRequest
 	GainCalls          []*pb.SetAudioGainRequest
 	SpectrumCalls      []*pb.ConfigureSpectrumRequest
+	TuneCalls          []*pb.SetSdrTuneRequest
+	SdrGainCalls       []*pb.SetSdrGainRequest
+	SdrConfigCalls     []*pb.ConfigureSdrRequest
+	CapsCalls          []*pb.GetSdrCapsRequest
 	TransmitCalls      []*pb.TransmitRequest
 	TransmitImageCalls []*pb.TransmitImageRequest
 	LeaseAcquired      []uint32
@@ -79,6 +87,59 @@ func (f *Fake) ConfigureSpectrum(_ context.Context, r *pb.ConfigureSpectrumReque
 		f.SpectrumResp = &pb.ConfigureSpectrumResponse{BinCount: 64, FreqStepHz: 50, RateHz: 15}
 	}
 	return f.SpectrumResp, f.Err
+}
+
+func (f *Fake) SetSdrTune(_ context.Context, r *pb.SetSdrTuneRequest) (*pb.SetSdrTuneResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.TuneCalls = append(f.TuneCalls, r)
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if f.TuneResp != nil {
+		return f.TuneResp, nil
+	}
+	// Echo the request as a trivial split: whole target on the NCO, center unchanged.
+	return &pb.SetSdrTuneResponse{ActualFreqHz: r.GetFreqHz(), CenterHz: r.GetFreqHz(), OffsetHz: 0}, nil
+}
+
+func (f *Fake) SetSdrGain(_ context.Context, r *pb.SetSdrGainRequest) (*pb.SetSdrGainResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.SdrGainCalls = append(f.SdrGainCalls, r)
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if f.SdrGainResp != nil {
+		return f.SdrGainResp, nil
+	}
+	return &pb.SetSdrGainResponse{ActualGainDb: r.GetGainDb()}, nil
+}
+
+func (f *Fake) ConfigureSdr(_ context.Context, r *pb.ConfigureSdrRequest) (*pb.ConfigureSdrResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.SdrConfigCalls = append(f.SdrConfigCalls, r)
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if f.SdrConfigResp != nil {
+		return f.SdrConfigResp, nil
+	}
+	return &pb.ConfigureSdrResponse{ActualCaptureRate: r.GetCaptureRate()}, nil
+}
+
+func (f *Fake) GetSdrCaps(_ context.Context, r *pb.GetSdrCapsRequest) (*pb.GetSdrCapsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.CapsCalls = append(f.CapsCalls, r)
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if f.CapsResp != nil {
+		return f.CapsResp, nil
+	}
+	return &pb.GetSdrCapsResponse{}, nil
 }
 
 func (f *Fake) SuggestUdevRule(context.Context, string) (*pb.SuggestUdevRuleResponse, error) {

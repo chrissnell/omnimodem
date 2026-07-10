@@ -31,6 +31,19 @@ type chanLive struct {
 	rsidTx       bool   // prepend the mode's RSID burst before each TX
 	rsidRx       bool   // run the RSID detector over received audio
 	lastRsid     string // most recently identified RSID (tag @ freq), "" if none
+
+	// SDR tuner/demod state, folded from the daemon's SdrState event. The daemon
+	// is authoritative for these; the SDR view reads them each render and holds
+	// only its own editing state (step size, entry buffer, gain cursor). haveSdr
+	// is false until the first SdrState arrives (or a tune/gain/config is applied).
+	haveSdr      bool
+	sdrCenterHz  float64
+	sdrOffsetHz  float64
+	sdrFreqHz    float64 // effective demod frequency (center + offset)
+	sdrGainAuto  bool
+	sdrGainDb    float32
+	sdrDemod     pb.DemodMode
+	sdrSquelchDb float32
 }
 
 // Model is the root window manager: it owns the client, the event stream, shared
@@ -144,6 +157,17 @@ func (m *Model) applyEvent(ev *pb.Event) {
 		summary := fmt.Sprintf("%s @ %.0f Hz", label, d.GetFreqHz())
 		ensure(d.GetChannel()).lastRsid = summary
 		m.toast = ui.NewToast("RSID: "+summary, ui.SeverityInfo)
+	case *pb.Event_SdrState:
+		s := k.SdrState
+		cl := ensure(s.GetChannel())
+		cl.haveSdr = true
+		cl.sdrCenterHz = s.GetCenterHz()
+		cl.sdrOffsetHz = s.GetOffsetHz()
+		cl.sdrFreqHz = s.GetFreqHz()
+		cl.sdrGainAuto = s.GetGainAuto()
+		cl.sdrGainDb = s.GetGainDb()
+		cl.sdrDemod = s.GetDemodMode()
+		cl.sdrSquelchDb = s.GetSquelchDb()
 	}
 }
 
