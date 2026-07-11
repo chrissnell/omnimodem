@@ -51,18 +51,53 @@ pub const PREAMBLE_SLOTS: usize = 16;
 /// Half-microsecond slots per data bit (one pulse-position pair).
 pub const DATA_SLOTS_PER_BIT: usize = 2;
 
-/// Sub-sample slicer phases the streaming demod runs (R3 multi-phase ensemble).
-/// Four phases (0, ¼, ½, ¾ sample) recover the frames whose bit timing lands off
-/// the 2 MHz integer grid; see [`ppm::ParallelDemodulator`].
+/// Sub-sample slicer phases the streaming demod runs (R3 multi-phase ensemble,
+/// R4 gate). Each phase (0, 1/N, 2/N, … sample) recovers frames whose bit timing
+/// lands off the 2 MHz integer grid; see [`ppm::ParallelDemodulator`].
 ///
-/// Chosen by sweeping the KSLC 2.4 Msps reference recording (complex front end):
-/// 16 CRC-valid frames at 1 phase (the R2 baseline) → **25 at 4** (+56%), with
-/// airborne positions 4 → 6 and the aircraft set still exactly readsb's three.
-/// Higher counts (6, 8) squeeze out a few more frames but begin surfacing a
-/// CRC-lucky false positive — a China-prefix ICAO (B6xxxx) implausible at KSLC
-/// and absent from readsb's full baseline — so 4 is the conservative pick that
-/// maximizes real yield without inventing an aircraft.
-pub const ADSB_SLICER_PHASES: usize = 4;
+/// Chosen by sweeping the KSLC 2.4 Msps reference recording (complex front end).
+/// R3 capped this at 4 because 6+ phases began surfacing a CRC-lucky false
+/// positive. Its ghost signature is address-independent: a lone DF18 hit (one in
+/// the whole recording, where every real aircraft squitters 8–13 times and forms
+/// a track) with a reserved control field (CF 7, which no real ADS-B/TIS-B
+/// transmitter emits) and the lowest soft eye by a wide margin — and absent from
+/// readsb. R4's soft-decision gate ([`ADSB_MIN_CONFIDENCE`]) removes the ceiling:
+/// it rejects that low-eye slice on confidence alone, never on its ICAO address,
+/// so the ensemble can widen to recover more weak/fading-aircraft frames safely.
+/// Real CRC-valid yield vs phase count, ghost gated out:
+///   4 → 25 (the R3 baseline)  ·  8 → 29  ·  12 → 31 (+24%)  ·  16 → 31.
+/// Yield plateaus at 31 by 12 phases, and the aircraft set stays exactly readsb's
+/// three, so 12 captures the gain without paying for 16's redundant phases.
+///
+/// This is a decode-yield choice, not a latency one: each phase is a full
+/// interpolate-and-scan pass, so 12 costs ~3× the R3 baseline's per-buffer slicing
+/// in the real-time daemon. 8 phases keeps 29/31 of the gain at 2/3 the cost — the
+/// fallback if a future run is CPU-bound rather than yield-bound.
+pub const ADSB_SLICER_PHASES: usize = 12;
+
+/// R4 soft-decision accept/reject threshold: a parity-clean candidate frame is
+/// kept only if its mean per-bit eye ([`ppm`] `soft_confidence`) clears this. The
+/// eye is a matched-filter-plus-DFB-AGC measure of how cleanly each bit's pulse
+/// resolves; real transmissions sit well above it, CRC-lucky ghosts below.
+///
+/// Placed between the two classes on the KSLC reference — the lone ghost scores
+/// 0.26, the weakest real frame across all phase counts 0.39 — near their
+/// midpoint, which rejects the ghost and every future one like it while leaving
+/// ~0.06 of headroom under the weakest genuine frame. As with the R2/R3 constants
+/// this is tuned on the single available reference recording; widen the margin if
+/// a second capture shows a real frame dipping toward it.
+///
+/// The eye is SNR-like (see [`ppm`] `soft_confidence`), so the gate is load-bearing:
+/// it is what makes the 12-phase ensemble safe, and the cost it trades for that is
+/// a genuine very-low-SNR frame that scores under the threshold. The gate reads
+/// only the eye, never the address, so a strong signal passes regardless of origin
+/// — an international widebody overhead squitters at full strength and clears the
+/// gate exactly like nearby traffic. The exposure is purely SNR: a distant or weak
+/// aircraft (which an overflight can be) near the threshold. The 0.06 headroom held
+/// across 4/8/12/16 phases on the reference, but the daemon discards rejects
+/// silently — surfacing near-threshold rejections is the follow-up that would make
+/// this caveat observable rather than only documented.
+pub const ADSB_MIN_CONFIDENCE: f32 = 0.32;
 
 /// Preamble slots that carry a pulse — pulses at 0.0, 1.0, 3.5, 4.5 µs.
 pub const PREAMBLE_HIGH_SLOTS: [usize; 4] = [0, 2, 7, 9];
@@ -112,10 +147,20 @@ impl AdsbDemod {
 
     /// Construct with an explicit slicer-phase count (`>= 1`). `1` is the
     /// single-phase decoder; the offline `adsb_bench` uses this to sweep phases
-    /// and reproduce the pre-R3 baseline.
+    /// and reproduce the pre-R3 baseline. The R4 confidence gate keeps its
+    /// [`ADSB_MIN_CONFIDENCE`] default; use [`with_phases_min_conf`] to override.
     pub fn with_phases(phases: usize) -> Self {
+        Self::with_phases_min_conf(phases, ADSB_MIN_CONFIDENCE)
+    }
+
+    /// Construct with an explicit phase count and soft-decision threshold. `0.0`
+    /// disables the R4 gate (accept every parity-clean frame); the offline
+    /// `adsb_bench` uses this to measure the accept/reject split.
+    pub fn with_phases_min_conf(phases: usize, min_confidence: f32) -> Self {
+        let mut demod = ppm::ParallelDemodulator::new(SAMPLES_PER_US, phases);
+        demod.set_min_confidence(min_confidence);
         AdsbDemod {
-            demod: ppm::ParallelDemodulator::new(SAMPLES_PER_US, phases),
+            demod,
             det: ppm::new_floor_detector(),
             buf: Vec::new(),
             floor: Vec::new(),
@@ -130,6 +175,7 @@ impl AdsbDemod {
                 crc_ok: raw.crc_residual == 0,
                 sample_offset: self.base + raw.offset as u64,
                 decoder: Some("adsb".to_string()),
+                confidence: Some(raw.confidence),
                 ..Default::default()
             },
         }

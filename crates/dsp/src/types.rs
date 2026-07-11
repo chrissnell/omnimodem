@@ -94,6 +94,10 @@ pub struct FrameMeta {
     /// Sample offset of the frame within the fed buffer (dedup key).
     pub sample_offset: u64,
     pub crc_ok: bool,
+    /// Soft-decision confidence in `[0, 1]`, when the decoder measures one. ADS-B
+    /// fills it with the mean per-bit eye (matched filter + decision-feedback AGC)
+    /// that gates CRC-lucky false positives; other modes leave it `None`.
+    pub confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
