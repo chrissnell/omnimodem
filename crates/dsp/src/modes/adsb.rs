@@ -24,6 +24,7 @@ mod tests;
 
 pub use message::{
     cpr_decode_airborne, encode_all_call_reply, encode_identification, AirbornePosition, ModeS,
+    CA_LEVEL2,
 };
 pub use ppm::RawFrame;
 

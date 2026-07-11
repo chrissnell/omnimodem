@@ -4,10 +4,10 @@
 //! modulator (never off the air) and writes it where `tests/regression_gate.rs`
 //! reads it. The clip carries a fixed set of Mode S frames — 5 DF11 all-call
 //! replies and 3 DF17 identification squitters across 3 aircraft — modulated to
-//! magnitude, placed on a slow IF carrier so energy spreads across I and Q like
-//! a real capture, dithered with a seeded low noise floor, and quantized to
-//! uint8. That shape mirrors the KSLC reference slice (5 DF11 / 3 DF17,
-//! 3 aircraft) so the gate's floor tracks real decoder yield.
+//! magnitude, rotated across I and Q by an exact Fs/4 quarter-turn so energy is
+//! not parked on a single axis, dithered with a seeded low noise floor, and
+//! quantized to uint8. That shape mirrors the KSLC reference slice
+//! (5 DF11 / 3 DF17, 3 aircraft) so the gate's floor tracks real decoder yield.
 //!
 //! The clip is written at the 2 MHz **working** rate, not the 2.4 Msps capture
 //! rate: a 0.5 µs Mode S pulse is a single sample at 2 MHz, and round-tripping
@@ -16,21 +16,26 @@
 //! deterministic and focused on the decode core (preamble → PPM slice → CRC →
 //! message parse). The 2.4→2.0 resample stage is covered separately by the
 //! resampler's own unit tests and by real-capture benchmarking during the
-//! R-phases. `tests/regression_gate.rs` decodes this clip with `--in-rate`
-//! equal to the working rate accordingly.
+//! R-phases. `tests/regression_gate.rs` decodes this clip with `in_rate` equal
+//! to the working rate accordingly.
 //!
-//! Deterministic by construction (seeded PRNG, no time/entropy), so rerunning it
-//! reproduces the committed bytes exactly.
+//! Bit-exact by construction: a seeded integer PRNG plus only IEEE-754
+//! arithmetic that is identical across platforms — no `sin`/`cos` (whose libm
+//! results vary by platform), no time or entropy. Rerunning reproduces the
+//! committed bytes exactly on any IEEE-754 target.
 //!
 //! Usage: make_fixture [out.iq]
 //!   (default: crates/adsb_bench/testdata/adsb_ci_clip.iq relative to CARGO_MANIFEST_DIR)
 
 use omnimodem_dsp::mode::Modulator;
-use omnimodem_dsp::modes::adsb::{encode_all_call_reply, encode_identification, AdsbMod, ADSB_RATE};
+use omnimodem_dsp::modes::adsb::{
+    encode_all_call_reply, encode_identification, AdsbMod, ADSB_RATE, CA_LEVEL2,
+};
 use omnimodem_dsp::types::Frame;
 
-/// Transponder capability byte for the DF11 replies (level 2, as most airframes).
-const CA_LEVEL2: u8 = 5;
+/// Pulse amplitude before dither. Below 1.0 so a peak pulse plus the noise floor
+/// still fits the normalized [-1, 1] range and never saturates the uint8 clamp.
+const AMP: f32 = 0.9;
 
 /// The three aircraft in the clip — real US ICAO ranges, matching the KSLC
 /// reference slice the bench was first calibrated against.
@@ -81,21 +86,25 @@ fn frame_set() -> Vec<Vec<u8>> {
     frames
 }
 
-/// Place the magnitude on a slow IF carrier so energy spreads across I and Q
-/// like a real capture, add a seeded low noise floor, and quantize to
-/// interleaved uint8 centered at 127.5. The demod uses `|I+jQ|`, so the carrier
-/// and phase do not affect the decode — they only make the bytes look like a
-/// genuine off-air recording rather than magnitude parked on I.
+/// Rotate the magnitude across I and Q by an exact Fs/4 quarter-turn (a 500 kHz
+/// IF at 2 Msps) so energy spreads across both axes like a real capture, add a
+/// seeded low noise floor, and quantize to interleaved uint8 centered at 127.5.
+/// The rotation multipliers are only `{1, 0, -1}`, so every operation is exact
+/// IEEE-754 arithmetic — bit-identical across platforms (unlike `sin`/`cos`).
+/// The demod uses `|I+jQ|`, so the rotation does not affect the decode; it only
+/// makes the bytes look like a genuine off-air recording.
 fn to_uint8_iq(mag: &[f32]) -> Vec<u8> {
+    // Quarter-turn phasors e^{j·k·π/2}: (cos, sin) for k mod 4.
+    const ROT: [(f32, f32); 4] = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)];
+
     let mut rng = Lcg::new(0x0AD5_B0C1_FACE_1090);
     let mut out = Vec::with_capacity(mag.len() * 2);
-    let dphi = 2.0 * std::f32::consts::PI * 0.02; // ~40 kHz IF at 2 Msps
-    let noise = 0.03f32; // peak dither amplitude, well below the ~1.0 pulses
+    let noise = 0.03f32; // peak dither amplitude, well below the AMP pulses
 
     for (k, &m) in mag.iter().enumerate() {
-        let phi = dphi * k as f32;
-        let i = m * phi.cos() + noise * rng.bipolar();
-        let q = m * phi.sin() + noise * rng.bipolar();
+        let (ci, cq) = ROT[k & 3];
+        let i = AMP * m * ci + noise * rng.bipolar();
+        let q = AMP * m * cq + noise * rng.bipolar();
         out.push(quantize(i));
         out.push(quantize(q));
     }
@@ -108,8 +117,8 @@ fn quantize(v: f32) -> u8 {
     (127.5 + 127.5 * v).round().clamp(0.0, 255.0) as u8
 }
 
-/// Tiny deterministic LCG (Numerical Recipes / PCG multiplier) so the fixture
-/// bytes are reproducible without pulling in an RNG dependency.
+/// Tiny deterministic LCG (PCG / Knuth MMIX 64-bit multiplier and increment) so
+/// the fixture bytes are reproducible without pulling in an RNG dependency.
 struct Lcg(u64);
 
 impl Lcg {
@@ -125,7 +134,7 @@ impl Lcg {
         (self.0 >> 32) as u32
     }
 
-    /// A value in ~[-1, 1).
+    /// A value in [-1, 1] (basic IEEE-754 arithmetic, so platform-independent).
     fn bipolar(&mut self) -> f32 {
         (self.next_u32() as f32 / u32::MAX as f32) * 2.0 - 1.0
     }

@@ -2,10 +2,10 @@
 
 ## `adsb_ci_clip.iq` — ADS-B decode regression fixture
 
-A small, fully deterministic uint8 interleaved I/Q clip that drives the CI
-regression gate in `../tests/regression_gate.rs`. It is **synthetic** — rendered
-by the loopback modulator, never captured off the air (1090 MHz is protected
-aeronautical spectrum).
+A small, bit-exact uint8 interleaved I/Q clip that drives the CI regression gate
+in `../tests/regression_gate.rs`. It is **synthetic** — rendered by the loopback
+modulator, never captured off the air (1090 MHz is protected aeronautical
+spectrum).
 
 Contents: 5 DF11 all-call replies + 3 DF17 identification squitters across 3
 aircraft (`4BA956`, `A31A76`, `A6C88E`) → **8 CRC-valid frames**. That shape
@@ -29,11 +29,13 @@ R-phases.
 
 ### Regenerating
 
-Deterministic by construction (seeded PRNG, no time/entropy):
+Bit-exact by construction: a seeded integer PRNG plus only IEEE-754 arithmetic
+(no `sin`/`cos`, whose libm results vary by platform), no time or entropy.
 
 ```
 cargo run -p adsb_bench --bin make_fixture
 ```
 
-writes `adsb_ci_clip.iq` here. Rerunning reproduces identical bytes. If you
-change the fixture, update the floors in `../tests/regression_gate.rs` to match.
+writes `adsb_ci_clip.iq` here. Rerunning reproduces identical bytes on any
+IEEE-754 platform. If you change the fixture, update the floors in
+`../tests/regression_gate.rs` to match.
