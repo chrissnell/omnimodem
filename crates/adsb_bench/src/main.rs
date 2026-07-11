@@ -58,14 +58,19 @@
 //! protected aeronautical spectrum. This tool only reads.
 
 use adsb_bench::{
-    decode_iq, decode_iq_with, Front, Report, DEFAULT_IN_RATE, DEFAULT_MIN_CONF, DEFAULT_PHASES,
+    decode_iq, decode_iq_with, DecodeOpts, Front, Report, ADSB_NATIVE_RATE, DEFAULT_IN_RATE,
+    DEFAULT_MIN_CONF, DEFAULT_PHASES, DEFAULT_WORK_RATE,
 };
-use omnimodem_dsp::modes::adsb::{ModeS, ADSB_RATE};
+use omnimodem_dsp::modes::adsb::ModeS;
 use omnimodem_dsp::types::{Frame, FramePayload};
 
 struct Args {
     path: String,
     in_rate: u32,
+    /// Working rate to resample to and slice at (R5 Lever 1). Default is the
+    /// shipping 2 MHz rate; `--work-rate 4000000` preserves the native capture
+    /// bandwidth instead of band-limiting it away in a 2.0 MHz downsample.
+    work_rate: u32,
     front: Front,
     /// Sub-sample slicer phases (R3 ensemble). Default matches the shipping
     /// decoder; `--phases 1` reproduces the pre-R3 single-phase baseline.
@@ -73,11 +78,30 @@ struct Args {
     /// R4 soft-decision reject threshold. Default matches the shipping decoder;
     /// `--min-conf 0` disables the gate to reveal the ghosts it rejects.
     min_conf: f32,
+    /// R5 Lever 2a: single-bit CRC repair (off by default, measurement-gated).
+    repair: bool,
+    /// R5 Lever 2b: ICAO-roster-gated address-overlaid recovery (off by default).
+    roster: bool,
     /// Print every accepted frame (df/tc/icao/conf/bytes) to stderr.
     dump: bool,
     json: bool,
     baseline_frames: Option<u64>,
     baseline_aircraft: Option<u64>,
+}
+
+impl Args {
+    /// The knobs this run passes to the shared decode path.
+    fn decode_opts(&self) -> DecodeOpts {
+        DecodeOpts {
+            in_rate: self.in_rate,
+            work_rate: self.work_rate,
+            front: self.front,
+            phases: self.phases,
+            min_conf: self.min_conf,
+            repair: self.repair,
+            roster: self.roster,
+        }
+    }
 }
 
 fn main() {
@@ -88,8 +112,9 @@ fn main() {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
-                 [--front complex|mag] [--phases {DEFAULT_PHASES}] \
-                 [--min-conf {DEFAULT_MIN_CONF}] [--dump] [--json] \
+                 [--work-rate {DEFAULT_WORK_RATE}] [--front complex|mag] \
+                 [--phases {DEFAULT_PHASES}] [--min-conf {DEFAULT_MIN_CONF}] \
+                 [--repair] [--roster] [--dump] [--json] \
                  [--baseline-frames N] [--baseline-aircraft M]"
             );
             std::process::exit(2);
@@ -104,6 +129,7 @@ fn main() {
 /// Flags that consume the following token as their value.
 const VALUED_FLAGS: &[&str] = &[
     "--in-rate",
+    "--work-rate",
     "--front",
     "--phases",
     "--min-conf",
@@ -119,6 +145,10 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             .map(|s| s.parse().map_err(|_| "bad --in-rate".to_string()))
             .transpose()?
             .unwrap_or(DEFAULT_IN_RATE),
+        work_rate: flag(raw, "--work-rate")
+            .map(|s| parse_work_rate(&s))
+            .transpose()?
+            .unwrap_or(DEFAULT_WORK_RATE),
         front: match flag(raw, "--front").as_deref() {
             None | Some("complex") => Front::Complex,
             Some("mag") => Front::Mag,
@@ -138,6 +168,8 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             })
             .transpose()?
             .unwrap_or(DEFAULT_MIN_CONF),
+        repair: raw.iter().any(|a| a == "--repair"),
+        roster: raw.iter().any(|a| a == "--roster"),
         dump: raw.iter().any(|a| a == "--dump"),
         json: raw.iter().any(|a| a == "--json"),
         baseline_frames: flag(raw, "--baseline-frames")
@@ -152,6 +184,17 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
 /// Read `--name value` from the arg list.
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Parse `--work-rate`, rejecting rates the slicer cannot run at — it needs an
+/// even whole number of MHz so a half-µs PPM slot is a whole number of samples.
+fn parse_work_rate(s: &str) -> Result<u32, String> {
+    let rate: u32 = s.parse().map_err(|_| "bad --work-rate".to_string())?;
+    if rate.is_multiple_of(1_000_000) && (rate / 1_000_000).is_multiple_of(2) {
+        Ok(rate)
+    } else {
+        Err(format!("bad --work-rate {rate} (want an even whole number of MHz, e.g. 2000000 or {ADSB_NATIVE_RATE})"))
+    }
 }
 
 /// First positional token — the input path — skipping flags and the values
@@ -179,14 +222,15 @@ fn run(args: &Args) -> Result<(), String> {
     // soft-decision gate; the decode itself is the shared library path (see
     // [`adsb_bench::decode_iq`]), so the CLI and the CI gate agree. `--dump`
     // routes every accepted frame through the audit hook on the way past.
+    let opts = args.decode_opts();
     let report = if args.dump {
-        decode_iq_with(&bytes, args.in_rate, args.front, args.phases, args.min_conf, |f| {
+        decode_iq_with(&bytes, &opts, |f| {
             if let Some(line) = dump_line(f) {
                 eprintln!("{line}");
             }
         })
     } else {
-        decode_iq(&bytes, args.in_rate, args.front, args.phases, args.min_conf)
+        decode_iq(&bytes, &opts)
     };
     let dur_in = report.samples_in as f64 / args.in_rate as f64;
     if args.json {
@@ -234,7 +278,12 @@ fn print_human(args: &Args, r: &Report, dur_in: f64) {
         args.min_conf,
         if args.min_conf == 0.0 { " (gate disabled)" } else { "" }
     );
-    println!("  working rate: {} Hz, {} samples after resample", ADSB_RATE, r.samples_work);
+    println!(
+        "  recovery:     repair {}, roster {}",
+        onoff(args.repair),
+        onoff(args.roster)
+    );
+    println!("  working rate: {} Hz, {} samples after resample", r.work_rate, r.samples_work);
     println!("  frames (CRC-valid):  {}", r.frames_valid);
     if let (Some(mean), Some(min)) = (r.conf_mean(), r.conf_min) {
         println!("  frame confidence:    mean {mean:.3}, min {min:.3} (gate {:.2})", args.min_conf);
@@ -289,6 +338,14 @@ fn pct(ours: u64, base: u64) -> f64 {
     100.0 * ours as f64 / base as f64
 }
 
+fn onoff(b: bool) -> &'static str {
+    if b {
+        "on"
+    } else {
+        "off"
+    }
+}
+
 fn print_json(args: &Args, r: &Report, dur_in: f64) {
     let aircraft: Vec<String> = r.aircraft.keys().map(|a| format!("\"{a:06X}\"")).collect();
     let df: Vec<String> = r.df_hist.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
@@ -305,9 +362,11 @@ fn print_json(args: &Args, r: &Report, dur_in: f64) {
     );
     print!("\"phases\":{},", args.phases);
     print!("\"min_conf\":{:.3},", args.min_conf);
+    print!("\"repair\":{},", args.repair);
+    print!("\"roster\":{},", args.roster);
     print!("\"samples_in\":{},", r.samples_in);
     print!("\"duration_s\":{dur_in:.3},");
-    print!("\"work_rate\":{ADSB_RATE},");
+    print!("\"work_rate\":{},", r.work_rate);
     print!("\"samples_work\":{},", r.samples_work);
     print!("\"frames_crc_valid\":{},", r.frames_valid);
     print!("\"conf_mean\":{:.3},", r.conf_mean().unwrap_or(0.0));
@@ -504,6 +563,29 @@ mod tests {
         assert_eq!(p.baseline_frames, Some(250));
         assert_eq!(p.baseline_aircraft, Some(3));
         assert!(p.json);
+    }
+
+    #[test]
+    fn work_rate_flag_parses_and_bounds() {
+        assert_eq!(parse_args(&args(&["rec.iq"])).unwrap().work_rate, DEFAULT_WORK_RATE);
+        assert_eq!(
+            parse_args(&args(&["rec.iq", "--work-rate", "4000000"])).unwrap().work_rate,
+            4_000_000
+        );
+        // Non-integer-MHz and odd-MHz rates the slicer cannot run at are rejected.
+        assert!(parse_args(&args(&["rec.iq", "--work-rate", "2400000"])).is_err());
+        assert!(parse_args(&args(&["rec.iq", "--work-rate", "3000000"])).is_err());
+        assert!(parse_args(&args(&["rec.iq", "--work-rate", "fast"])).is_err());
+    }
+
+    #[test]
+    fn repair_and_roster_flags_default_off() {
+        let p = parse_args(&args(&["rec.iq"])).unwrap();
+        assert!(!p.repair);
+        assert!(!p.roster);
+        let p = parse_args(&args(&["rec.iq", "--repair", "--roster"])).unwrap();
+        assert!(p.repair);
+        assert!(p.roster);
     }
 
     #[test]

@@ -18,6 +18,7 @@
 mod crc;
 mod message;
 mod ppm;
+mod roster;
 mod tracker;
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub use message::{
     AirborneVelocity, ModeS, CA_LEVEL2,
 };
 pub use ppm::RawFrame;
+pub use roster::{is_address_overlaid, IcaoRoster, DEFAULT_ROSTER_CAP};
 pub use tracker::{Aircraft, AircraftTracker, Ingest};
 
 use crate::frontend::detector::EnvelopeDetector;
@@ -38,6 +40,31 @@ use crate::types::{Frame, FrameMeta, FramePayload, Sample};
 pub const ADSB_RATE: u32 = 2_000_000;
 /// Samples per microsecond at [`ADSB_RATE`].
 const SAMPLES_PER_US: usize = (ADSB_RATE / 1_000_000) as usize;
+
+/// R5 native-rate working option: 4 Msps. The 2.4 Msps capture cannot be decoded
+/// at a working rate of exactly 2.4 MHz — the slicer needs an even integer number
+/// of samples per microsecond (a half-µs PPM slot is [`slot_len`] whole samples),
+/// and 2.4 is not integer. Downsampling to the 2.0 MHz [`ADSB_RATE`] instead
+/// band-limits away the sharp 0.5 µs pulse edges (its anti-alias cutoff sits at
+/// the 1.0 MHz Nyquist, below the pulse's spectral content), which costs weak- and
+/// short-frame sensitivity — the measured DF11 gap to dump1090, which demodulates
+/// at the native 2.4 MHz. Resampling *up* to 4 MHz (the smallest even-integer
+/// samples/µs rate above the capture rate) instead **preserves** the full captured
+/// bandwidth — its 2.0 MHz Nyquist clears the ±1.2 MHz signal — so the slicer sees
+/// the un-smeared pulse, two samples per slot. This is the "or a higher common
+/// rate" the R5 plan calls for; the offline `adsb_bench --work-rate 4000000`
+/// measures it against the 2.0 MHz default on the reference capture.
+pub const ADSB_NATIVE_RATE: u32 = 4_000_000;
+
+/// Samples per microsecond at working rate `rate`, which must be a whole even
+/// number of MHz (2, 4, 6, …) so a half-µs PPM slot is a whole number of samples.
+pub fn samples_per_us(rate: u32) -> usize {
+    assert!(
+        rate.is_multiple_of(1_000_000) && (rate / 1_000_000).is_multiple_of(2),
+        "ADS-B working rate must be an even whole number of MHz, got {rate}"
+    );
+    (rate / 1_000_000) as usize
+}
 /// Microseconds of quiet padding around a modulated frame.
 const PAD_US: usize = 8;
 
@@ -138,6 +165,14 @@ pub struct AdsbDemod {
     floor: Vec<f32>,
     /// Absolute sample index of `buf[0]` in the fed stream.
     base: u64,
+    /// R5 roster gate: recently-seen ICAO addresses from clean DF11/17/18 decodes.
+    /// Consulted only when [`roster_enabled`](Self::roster_enabled) is set, and
+    /// built one buffer behind the frames it validates — a real aircraft squitters
+    /// its address in the clear throughout its pass, so a ~1 s lag is immaterial.
+    roster: roster::IcaoRoster,
+    /// Whether to consult and build the roster (R5 address-overlaid recovery). Off
+    /// by default, so the shipping decoder is unchanged.
+    roster_enabled: bool,
 }
 
 impl AdsbDemod {
@@ -153,11 +188,21 @@ impl AdsbDemod {
         Self::with_phases_min_conf(phases, ADSB_MIN_CONFIDENCE)
     }
 
-    /// Construct with an explicit phase count and soft-decision threshold. `0.0`
-    /// disables the R4 gate (accept every parity-clean frame); the offline
-    /// `adsb_bench` uses this to measure the accept/reject split.
+    /// Construct with an explicit phase count and soft-decision threshold at the
+    /// default [`ADSB_RATE`] working rate. `0.0` disables the R4 gate (accept
+    /// every parity-clean frame); the offline `adsb_bench` uses this to measure
+    /// the accept/reject split.
     pub fn with_phases_min_conf(phases: usize, min_confidence: f32) -> Self {
-        let mut demod = ppm::ParallelDemodulator::new(SAMPLES_PER_US, phases);
+        Self::with_rate_phases_min_conf(ADSB_RATE, phases, min_confidence)
+    }
+
+    /// Construct at an explicit working `rate` (R5 Lever 1). `rate` must be an
+    /// even whole number of MHz (see [`samples_per_us`]); [`ADSB_RATE`] is the
+    /// shipping 2 MHz rate, [`ADSB_NATIVE_RATE`] the 4 MHz native-preserving
+    /// option. `adsb_bench` resamples the capture to `rate` and builds the demod
+    /// here to match, so the slicer runs at the same rate the front end delivers.
+    pub fn with_rate_phases_min_conf(rate: u32, phases: usize, min_confidence: f32) -> Self {
+        let mut demod = ppm::ParallelDemodulator::new(samples_per_us(rate), phases);
         demod.set_min_confidence(min_confidence);
         AdsbDemod {
             demod,
@@ -165,14 +210,34 @@ impl AdsbDemod {
             buf: Vec::new(),
             floor: Vec::new(),
             base: 0,
+            roster: roster::IcaoRoster::default(),
+            roster_enabled: false,
         }
     }
 
+    /// Enable or disable R5 single-bit CRC repair (Lever 2a). Off by default; the
+    /// confidence gate still applies to a repaired frame.
+    pub fn set_repair(&mut self, repair: bool) {
+        self.demod.set_repair(repair);
+    }
+
+    /// Enable or disable the R5 ICAO-roster gate (Lever 2b) — accept an
+    /// address-overlaid DF0/4/5/16/20/21 frame only when its recovered address is
+    /// on the roster of recently-seen clean DF11/17/18 addresses. Off by default.
+    pub fn set_roster(&mut self, enabled: bool) {
+        self.roster_enabled = enabled;
+    }
+
     fn emit(&self, raw: ppm::RawFrame) -> Frame {
+        // `crc_ok` marks a frame accepted as genuine: it checksummed clean, was
+        // single-bit repaired to clean, or is an address-overlaid frame whose
+        // address the roster confirmed (see [`RawFrame::valid`]). Recovery is off
+        // by default, so with the shipping config this is exactly `residual == 0`.
+        let crc_ok = raw.valid();
         Frame {
             payload: FramePayload::Packet(raw.bytes),
             meta: FrameMeta {
-                crc_ok: raw.crc_residual == 0,
+                crc_ok,
                 sample_offset: self.base + raw.offset as u64,
                 decoder: Some("adsb".to_string()),
                 confidence: Some(raw.confidence),
@@ -187,6 +252,30 @@ impl AdsbDemod {
         self.floor.drain(..consumed);
         self.base += consumed as u64;
         out
+    }
+
+    /// Feed the ICAO addresses of clean DF11/17/18 frames into the roster — the
+    /// addresses that arrive in the clear and checksum to zero, so they are known
+    /// to be real. These are what a later address-overlaid frame is validated
+    /// against. Address-overlaid recovered frames are *not* re-noted: their
+    /// address was already on the roster (that is why they were accepted).
+    fn note_addresses(roster: &mut roster::IcaoRoster, frames: &[ppm::RawFrame]) {
+        for f in frames {
+            if f.crc_ok() && matches!(f.df, 11 | 17 | 18) {
+                roster.note(ModeS::new(&f.bytes).icao());
+            }
+        }
+    }
+
+    /// Run the ensemble over the working buffer, threading the roster when the
+    /// R5 gate is enabled and updating it from this pass's clean addresses.
+    fn scan(&mut self, flush: bool) -> (Vec<ppm::RawFrame>, usize) {
+        let roster = self.roster_enabled.then_some(&self.roster);
+        let (frames, consumed) = self.demod.scan_with_floor(&self.buf, &self.floor, roster, flush);
+        if self.roster_enabled {
+            Self::note_addresses(&mut self.roster, &frames);
+        }
+        (frames, consumed)
     }
 
     /// Advance the persistent floor over the newly fed samples, recording the
@@ -220,7 +309,7 @@ impl Demodulator for AdsbDemod {
 
     fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
         self.ingest(samples);
-        let (frames, consumed) = self.demod.scan_with_floor(&self.buf, &self.floor, false);
+        let (frames, consumed) = self.scan(false);
         self.drain(frames, consumed)
     }
 
@@ -229,10 +318,11 @@ impl Demodulator for AdsbDemod {
         self.floor.clear();
         self.det = ppm::new_floor_detector();
         self.base = 0;
+        self.roster.clear();
     }
 
     fn flush(&mut self) -> Vec<Frame> {
-        let (frames, consumed) = self.demod.scan_with_floor(&self.buf, &self.floor, true);
+        let (frames, consumed) = self.scan(true);
         self.drain(frames, consumed)
     }
 }

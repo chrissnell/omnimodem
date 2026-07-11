@@ -427,3 +427,149 @@ fn airborne_velocity_airspeed_heading_decode() {
     assert!((v.track.unwrap() - 243.98).abs() < 0.1, "hdg={:?}", v.track);
     assert_eq!(v.vertical_rate, Some(-2304));
 }
+
+// --- R5 Lever 1: native (higher-rate) decode -------------------------------
+
+#[test]
+fn native_rate_decode_roundtrips() {
+    // Modulate at 4 samples/µs (the 4 MHz native-preserving working rate) and
+    // decode with a demod built at that rate — the whole PPM stack is rate-
+    // parameterized, so a frame round-trips at the native rate as it does at 2 MHz.
+    let frame = hex(KLM1023);
+    let wave = PpmModulator::new(4).modulate_padded(&frame, 4, 4);
+    let mut demod =
+        AdsbDemod::with_rate_phases_min_conf(ADSB_NATIVE_RATE, ADSB_SLICER_PHASES, ADSB_MIN_CONFIDENCE);
+    let mut frames = demod.feed(&wave);
+    frames.extend(demod.flush());
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].meta.crc_ok);
+    assert_eq!(packet_bytes(&frames[0]), &frame[..]);
+}
+
+// --- R5 Lever 2a: single-bit CRC repair ------------------------------------
+
+#[test]
+fn single_bit_repair_recovers_frame() {
+    let clean = hex(KLM1023);
+    let mut corrupt = clean.clone();
+    corrupt[7] ^= 0x04; // one data-bit flip -> parity no longer clears
+    assert_ne!(crc::checksum(&corrupt), 0);
+    let wave = PpmModulator::new(2).modulate_padded(&corrupt, 4, 4);
+
+    // Default demod (repair off) gates the corrupted frame out entirely.
+    let mut off = AdsbDemod::new();
+    let mut none = off.feed(&wave);
+    none.extend(off.flush());
+    assert!(none.is_empty());
+
+    // With repair on, the single-bit error is corrected back to the clean frame.
+    let mut on = AdsbDemod::new();
+    on.set_repair(true);
+    let mut got = on.feed(&wave);
+    got.extend(on.flush());
+    assert_eq!(got.len(), 1);
+    assert!(got[0].meta.crc_ok);
+    assert_eq!(packet_bytes(&got[0]), &clean[..]);
+}
+
+// --- R5 Lever 2b: ICAO-roster-gated address-overlaid recovery --------------
+
+/// An address-overlaid long frame (DF20, Comm-B) with arbitrary content, and the
+/// CRC residual it checksums to — the value the roster gate reads as its ICAO.
+fn overlaid_df20() -> (Vec<u8>, u32) {
+    let mut f = vec![0u8; 14];
+    f[0] = 20 << 3; // DF20
+    f[1] = 0xE1;
+    f[2] = 0x99;
+    f[3] = 0x10;
+    f[4] = 0x8D;
+    f[5] = 0x27;
+    f[6] = 0x4C;
+    let r = crc::checksum(&f);
+    (f, r)
+}
+
+#[test]
+fn roster_gate_recovers_overlaid_frame_and_reports_address() {
+    // Direct PpmDemodulator scan so the recovered address is observable. A flat
+    // zero noise floor suffices for a clean full-amplitude modulated frame.
+    let (frame, r) = overlaid_df20();
+    assert_ne!(r, 0);
+    let wave = PpmModulator::new(2).modulate_padded(&frame, 8, 8);
+    let noise = vec![0.0f32; wave.len()];
+    let demod = PpmDemodulator::new(2);
+
+    // Empty roster: an address-overlaid frame has nothing to validate against,
+    // so it is rejected — no fabricated aircraft from a CRC-overlay slice.
+    let empty = IcaoRoster::new(8);
+    assert!(demod.scan_with_floor(&wave, &noise, Some(&empty), true).0.is_empty());
+
+    // Roster holding the frame's address: it is recovered, carrying the address.
+    let mut roster = IcaoRoster::new(8);
+    roster.note(r);
+    let frames = demod.scan_with_floor(&wave, &noise, Some(&roster), true).0;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].df, 20);
+    assert_eq!(frames[0].crc_residual, r);
+    assert_eq!(frames[0].recovered_icao, Some(r));
+    assert!(frames[0].valid());
+    assert!(!frames[0].crc_ok()); // valid by roster, not by a zero checksum
+}
+
+/// Stream one modulated frame through the demod, then a quiet tail long enough to
+/// drain the decoded frame's samples out of the internal buffer (the ensemble
+/// consumes only the phase-minimum per scan, so a frame lingers until quiet
+/// scanning advances past it). Returns the frames emitted across the whole push —
+/// so a subsequent frame in a later call is scanned against a clean buffer and the
+/// roster this call populated.
+fn stream_frame(demod: &mut AdsbDemod, wave: &[f32]) -> Vec<Frame> {
+    let mut out = demod.feed(wave);
+    out.extend(demod.feed(&vec![0.0f32; 4096]));
+    out
+}
+
+#[test]
+fn roster_gate_recovers_overlaid_frame_from_seen_address() {
+    // End-to-end: a clean DF17 for address r seeds the roster in one feed, so the
+    // address-overlaid DF20 whose residual is r is recovered in the next.
+    let (overlaid, r) = overlaid_df20();
+    assert_ne!(r, 0);
+    let seed = encode_identification(r, "SEED").to_vec();
+    let modu = PpmModulator::new(2);
+    let seed_wave = modu.modulate_padded(&seed, 8, 8);
+    let ov_wave = modu.modulate_padded(&overlaid, 8, 8);
+
+    let mut demod = AdsbDemod::new();
+    demod.set_roster(true);
+    let s = stream_frame(&mut demod, &seed_wave);
+    assert_eq!(s.len(), 1);
+    assert_eq!(ModeS::new(packet_bytes(&s[0])).icao(), r);
+
+    let mut got = stream_frame(&mut demod, &ov_wave);
+    got.extend(demod.flush());
+    assert_eq!(got.len(), 1);
+    assert!(got[0].meta.crc_ok, "roster-confirmed overlaid frame is accepted");
+    assert_eq!(ModeS::new(packet_bytes(&got[0])).df(), 20);
+    assert_eq!(packet_bytes(&got[0]), &overlaid[..]);
+}
+
+#[test]
+fn roster_gate_rejects_overlaid_frame_from_unseen_address() {
+    // The roster holds a *different* address, so the overlaid frame stays gated —
+    // no aircraft fabricated from a CRC-overlay slice of an unknown address.
+    let (overlaid, r) = overlaid_df20();
+    let other = (r ^ 0x01) & 0x00FF_FFFF;
+    let seed = encode_identification(other, "OTHER").to_vec();
+    let modu = PpmModulator::new(2);
+    let seed_wave = modu.modulate_padded(&seed, 8, 8);
+    let ov_wave = modu.modulate_padded(&overlaid, 8, 8);
+
+    let mut demod = AdsbDemod::new();
+    demod.set_roster(true);
+    let s = stream_frame(&mut demod, &seed_wave);
+    assert_eq!(s.len(), 1);
+
+    let mut got = stream_frame(&mut demod, &ov_wave);
+    got.extend(demod.flush());
+    assert!(got.is_empty());
+}

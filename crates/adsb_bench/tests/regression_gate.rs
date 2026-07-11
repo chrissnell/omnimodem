@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use adsb_bench::{decode_iq, Front, DEFAULT_MIN_CONF, DEFAULT_PHASES};
+use adsb_bench::{decode_iq, DecodeOpts, Front, DEFAULT_MIN_CONF, DEFAULT_PHASES, DEFAULT_WORK_RATE};
 
 /// The fixture is generated at the working rate, so decode with no resample.
 const IN_RATE: u32 = 2_000_000;
@@ -40,7 +40,17 @@ const EXPECT_DF17: u64 = 3;
 fn load_report() -> adsb_bench::Report {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/adsb_ci_clip.iq");
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
-    decode_iq(&bytes, IN_RATE, FRONT, PHASES, DEFAULT_MIN_CONF)
+    // The shipping decoder: 2 MHz working rate, R3/R4 ensemble + gate, R5 recovery
+    // levers off (measurement-gated). Only in_rate/front differ from the default.
+    let opts = DecodeOpts {
+        in_rate: IN_RATE,
+        work_rate: DEFAULT_WORK_RATE,
+        front: FRONT,
+        phases: PHASES,
+        min_conf: DEFAULT_MIN_CONF,
+        ..DecodeOpts::default()
+    };
+    decode_iq(&bytes, &opts)
 }
 
 #[test]
