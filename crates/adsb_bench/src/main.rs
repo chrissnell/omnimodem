@@ -1,9 +1,14 @@
 //! adsb_bench — offline frame-yield ruler for the omnimodem ADS-B decoder.
 //!
 //! Reads a raw uint8 interleaved I/Q recording (as `rtl_tcp` streams it),
-//! runs it through the exact daemon DSP path — `|I+jQ|` magnitude → resample to
-//! the 2 MHz working rate → [`AdsbDemod`] — and tallies what came out:
-//! CRC-valid frames, unique aircraft, and DF / DF17-type-code histograms.
+//! runs it through the same magnitude → resample → demod path the daemon uses —
+//! `|I+jQ|` magnitude → resample to the 2 MHz working rate → [`AdsbDemod`] — and
+//! tallies what came out: CRC-valid frames, unique aircraft, and DF /
+//! DF17-type-code histograms.
+//!
+//! (The live daemon additionally scales the envelope by 1/√2 and quantizes it to
+//! i16 for its audio-delivery path; the PPM demod is scale-independent, so the
+//! bench skips both and the decode is equivalent, not bit-identical.)
 //!
 //! This is the yardstick the ADS-B improvement phases (R1–R5) are measured
 //! against: run the same reference recording before and after a change and the
@@ -56,12 +61,11 @@ fn main() {
     }
 }
 
+/// Flags that consume the following token as their value.
+const VALUED_FLAGS: &[&str] = &["--in-rate", "--baseline-frames", "--baseline-aircraft"];
+
 fn parse_args(raw: &[String]) -> Result<Args, String> {
-    let path = raw
-        .iter()
-        .find(|a| !a.starts_with("--"))
-        .cloned()
-        .ok_or("missing <file.iq> argument")?;
+    let path = positional(raw).ok_or("missing <file.iq> argument")?.clone();
     Ok(Args {
         path,
         in_rate: flag(raw, "--in-rate")
@@ -86,10 +90,29 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
-/// Tally accumulated over every frame the demod emitted.
+/// First positional token — the input path — skipping flags and the values
+/// consumed by valued flags, so `--baseline-frames 100 rec.iq` finds `rec.iq`.
+fn positional(args: &[String]) -> Option<&String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a.starts_with("--") {
+            if VALUED_FLAGS.contains(&a.as_str()) {
+                i += 1; // also skip its value
+            }
+            i += 1;
+            continue;
+        }
+        return Some(a);
+    }
+    None
+}
+
+/// Tally accumulated over every frame the demod emitted. `AdsbDemod` gates on
+/// parity (`require_crc`), so every emitted frame is CRC-valid — this counts the
+/// decoder's usable yield, the number each R-phase is trying to move.
 #[derive(Default)]
 struct Report {
-    frames_emitted: u64,
     frames_valid: u64,
     /// Airborne-position frames (DF17/18, TC 9-18/20-22) that passed CRC.
     airborne_pos: u64,
@@ -106,9 +129,10 @@ fn run(args: &Args) -> Result<(), String> {
     let iq = u8_iq_to_cplx(&bytes);
     let samples_in = iq.len();
 
-    // Exact daemon path: magnitude envelope at the capture rate, resampled to
-    // the 2 MHz working rate through the same polyphase resampler, then fed to
-    // the streaming demod. The resampler is stateful, so a single instance
+    // Same demod path as the daemon: magnitude envelope at the capture rate,
+    // resampled to the 2 MHz working rate through the same polyphase resampler,
+    // then fed to the streaming demod. The resampler is stateful, so a single
+    // instance
     // spans every window; `AdsbDemod` itself buffers frames straddling a
     // window boundary. Windowing only bounds peak memory on long captures.
     let mut rs = Resampler::new(args.in_rate, ADSB_RATE, 16);
@@ -139,7 +163,8 @@ fn run(args: &Args) -> Result<(), String> {
 }
 
 fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool) {
-    report.frames_emitted += 1;
+    // Both guards are defensive: `AdsbDemod` only ever emits CRC-valid `Packet`
+    // frames today, but keep counting honest if that ever changes.
     let FramePayload::Packet(bytes) = payload else {
         return;
     };
@@ -177,12 +202,7 @@ fn print_human(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_
         "  working rate: {} Hz, {} samples after resample",
         ADSB_RATE, samples_work
     );
-    println!("  frames emitted:      {}", r.frames_emitted);
-    println!(
-        "  frames CRC-valid:    {}  ({} false-positive preambles)",
-        r.frames_valid,
-        r.frames_emitted - r.frames_valid
-    );
+    println!("  frames (CRC-valid):  {}", r.frames_valid);
     println!("  airborne positions:  {}", r.airborne_pos);
     println!("  unique aircraft:     {}", r.aircraft.len());
     if !r.aircraft.is_empty() {
@@ -246,13 +266,12 @@ fn print_json(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_w
         .map(|(k, v)| format!("\"{k}\":{v}"))
         .collect();
     print!("{{");
-    print!("\"path\":{:?},", args.path);
+    print!("\"path\":{},", json_str(&args.path));
     print!("\"in_rate\":{},", args.in_rate);
     print!("\"samples_in\":{samples_in},");
     print!("\"duration_s\":{dur_in:.3},");
     print!("\"work_rate\":{ADSB_RATE},");
     print!("\"samples_work\":{samples_work},");
-    print!("\"frames_emitted\":{},", r.frames_emitted);
     print!("\"frames_crc_valid\":{},", r.frames_valid);
     print!("\"airborne_positions\":{},", r.airborne_pos);
     print!("\"unique_aircraft\":{},", r.aircraft.len());
@@ -266,6 +285,25 @@ fn print_json(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_w
         print!(",\"baseline_aircraft\":{ba}");
     }
     println!("}}");
+}
+
+/// Encode a string as a JSON string literal (quotes + minimal escaping).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Short label for a Mode S downlink format.
@@ -298,5 +336,76 @@ fn tc_label(tc: u8) -> &'static str {
         29 => "target state & status",
         31 => "operational status",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn path_first_with_defaults() {
+        let p = parse_args(&args(&["rec.iq"])).unwrap();
+        assert_eq!(p.path, "rec.iq");
+        assert_eq!(p.in_rate, DEFAULT_IN_RATE);
+        assert!(!p.json);
+        assert_eq!(p.baseline_frames, None);
+    }
+
+    #[test]
+    fn valued_flag_before_path_is_not_taken_as_path() {
+        let p = parse_args(&args(&["--baseline-frames", "100", "rec.iq"])).unwrap();
+        assert_eq!(p.path, "rec.iq");
+        assert_eq!(p.baseline_frames, Some(100));
+    }
+
+    #[test]
+    fn boolean_flag_before_path() {
+        let p = parse_args(&args(&["--json", "rec.iq"])).unwrap();
+        assert_eq!(p.path, "rec.iq");
+        assert!(p.json);
+    }
+
+    #[test]
+    fn all_flags_parse() {
+        let p = parse_args(&args(&[
+            "rec.iq",
+            "--in-rate",
+            "3000000",
+            "--baseline-frames",
+            "250",
+            "--baseline-aircraft",
+            "3",
+            "--json",
+        ]))
+        .unwrap();
+        assert_eq!(p.in_rate, 3_000_000);
+        assert_eq!(p.baseline_frames, Some(250));
+        assert_eq!(p.baseline_aircraft, Some(3));
+        assert!(p.json);
+    }
+
+    #[test]
+    fn missing_path_errors() {
+        assert!(parse_args(&args(&["--json"])).is_err());
+        assert!(parse_args(&args(&[])).is_err());
+    }
+
+    #[test]
+    fn bad_numeric_flag_errors() {
+        assert!(parse_args(&args(&["rec.iq", "--in-rate", "fast"])).is_err());
+    }
+
+    #[test]
+    fn json_str_escapes_control_and_quotes() {
+        assert_eq!(json_str("a/b.iq"), "\"a/b.iq\"");
+        assert_eq!(json_str("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_str("a\tb"), "\"a\\tb\"");
+        assert_eq!(json_str("\u{7f}"), "\"\u{7f}\""); // DEL is >= 0x20, passes through
+        assert_eq!(json_str("\u{1}"), "\"\\u0001\"");
     }
 }
