@@ -25,6 +25,18 @@ capture (no channelization), not a soundcard. See
 |---|---|---|---|---|
 | ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude. DSP + KATs landed; daemon wiring / typed `AircraftReport` / TUI flights table are Phases 2-4. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
 
+**Decoder benchmark (the ruler).** [`../../crates/adsb_bench/`](../../crates/adsb_bench/)
+replays a raw uint8 I/Q recording (2.4 Msps, as `rtl_tcp` streams it) through the
+demod and reports CRC-valid frames, unique aircraft, and DF/type-code histograms
+— the yardstick the decoder-quality phases (R1–R5) are measured against. Its
+`--front` flag picks the front end: `complex` (default) band-limits and decimates
+the I/Q 2.4M→2.0M before taking the magnitude; `mag` takes the magnitude at the
+capture rate then decimates the envelope (the path the daemon ships today). The
+`complex` front end preserves the sharp Mode S pulse edges that magnitude
+decimation aliases, and is the R1 improvement. `ComplexResampler` assumes a
+DC-centered channel, which the ADS-B capture is (tuned to 1090 MHz, no NCO
+offset).
+
 ## WSJT-X weak-signal family (windowed / time-aligned)
 
 Block-demod modes that buffer a time slot and decode multi-pass. LDPC or K=32
