@@ -275,7 +275,12 @@ impl PpmDemodulator {
             };
 
             let residual = crc::checksum(&bytes);
-            if !self.require_crc || residual == 0 {
+            // An all-zero message has a zero CRC residual by construction, so a
+            // flat stretch (e.g. a DC region before the noise floor has warmed
+            // up) would otherwise slice to a spurious "valid" DF0 frame. A real
+            // Mode S transmission is never all zeros; reject it.
+            let degenerate = bytes.iter().all(|&b| b == 0);
+            if !degenerate && (!self.require_crc || residual == 0) {
                 frames.push(RawFrame { bytes, df, crc_residual: residual, offset: i });
                 i += self.frame_samples(nbits);
             } else {
