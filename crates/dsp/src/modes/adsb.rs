@@ -51,6 +51,19 @@ pub const PREAMBLE_SLOTS: usize = 16;
 /// Half-microsecond slots per data bit (one pulse-position pair).
 pub const DATA_SLOTS_PER_BIT: usize = 2;
 
+/// Sub-sample slicer phases the streaming demod runs (R3 multi-phase ensemble).
+/// Four phases (0, ¼, ½, ¾ sample) recover the frames whose bit timing lands off
+/// the 2 MHz integer grid; see [`ppm::ParallelDemodulator`].
+///
+/// Chosen by sweeping the KSLC 2.4 Msps reference recording (complex front end):
+/// 16 CRC-valid frames at 1 phase (the R2 baseline) → **25 at 4** (+56%), with
+/// airborne positions 4 → 6 and the aircraft set still exactly readsb's three.
+/// Higher counts (6, 8) squeeze out a few more frames but begin surfacing a
+/// CRC-lucky false positive — a China-prefix ICAO (B6xxxx) implausible at KSLC
+/// and absent from readsb's full baseline — so 4 is the conservative pick that
+/// maximizes real yield without inventing an aircraft.
+pub const ADSB_SLICER_PHASES: usize = 4;
+
 /// Preamble slots that carry a pulse — pulses at 0.0, 1.0, 3.5, 4.5 µs.
 pub const PREAMBLE_HIGH_SLOTS: [usize; 4] = [0, 2, 7, 9];
 /// Preamble guard slots the detector tests for quiet: the gap between the two
@@ -79,7 +92,7 @@ fn payload_kind(p: &FramePayload) -> &'static str {
 /// Streaming ADS-B demodulator. Buffers magnitude samples across `feed` calls so
 /// a frame straddling a chunk boundary is not lost.
 pub struct AdsbDemod {
-    demod: ppm::PpmDemodulator,
+    demod: ppm::ParallelDemodulator,
     /// Adaptive noise-floor follower advanced once per fed sample. Persisting it
     /// across `feed` calls keeps the floor continuous, so a frame landing near a
     /// chunk boundary is gated against the true noise level rather than a floor
@@ -94,8 +107,15 @@ pub struct AdsbDemod {
 
 impl AdsbDemod {
     pub fn new() -> Self {
+        Self::with_phases(ADSB_SLICER_PHASES)
+    }
+
+    /// Construct with an explicit slicer-phase count (`>= 1`). `1` is the
+    /// single-phase decoder; the offline `adsb_bench` uses this to sweep phases
+    /// and reproduce the pre-R3 baseline.
+    pub fn with_phases(phases: usize) -> Self {
         AdsbDemod {
-            demod: ppm::PpmDemodulator::new(SAMPLES_PER_US),
+            demod: ppm::ParallelDemodulator::new(SAMPLES_PER_US, phases),
             det: ppm::new_floor_detector(),
             buf: Vec::new(),
             floor: Vec::new(),

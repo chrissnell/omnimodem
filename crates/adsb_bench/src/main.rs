@@ -45,19 +45,22 @@
 //! number. Pass a readsb (or dump1090) baseline to print the gap directly.
 //!
 //! Usage:
-//!   adsb_bench <file.iq> [--in-rate 2400000] [--front complex|mag] [--json]
-//!             [--baseline-frames N] [--baseline-aircraft M]
+//!   adsb_bench <file.iq> [--in-rate 2400000] [--front complex|mag] [--phases N]
+//!             [--json] [--baseline-frames N] [--baseline-aircraft M]
 //!
 //! The recording is captured off the air, never re-transmitted: 1090 MHz is
 //! protected aeronautical spectrum. This tool only reads.
 
-use adsb_bench::{decode_iq, Front, Report, DEFAULT_IN_RATE};
+use adsb_bench::{decode_iq, Front, Report, DEFAULT_IN_RATE, DEFAULT_PHASES};
 use omnimodem_dsp::modes::adsb::ADSB_RATE;
 
 struct Args {
     path: String,
     in_rate: u32,
     front: Front,
+    /// Sub-sample slicer phases (R3 ensemble). Default matches the shipping
+    /// decoder; `--phases 1` reproduces the pre-R3 single-phase baseline.
+    phases: usize,
     json: bool,
     baseline_frames: Option<u64>,
     baseline_aircraft: Option<u64>,
@@ -71,7 +74,7 @@ fn main() {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
-                 [--front complex|mag] [--json] \
+                 [--front complex|mag] [--phases {DEFAULT_PHASES}] [--json] \
                  [--baseline-frames N] [--baseline-aircraft M]"
             );
             std::process::exit(2);
@@ -87,6 +90,7 @@ fn main() {
 const VALUED_FLAGS: &[&str] = &[
     "--in-rate",
     "--front",
+    "--phases",
     "--baseline-frames",
     "--baseline-aircraft",
 ];
@@ -104,6 +108,13 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             Some("mag") => Front::Mag,
             Some(other) => return Err(format!("bad --front {other:?} (want complex|mag)")),
         },
+        phases: flag(raw, "--phases")
+            .map(|s| match s.parse() {
+                Ok(0) | Err(_) => Err("bad --phases (want an integer >= 1)".to_string()),
+                Ok(n) => Ok(n),
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_PHASES),
         json: raw.iter().any(|a| a == "--json"),
         baseline_frames: flag(raw, "--baseline-frames")
             .map(|s| s.parse().map_err(|_| "bad --baseline-frames".to_string()))
@@ -140,9 +151,10 @@ fn positional(args: &[String]) -> Option<&String> {
 fn run(args: &Args) -> Result<(), String> {
     let bytes = std::fs::read(&args.path).map_err(|e| format!("read {}: {e}", args.path))?;
     // `--front` selects the front end that turns the capture into the 2 MHz
-    // envelope; the decode itself is the shared library path (see
-    // [`adsb_bench::decode_iq`]), so the CLI and the CI gate agree.
-    let report = decode_iq(&bytes, args.in_rate, args.front);
+    // envelope and `--phases` the slicer ensemble width; the decode itself is
+    // the shared library path (see [`adsb_bench::decode_iq`]), so the CLI and
+    // the CI gate agree.
+    let report = decode_iq(&bytes, args.in_rate, args.front, args.phases);
     let dur_in = report.samples_in as f64 / args.in_rate as f64;
     if args.json {
         print_json(args, &report, dur_in);
@@ -159,6 +171,7 @@ fn print_human(args: &Args, r: &Report, dur_in: f64) {
         args.in_rate, r.samples_in, dur_in
     );
     println!("  front end:    {}", args.front.label());
+    println!("  slicer phases: {}", args.phases);
     println!("  working rate: {} Hz, {} samples after resample", ADSB_RATE, r.samples_work);
     println!("  frames (CRC-valid):  {}", r.frames_valid);
     println!("  airborne positions:  {}", r.airborne_pos);
@@ -225,6 +238,7 @@ fn print_json(args: &Args, r: &Report, dur_in: f64) {
             Front::Mag => "mag",
         }
     );
+    print!("\"phases\":{},", args.phases);
     print!("\"samples_in\":{},", r.samples_in);
     print!("\"duration_s\":{dur_in:.3},");
     print!("\"work_rate\":{ADSB_RATE},");
@@ -310,8 +324,17 @@ mod tests {
         assert_eq!(p.path, "rec.iq");
         assert_eq!(p.in_rate, DEFAULT_IN_RATE);
         assert_eq!(p.front, Front::Complex); // R1 complex front end is the default
+        assert_eq!(p.phases, DEFAULT_PHASES); // R3 ensemble is the default
         assert!(!p.json);
         assert_eq!(p.baseline_frames, None);
+    }
+
+    #[test]
+    fn phases_flag_parses_and_rejects_zero() {
+        assert_eq!(parse_args(&args(&["rec.iq", "--phases", "1"])).unwrap().phases, 1);
+        assert_eq!(parse_args(&args(&["rec.iq", "--phases", "6"])).unwrap().phases, 6);
+        assert!(parse_args(&args(&["rec.iq", "--phases", "0"])).is_err());
+        assert!(parse_args(&args(&["rec.iq", "--phases", "two"])).is_err());
     }
 
     #[test]

@@ -20,6 +20,10 @@ use omnimodem_dsp::mode::Demodulator;
 use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
 use omnimodem_dsp::types::{Cplx, FramePayload, Sample};
 
+/// Default slicer-phase count — re-exported so the CLI default and the CI gate
+/// can name the shipping decoder's ensemble width (see [`decode_iq`]).
+pub use omnimodem_dsp::modes::adsb::ADSB_SLICER_PHASES as DEFAULT_PHASES;
+
 /// Default capture rate — the wideband rate the daemon commands the dongle to
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
 pub const DEFAULT_IN_RATE: u32 = 2_400_000;
@@ -106,13 +110,15 @@ impl Report {
 ///
 /// Mirrors the daemon path: the `front` front end turns the capture into the
 /// 2 MHz magnitude envelope (see [`Front`]), which is fed to the streaming
-/// demod. The resampler is stateful, so a single instance spans every window;
-/// `AdsbDemod` buffers frames straddling a window boundary. Windowing only
-/// bounds peak memory on long captures.
-pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front) -> Report {
+/// demod running `phases` sub-sample slicer phases (R3 ensemble;
+/// [`DEFAULT_PHASES`] matches the shipping decoder, `1` reproduces the pre-R3
+/// baseline). The resampler is stateful, so a single instance spans every
+/// window; `AdsbDemod` buffers frames straddling a window boundary. Windowing
+/// only bounds peak memory on long captures.
+pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front, phases: usize) -> Report {
     let iq = u8_iq_to_cplx(bytes);
     let mut front_end = FrontEnd::new(front, in_rate);
-    let mut demod = AdsbDemod::new();
+    let mut demod = AdsbDemod::with_phases(phases);
     let mut report = Report { samples_in: iq.len(), ..Default::default() };
 
     let window = (in_rate as usize).max(1); // ~1 s of complex samples per window
