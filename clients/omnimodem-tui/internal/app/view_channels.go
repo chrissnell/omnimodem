@@ -80,6 +80,13 @@ func (v *channelsView) Update(msg tea.Msg) (View, tea.Cmd) {
 			return v, devicesCmd(v.m.c)
 		case "o", "enter":
 			v.m.sel = v.selectedChannel()
+			// ADS-B channels have no operator/TX surface and aren't tunable —
+			// they open the live flights table instead. Check this before the
+			// SDR branch, since an ADS-B channel is also rtl_tcp-bound.
+			if cl := v.m.live[v.m.sel]; cl != nil && baseModeLabel(cl.mode) == "adsb" {
+				v.m.push(newFlightsView(v.m))
+				return v, nil
+			}
 			// SDR-bound channels open the tuning view (RF waterfall + tuner
 			// controls); every other channel opens the standard operate view.
 			if cl := v.m.live[v.m.sel]; cl != nil && isSDRDevice(cl.deviceID) {

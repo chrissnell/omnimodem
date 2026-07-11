@@ -266,6 +266,8 @@ var modeDisplayNames = map[string]string{
 	"sitorb":   "SITOR-B",
 	"wefax576": "WEFAX-576",
 	"wefax288": "WEFAX-288",
+	// ADS-B (Mode S) surveillance.
+	"adsb": "ADS-B",
 	// MMSSTV modes whose names carry a spelled-out word.
 	"scottie1":  "Scottie 1",
 	"scottie2":  "Scottie 2",
