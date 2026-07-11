@@ -1,10 +1,22 @@
 //! adsb_bench — offline frame-yield ruler for the omnimodem ADS-B decoder.
 //!
 //! Reads a raw uint8 interleaved I/Q recording (as `rtl_tcp` streams it),
-//! runs it through the same magnitude → resample → demod path the daemon uses —
-//! `|I+jQ|` magnitude → resample to the 2 MHz working rate → [`AdsbDemod`] — and
-//! tallies what came out: CRC-valid frames, unique aircraft, and DF /
-//! DF17-type-code histograms.
+//! resamples it to the 2 MHz working rate, and runs the envelope through
+//! [`AdsbDemod`], tallying what came out: CRC-valid frames, unique aircraft, and
+//! DF / DF17-type-code histograms.
+//!
+//! ## Front ends (`--front`)
+//! Two ways to get from the 2.4 Msps capture to the 2 MHz magnitude envelope the
+//! demod slices:
+//! - `complex` (default, R1): band-limited complex decimation first —
+//!   [`ComplexResampler`] resamples the I/Q 2.4M→2.0M, then `|I+jQ|` magnitude.
+//!   This is apples-to-apples with how readsb consumes its native rate: the
+//!   anti-alias lowpass sees the true channel, not the doubled-bandwidth
+//!   envelope, so pulse edges survive decimation intact.
+//! - `mag` (R0 baseline): the original path — `|I+jQ|` magnitude at the capture
+//!   rate, then a real [`Resampler`] decimates the envelope 2.4M→2.0M. Envelope
+//!   detection doubles the bandwidth, so decimating it aliases sharp pulse edges.
+//!   Kept so the ruler can reproduce the pre-R1 baseline on any recording.
 //!
 //! (The live daemon additionally scales the envelope by 1/√2 and quantizes it to
 //! i16 for its audio-delivery path; the PPM demod is scale-independent, so the
@@ -16,7 +28,7 @@
 //! number. Pass a readsb (or dump1090) baseline to print the gap directly.
 //!
 //! Usage:
-//!   adsb_bench <file.iq> [--in-rate 2400000] [--json]
+//!   adsb_bench <file.iq> [--in-rate 2400000] [--front complex|mag] [--json]
 //!             [--baseline-frames N] [--baseline-aircraft M]
 //!
 //! The recording is captured off the air, never re-transmitted: 1090 MHz is
@@ -25,7 +37,7 @@
 use std::collections::BTreeMap;
 
 use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
-use omnimodem_dsp::frontend::resample::Resampler;
+use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
 use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
 use omnimodem_dsp::types::{FramePayload, Sample};
@@ -34,9 +46,29 @@ use omnimodem_dsp::types::{FramePayload, Sample};
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
 const DEFAULT_IN_RATE: u32 = 2_400_000;
 
+/// How the 2.4 Msps capture becomes the 2 MHz magnitude envelope. See the module
+/// doc for the DSP rationale.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Front {
+    /// R1: complex-decimate the I/Q 2.4M→2.0M, then take magnitude.
+    Complex,
+    /// R0: take magnitude at the capture rate, then decimate the envelope.
+    Mag,
+}
+
+impl Front {
+    fn label(self) -> &'static str {
+        match self {
+            Front::Complex => "complex (resample I/Q → magnitude)",
+            Front::Mag => "mag (magnitude → resample envelope)",
+        }
+    }
+}
+
 struct Args {
     path: String,
     in_rate: u32,
+    front: Front,
     json: bool,
     baseline_frames: Option<u64>,
     baseline_aircraft: Option<u64>,
@@ -49,7 +81,8 @@ fn main() {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] [--json] \
+                "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
+                 [--front complex|mag] [--json] \
                  [--baseline-frames N] [--baseline-aircraft M]"
             );
             std::process::exit(2);
@@ -62,7 +95,12 @@ fn main() {
 }
 
 /// Flags that consume the following token as their value.
-const VALUED_FLAGS: &[&str] = &["--in-rate", "--baseline-frames", "--baseline-aircraft"];
+const VALUED_FLAGS: &[&str] = &[
+    "--in-rate",
+    "--front",
+    "--baseline-frames",
+    "--baseline-aircraft",
+];
 
 fn parse_args(raw: &[String]) -> Result<Args, String> {
     let path = positional(raw).ok_or("missing <file.iq> argument")?.clone();
@@ -72,6 +110,11 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             .map(|s| s.parse().map_err(|_| "bad --in-rate".to_string()))
             .transpose()?
             .unwrap_or(DEFAULT_IN_RATE),
+        front: match flag(raw, "--front").as_deref() {
+            None | Some("complex") => Front::Complex,
+            Some("mag") => Front::Mag,
+            Some(other) => return Err(format!("bad --front {other:?} (want complex|mag)")),
+        },
         json: raw.iter().any(|a| a == "--json"),
         baseline_frames: flag(raw, "--baseline-frames")
             .map(|s| s.parse().map_err(|_| "bad --baseline-frames".to_string()))
@@ -129,23 +172,31 @@ fn run(args: &Args) -> Result<(), String> {
     let iq = u8_iq_to_cplx(&bytes);
     let samples_in = iq.len();
 
-    // Same demod path as the daemon: magnitude envelope at the capture rate,
-    // resampled to the 2 MHz working rate through the same polyphase resampler,
-    // then fed to the streaming demod. The resampler is stateful, so a single
-    // instance
-    // spans every window; `AdsbDemod` itself buffers frames straddling a
-    // window boundary. Windowing only bounds peak memory on long captures.
-    let mut rs = Resampler::new(args.in_rate, ADSB_RATE, 16);
+    // Resample the capture down to the 2 MHz working rate, then feed the
+    // envelope to the streaming demod. `--front` selects where the magnitude is
+    // taken relative to the decimation (see [`Front`]). Both resamplers are
+    // stateful, so a single instance spans every window; `AdsbDemod` itself
+    // buffers frames straddling a window boundary. Windowing only bounds peak
+    // memory on long captures.
+    let mut mag_rs = Resampler::new(args.in_rate, ADSB_RATE, 16);
+    let mut iq_rs = ComplexResampler::new(args.in_rate, ADSB_RATE, 16);
     let mut demod = AdsbDemod::new();
     let mut report = Report::default();
     let mut samples_work = 0u64;
 
     let window = args.in_rate as usize; // ~1 s of complex samples per window
     for chunk in iq.chunks(window.max(1)) {
-        let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
-        let resampled = rs.process(&mag);
-        samples_work += resampled.len() as u64;
-        for frame in demod.feed(&resampled) {
+        let envelope: Vec<Sample> = match args.front {
+            // R1: band-limited complex decimation first, magnitude at 2 MHz.
+            Front::Complex => iq_rs.process(chunk).iter().map(|c| c.norm()).collect(),
+            // R0: magnitude at the capture rate, then decimate the envelope.
+            Front::Mag => {
+                let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
+                mag_rs.process(&mag)
+            }
+        };
+        samples_work += envelope.len() as u64;
+        for frame in demod.feed(&envelope) {
             tally(&mut report, &frame.payload, frame.meta.crc_ok);
         }
     }
@@ -202,6 +253,7 @@ fn print_human(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_
         "  working rate: {} Hz, {} samples after resample",
         ADSB_RATE, samples_work
     );
+    println!("  front end:    {}", args.front.label());
     println!("  frames (CRC-valid):  {}", r.frames_valid);
     println!("  airborne positions:  {}", r.airborne_pos);
     println!("  unique aircraft:     {}", r.aircraft.len());
@@ -268,6 +320,13 @@ fn print_json(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_w
     print!("{{");
     print!("\"path\":{},", json_str(&args.path));
     print!("\"in_rate\":{},", args.in_rate);
+    print!(
+        "\"front\":\"{}\",",
+        match args.front {
+            Front::Complex => "complex",
+            Front::Mag => "mag",
+        }
+    );
     print!("\"samples_in\":{samples_in},");
     print!("\"duration_s\":{dur_in:.3},");
     print!("\"work_rate\":{ADSB_RATE},");
@@ -352,8 +411,34 @@ mod tests {
         let p = parse_args(&args(&["rec.iq"])).unwrap();
         assert_eq!(p.path, "rec.iq");
         assert_eq!(p.in_rate, DEFAULT_IN_RATE);
+        assert_eq!(p.front, Front::Complex); // R1 complex front end is the default
         assert!(!p.json);
         assert_eq!(p.baseline_frames, None);
+    }
+
+    #[test]
+    fn front_flag_selects_path() {
+        assert_eq!(
+            parse_args(&args(&["rec.iq"])).unwrap().front,
+            Front::Complex
+        );
+        assert_eq!(
+            parse_args(&args(&["rec.iq", "--front", "complex"]))
+                .unwrap()
+                .front,
+            Front::Complex
+        );
+        assert_eq!(
+            parse_args(&args(&["rec.iq", "--front", "mag"]))
+                .unwrap()
+                .front,
+            Front::Mag
+        );
+        assert!(parse_args(&args(&["rec.iq", "--front", "bogus"])).is_err());
+        // A valued --front must not be mistaken for the input path.
+        let p = parse_args(&args(&["--front", "mag", "rec.iq"])).unwrap();
+        assert_eq!(p.path, "rec.iq");
+        assert_eq!(p.front, Front::Mag);
     }
 
     #[test]
