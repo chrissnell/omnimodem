@@ -290,3 +290,128 @@ impl PpmDemodulator {
         (frames, i)
     }
 }
+
+/// Multi-phase slicer ensemble — the R3 "hydra" (GRA-326).
+///
+/// At the 2 MHz working rate each PPM half-microsecond slot is a single sample,
+/// so [`PpmDemodulator`] can only read slot centers on the integer grid. A frame
+/// whose true bit timing lands between samples (the common case off-air, after
+/// the 2.4M→2.0M resample) slices cleanly on only some fractional offset; on the
+/// integer grid its late bits drift toward the slot boundary and the CRC fails.
+///
+/// The ensemble runs the same demodulator over `phases` sub-sample views of the
+/// stream — phase `k` linearly interpolated to a `k/phases`-sample offset — and
+/// unions the decodes, so whichever phase best aligns with each frame recovers
+/// it. This is dump1090's finer-timing advantage approximated at 2 MHz, and the
+/// same union-of-diverse-decoders mechanism that lets graywolf out-decode
+/// Direwolf on AFSK. A [`DedupWindow`] collapses the copies of one frame that
+/// several phases decode into a single emission.
+#[derive(Clone, Debug)]
+pub struct ParallelDemodulator {
+    demod: PpmDemodulator,
+    phases: usize,
+    /// Reused fractional-shift scratch buffer, so the per-phase interpolation
+    /// does not allocate on every scan.
+    shifted: Vec<f32>,
+}
+
+impl ParallelDemodulator {
+    /// Ensemble of `phases` sub-sample slicers (`phases >= 1`; `1` is exactly the
+    /// single-phase [`PpmDemodulator`]).
+    pub fn new(samples_per_us: usize, phases: usize) -> Self {
+        assert!(phases >= 1, "phases must be >= 1");
+        Self { demod: PpmDemodulator::new(samples_per_us), phases, shifted: Vec::new() }
+    }
+
+    /// Interpolate `mag` to a `frac`-sample fractional offset into `self.shifted`.
+    /// The last sample has no successor to interpolate against and is copied; it
+    /// falls in the unscanned tail (`scan_with_floor` stops a frame short), so it
+    /// is never sliced.
+    fn interpolate(&mut self, mag: &[f32], frac: f32) {
+        self.shifted.clear();
+        self.shifted.reserve(mag.len());
+        if mag.is_empty() {
+            return;
+        }
+        for w in mag.windows(2) {
+            self.shifted.push(w[0] + frac * (w[1] - w[0]));
+        }
+        self.shifted.push(mag[mag.len() - 1]);
+    }
+
+    /// Scan every phase against the shared adaptive noise floor and return the
+    /// deduplicated union. The noise floor is deliberately not re-interpolated
+    /// per phase: it slews at [`DET_FLOOR_COEFF`] (0.001/sample), so a sub-sample
+    /// shift moves it by nothing that matters to the ratio gates.
+    ///
+    /// `consumed` is the minimum consumed across phases, so no phase's unscanned
+    /// tail is discarded; only frames wholly inside that common prefix are
+    /// returned, so a frame a faster phase found in the few-sample zone past the
+    /// shared boundary is deferred to the next call rather than emitted twice.
+    pub fn scan_with_floor(
+        &mut self,
+        mag: &[f32],
+        noise: &[f32],
+        flush: bool,
+    ) -> (Vec<RawFrame>, usize) {
+        let (mut frames, mut consumed) = self.demod.scan_with_floor(mag, noise, flush);
+        for k in 1..self.phases {
+            let frac = k as f32 / self.phases as f32;
+            self.interpolate(mag, frac);
+            let (more, ph_consumed) = self.demod.scan_with_floor(&self.shifted, noise, flush);
+            consumed = consumed.min(ph_consumed);
+            frames.extend(more);
+        }
+        let window = self.demod.frame_samples(LONG_FRAME_BITS);
+        let out = DedupWindow::new(window).collapse(frames, consumed);
+        (out, consumed)
+    }
+
+    /// One-shot scan over a self-contained buffer with a fresh floor, mirroring
+    /// [`PpmDemodulator::scan`] for tests.
+    #[cfg(test)]
+    pub fn scan(&mut self, mag: &[f32], flush: bool) -> (Vec<RawFrame>, usize) {
+        let mut det = new_floor_detector();
+        let mut noise = Vec::with_capacity(mag.len());
+        for &m in mag {
+            noise.push(det.floor());
+            det.push(m);
+        }
+        self.scan_with_floor(mag, &noise, flush)
+    }
+}
+
+/// Collapses duplicate decodes of one physical frame that different slicer phases
+/// (or the same phase across a boundary) produce, while preserving genuine
+/// retransmissions of identical content — those are milliseconds apart, far
+/// beyond the window, whereas cross-phase copies sit within a sample or two.
+struct DedupWindow {
+    window: usize,
+}
+
+impl DedupWindow {
+    fn new(window: usize) -> Self {
+        Self { window }
+    }
+
+    /// Keep the earliest decode of each frame whose start is inside `[0, limit)`,
+    /// dropping any later copy with identical bytes within `window` samples.
+    fn collapse(&self, mut frames: Vec<RawFrame>, limit: usize) -> Vec<RawFrame> {
+        frames.sort_by_key(|f| f.offset);
+        let mut kept: Vec<RawFrame> = Vec::with_capacity(frames.len());
+        for f in frames {
+            if f.offset >= limit {
+                continue;
+            }
+            let dup = kept
+                .iter()
+                .rev()
+                .take_while(|k| f.offset - k.offset <= self.window)
+                .any(|k| k.bytes == f.bytes);
+            if !dup {
+                kept.push(f);
+            }
+        }
+        kept
+    }
+}

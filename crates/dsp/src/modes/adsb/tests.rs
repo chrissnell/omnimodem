@@ -1,7 +1,7 @@
 //! ADS-B mode tests, including canonical Mode S vectors and streaming behavior.
 
 use super::message::{cpr_decode_airborne, encode_identification, ModeS};
-use super::ppm::{PpmDemodulator, PpmModulator};
+use super::ppm::{ParallelDemodulator, PpmDemodulator, PpmModulator};
 use super::*;
 use crate::mode::{Demodulator, Modulator};
 use crate::types::{Frame, FramePayload};
@@ -90,6 +90,40 @@ fn streaming_recovers_frame_split_across_feeds() {
         assert_eq!(frames.len(), 1, "cut={cut}");
         assert_eq!(packet_bytes(&frames[0]), &frame[..], "cut={cut}");
     }
+}
+
+#[test]
+fn ensemble_dedups_single_frame_across_phases() {
+    // A clean modulated frame lands on the integer grid, so every slicer phase
+    // decodes it. The DedupWindow must collapse the copies to one emission.
+    let frame = hex(KLM1023);
+    let wave = PpmModulator::new(2).modulate_padded(&frame, 4, 4);
+    for phases in [1usize, 2, 4, 6] {
+        let frames = ParallelDemodulator::new(2, phases).scan(&wave, true).0;
+        assert_eq!(frames.len(), 1, "phases={phases}");
+        assert!(frames[0].crc_ok());
+        assert_eq!(frames[0].bytes, frame, "phases={phases}");
+    }
+}
+
+#[test]
+fn ensemble_keeps_distinct_frames_far_apart() {
+    // Two different frames spaced well beyond the dedup window must both survive
+    // — the window only collapses cross-phase copies of one physical frame. A
+    // quiet lead longer than the detector's warmup lets the floor seed on the
+    // quiet region rather than the first burst (as it does off-air).
+    let a = hex(KLM1023);
+    let b = encode_identification(0x3C6444, "TEST42").to_vec();
+    let modu = PpmModulator::new(2);
+    let mut wave = vec![0.0f32; 256];
+    wave.extend(modu.modulate_padded(&a, 4, 8));
+    wave.extend(modu.modulate_padded(&b, 8, 4));
+    let frames = ParallelDemodulator::new(2, 4).scan(&wave, true).0;
+    assert!(frames.iter().any(|f| f.bytes == a), "frame a missing");
+    assert!(frames.iter().any(|f| f.bytes == b), "frame b missing");
+    // Each physical frame emitted exactly once despite four phases decoding it.
+    assert_eq!(frames.iter().filter(|f| f.bytes == a).count(), 1);
+    assert_eq!(frames.iter().filter(|f| f.bytes == b).count(), 1);
 }
 
 #[test]
