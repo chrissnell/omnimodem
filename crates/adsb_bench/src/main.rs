@@ -2,9 +2,10 @@
 //!
 //! Reads a raw uint8 interleaved I/Q recording (as `rtl_tcp` streams it),
 //! runs it through the same magnitude → resample → demod path the daemon uses —
-//! `|I+jQ|` magnitude → resample to the 2 MHz working rate → [`AdsbDemod`] — and
+//! `|I+jQ|` magnitude → resample to the 2 MHz working rate → `AdsbDemod` — and
 //! tallies what came out: CRC-valid frames, unique aircraft, and DF /
-//! DF17-type-code histograms.
+//! DF17-type-code histograms. The decode itself lives in the crate library
+//! ([`adsb_bench::decode_iq`]) so the CI regression gate asserts the same path.
 //!
 //! (The live daemon additionally scales the envelope by 1/√2 and quantizes it to
 //! i16 for its audio-delivery path; the PPM demod is scale-independent, so the
@@ -22,17 +23,8 @@
 //! The recording is captured off the air, never re-transmitted: 1090 MHz is
 //! protected aeronautical spectrum. This tool only reads.
 
-use std::collections::BTreeMap;
-
-use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
-use omnimodem_dsp::frontend::resample::Resampler;
-use omnimodem_dsp::mode::Demodulator;
-use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
-use omnimodem_dsp::types::{FramePayload, Sample};
-
-/// Default capture rate — the wideband rate the daemon commands the dongle to
-/// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
-const DEFAULT_IN_RATE: u32 = 2_400_000;
+use adsb_bench::{decode_iq, Report, DEFAULT_IN_RATE};
+use omnimodem_dsp::modes::adsb::ADSB_RATE;
 
 struct Args {
     path: String,
@@ -84,10 +76,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
 
 /// Read `--name value` from the arg list.
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
 /// First positional token — the input path — skipping flags and the values
@@ -108,103 +97,28 @@ fn positional(args: &[String]) -> Option<&String> {
     None
 }
 
-/// Tally accumulated over every frame the demod emitted. `AdsbDemod` gates on
-/// parity (`require_crc`), so every emitted frame is CRC-valid — this counts the
-/// decoder's usable yield, the number each R-phase is trying to move.
-#[derive(Default)]
-struct Report {
-    frames_valid: u64,
-    /// Airborne-position frames (DF17/18, TC 9-18/20-22) that passed CRC.
-    airborne_pos: u64,
-    /// Distinct 24-bit ICAO addresses seen in CRC-valid DF11/17/18 frames.
-    aircraft: BTreeMap<u32, u64>,
-    /// DF → count, CRC-valid frames only.
-    df_hist: BTreeMap<u8, u64>,
-    /// DF17/18 type code → count, CRC-valid frames only.
-    tc_hist: BTreeMap<u8, u64>,
-}
-
 fn run(args: &Args) -> Result<(), String> {
     let bytes = std::fs::read(&args.path).map_err(|e| format!("read {}: {e}", args.path))?;
-    let iq = u8_iq_to_cplx(&bytes);
-    let samples_in = iq.len();
-
-    // Same demod path as the daemon: magnitude envelope at the capture rate,
-    // resampled to the 2 MHz working rate through the same polyphase resampler,
-    // then fed to the streaming demod. The resampler is stateful, so a single
-    // instance
-    // spans every window; `AdsbDemod` itself buffers frames straddling a
-    // window boundary. Windowing only bounds peak memory on long captures.
-    let mut rs = Resampler::new(args.in_rate, ADSB_RATE, 16);
-    let mut demod = AdsbDemod::new();
-    let mut report = Report::default();
-    let mut samples_work = 0u64;
-
-    let window = args.in_rate as usize; // ~1 s of complex samples per window
-    for chunk in iq.chunks(window.max(1)) {
-        let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
-        let resampled = rs.process(&mag);
-        samples_work += resampled.len() as u64;
-        for frame in demod.feed(&resampled) {
-            tally(&mut report, &frame.payload, frame.meta.crc_ok);
-        }
-    }
-    for frame in demod.flush() {
-        tally(&mut report, &frame.payload, frame.meta.crc_ok);
-    }
-
-    let dur_in = samples_in as f64 / args.in_rate as f64;
+    let report = decode_iq(&bytes, args.in_rate);
+    let dur_in = report.samples_in as f64 / args.in_rate as f64;
     if args.json {
-        print_json(args, &report, samples_in, dur_in, samples_work);
+        print_json(args, &report, dur_in);
     } else {
-        print_human(args, &report, samples_in, dur_in, samples_work);
+        print_human(args, &report, dur_in);
     }
     Ok(())
 }
 
-fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool) {
-    // Both guards are defensive: `AdsbDemod` only ever emits CRC-valid `Packet`
-    // frames today, but keep counting honest if that ever changes.
-    let FramePayload::Packet(bytes) = payload else {
-        return;
-    };
-    if !crc_ok {
-        return;
-    }
-    report.frames_valid += 1;
-    let msg = ModeS::new(bytes);
-    let df = msg.df();
-    *report.df_hist.entry(df).or_default() += 1;
-
-    // ICAO lives in bits 8..32 for all-call replies (DF11) and extended
-    // squitters (DF17/18); other DFs carry it XOR-folded into the parity, so
-    // only count the address where it is read directly.
-    if matches!(df, 11 | 17 | 18) {
-        *report.aircraft.entry(msg.icao()).or_default() += 1;
-    }
-    if matches!(df, 17 | 18) {
-        if let Some(tc) = msg.type_code() {
-            *report.tc_hist.entry(tc).or_default() += 1;
-        }
-        if msg.airborne_position().is_some() {
-            report.airborne_pos += 1;
-        }
-    }
-}
-
-fn print_human(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_work: u64) {
+fn print_human(args: &Args, r: &Report, dur_in: f64) {
     println!("adsb_bench {}", args.path);
     println!(
         "  input:        {} Hz uint8 IQ, {} samples ({:.1} s)",
-        args.in_rate, samples_in, dur_in
+        args.in_rate, r.samples_in, dur_in
     );
-    println!(
-        "  working rate: {} Hz, {} samples after resample",
-        ADSB_RATE, samples_work
-    );
+    println!("  working rate: {} Hz, {} samples after resample", ADSB_RATE, r.samples_work);
     println!("  frames (CRC-valid):  {}", r.frames_valid);
     println!("  airborne positions:  {}", r.airborne_pos);
-    println!("  unique aircraft:     {}", r.aircraft.len());
+    println!("  unique aircraft:     {}", r.unique_aircraft());
     if !r.aircraft.is_empty() {
         let list: Vec<String> = r.aircraft.keys().map(|a| format!("{a:06X}")).collect();
         println!("    {}", list.join(", "));
@@ -237,10 +151,10 @@ fn print_delta(args: &Args, r: &Report) {
         pct(r.frames_valid, base_frames)
     );
     if let Some(base_ac) = args.baseline_aircraft {
-        let gap = r.aircraft.len() as i64 - base_ac as i64;
+        let gap = r.unique_aircraft() as i64 - base_ac as i64;
         println!(
             "    aircraft: ours {} / baseline {}  (delta {gap:+})",
-            r.aircraft.len(),
+            r.unique_aircraft(),
             base_ac
         );
     }
@@ -253,28 +167,20 @@ fn pct(ours: u64, base: u64) -> f64 {
     100.0 * ours as f64 / base as f64
 }
 
-fn print_json(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_work: u64) {
+fn print_json(args: &Args, r: &Report, dur_in: f64) {
     let aircraft: Vec<String> = r.aircraft.keys().map(|a| format!("\"{a:06X}\"")).collect();
-    let df: Vec<String> = r
-        .df_hist
-        .iter()
-        .map(|(k, v)| format!("\"{k}\":{v}"))
-        .collect();
-    let tc: Vec<String> = r
-        .tc_hist
-        .iter()
-        .map(|(k, v)| format!("\"{k}\":{v}"))
-        .collect();
+    let df: Vec<String> = r.df_hist.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
+    let tc: Vec<String> = r.tc_hist.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
     print!("{{");
     print!("\"path\":{},", json_str(&args.path));
     print!("\"in_rate\":{},", args.in_rate);
-    print!("\"samples_in\":{samples_in},");
+    print!("\"samples_in\":{},", r.samples_in);
     print!("\"duration_s\":{dur_in:.3},");
     print!("\"work_rate\":{ADSB_RATE},");
-    print!("\"samples_work\":{samples_work},");
+    print!("\"samples_work\":{},", r.samples_work);
     print!("\"frames_crc_valid\":{},", r.frames_valid);
     print!("\"airborne_positions\":{},", r.airborne_pos);
-    print!("\"unique_aircraft\":{},", r.aircraft.len());
+    print!("\"unique_aircraft\":{},", r.unique_aircraft());
     print!("\"aircraft\":[{}],", aircraft.join(","));
     print!("\"df_hist\":{{{}}},", df.join(","));
     print!("\"tc_hist\":{{{}}}", tc.join(","));

@@ -234,6 +234,22 @@ pub fn encode_identification(icao: u32, callsign: &str) -> [u8; 14] {
     frame
 }
 
+/// Build a complete DF11 all-call reply (7-byte short frame) with valid parity.
+///
+/// DF11 carries the ICAO address in the clear (bits 8..32), so the bench and the
+/// loopback modulator can render an all-call — the most common short frame on a
+/// real 1090 MHz capture — as a test vector. `ca` is the transponder capability
+/// (typically [`CA_LEVEL2`]).
+pub fn encode_all_call_reply(icao: u32, ca: u8) -> [u8; 7] {
+    let mut frame = [0u8; 7];
+    frame[0] = (11 << 3) | (ca & 0x07);
+    frame[1] = (icao >> 16) as u8;
+    frame[2] = (icao >> 8) as u8;
+    frame[3] = icao as u8;
+    crc::append_parity(&mut frame);
+    frame
+}
+
 fn char_to_ident(c: char) -> u8 {
     let up = c.to_ascii_uppercase();
     match up {

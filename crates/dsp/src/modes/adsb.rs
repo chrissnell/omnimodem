@@ -22,7 +22,9 @@ mod ppm;
 #[cfg(test)]
 mod tests;
 
-pub use message::{cpr_decode_airborne, encode_identification, AirbornePosition, ModeS};
+pub use message::{
+    cpr_decode_airborne, encode_all_call_reply, encode_identification, AirbornePosition, ModeS,
+};
 pub use ppm::RawFrame;
 
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};

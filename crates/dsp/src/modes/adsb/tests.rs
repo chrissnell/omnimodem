@@ -1,6 +1,8 @@
 //! ADS-B mode tests, including canonical Mode S vectors and streaming behavior.
 
-use super::message::{cpr_decode_airborne, encode_identification, ModeS};
+use super::message::{
+    cpr_decode_airborne, encode_all_call_reply, encode_identification, ModeS, CA_LEVEL2,
+};
 use super::ppm::{PpmDemodulator, PpmModulator};
 use super::*;
 use crate::mode::{Demodulator, Modulator};
@@ -110,6 +112,23 @@ fn short_frame_roundtrip() {
     assert_eq!(frames[0].df, 11);
     assert_eq!(frames[0].bytes.len(), 7);
     assert_eq!(frames[0].bytes, frame);
+}
+
+#[test]
+fn encode_all_call_reply_roundtrips_via_traits() {
+    let frame = encode_all_call_reply(0x3C6444, CA_LEVEL2);
+    assert_eq!(crc::checksum(&frame), 0);
+
+    let wave = AdsbMod::new().modulate(&Frame::packet(frame.to_vec())).unwrap();
+    let mut demod = AdsbDemod::new();
+    let mut frames = demod.feed(&wave);
+    frames.extend(demod.flush());
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].meta.crc_ok);
+    let out = packet_bytes(&frames[0]);
+    assert_eq!(out.len(), 7);
+    assert_eq!(ModeS::new(out).df(), 11);
+    assert_eq!(ModeS::new(out).icao(), 0x3C6444);
 }
 
 #[test]
