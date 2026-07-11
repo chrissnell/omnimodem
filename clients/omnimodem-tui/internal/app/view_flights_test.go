@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,45 @@ func TestFlightsViewFiltersByChannel(t *testing.T) {
 	}
 	if strings.Contains(out, "ONCH5") {
 		t.Fatal("channel 2 view must not show a channel 5 contact")
+	}
+}
+
+// End-to-end: an AircraftReport arriving as an event on Model.Update populates
+// the flights table live — the acceptance path — without any per-view fetch.
+func TestFlightsViewLiveUpdateFromEvent(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	m.stack = []View{newChannelsView(m)}
+	m.sel = 2
+	m.push(newFlightsView(m))
+
+	m.Update(eventMsg{&pb.Event{Kind: &pb.Event_AircraftReport{AircraftReport: &pb.AircraftReport{
+		Channel: 2, Icao: 0xABCDEF, Flight: "KLM1023",
+		Latitude: f64(52.2572), Longitude: f64(3.91937),
+		AltitudeFt: i32(38000), GroundSpeedKt: f64(420),
+	}}}})
+
+	out := m.top().Render(80, 20)
+	if !strings.Contains(out, "KLM1023") || !strings.Contains(out, "52.2572") {
+		t.Fatalf("an AircraftReport event must populate the flights table live; got:\n%s", out)
+	}
+}
+
+// Render caps rows to the available height (ui.Table doesn't scroll), so a busy
+// sky can't overflow the framed pane.
+func TestFlightsViewCapsRowsToHeight(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	now := time.Unix(1_700_000_000, 0)
+	for i := uint32(0); i < 30; i++ {
+		m.applyAircraft(&pb.AircraftReport{Channel: 2, Icao: 0x400000 + i, Flight: fmt.Sprintf("FL%02d", i)}, now)
+	}
+	m.sel = 2
+	// h=5 → header rule + 4 body rows; the sorted-first four show, the rest don't.
+	out := newFlightsView(m).Render(80, 5)
+	if !strings.Contains(out, "FL00") {
+		t.Fatal("the first sorted contact must render")
+	}
+	if strings.Contains(out, "FL29") {
+		t.Fatal("rows beyond the height budget must be dropped, not overflow the pane")
 	}
 }
 

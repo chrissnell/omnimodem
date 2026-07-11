@@ -7,11 +7,15 @@ import (
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
 )
 
-// aircraftTTL mirrors the daemon's stale-contact TTL (core/adsb.rs
-// DEFAULT_TTL_MS = 60s): a contact not reported within this window is dropped
-// from the flights table. The daemon prunes on its own timer and then stops
-// emitting, so the client ages rows out on the same clock to keep the two in
-// step even after reports for an aircraft cease.
+// aircraftTTL matches the daemon's stale-contact TTL (core/adsb.rs
+// DEFAULT_TTL_MS = 60s): a contact whose last *report* is older than this window
+// is dropped from the flights table. Note the two clocks differ — the daemon
+// ages a contact off its last received frame, whereas the client ages off the
+// last report it received, and reports are emitted only on a reportable change
+// (LOSSY). A still-audible but state-stable aircraft can therefore be pruned
+// here while the daemon still tracks it; it reappears on its next state change.
+// For any moving aircraft this is a non-issue (position changes nearly every
+// squitter), and there is no removal event to key off instead.
 const aircraftTTL = 60 * time.Second
 
 // aircraftLive is one tracked aircraft, folded from AircraftReport events keyed
@@ -58,7 +62,8 @@ func (m *Model) applyAircraft(r *pb.AircraftReport, now time.Time) {
 		a.gsKt, a.hasGS = r.GetGroundSpeedKt(), true
 	}
 	a.lastHeard = now
-	m.pruneAircraft(now)
+	// Pruning is the tick's job (Model.Update), not the fold's — no need to sweep
+	// the whole map on every report.
 }
 
 // pruneAircraft drops contacts not heard from within aircraftTTL. Driven by the
@@ -87,4 +92,16 @@ func (m *Model) aircraftForChannel(ch uint32) []*aircraftLive {
 		return out[i].icao < out[j].icao
 	})
 	return out
+}
+
+// countForChannel returns how many live contacts are on one channel, without the
+// allocation + sort of aircraftForChannel (the flights title needs only a count).
+func (m *Model) countForChannel(ch uint32) int {
+	n := 0
+	for _, a := range m.aircraft {
+		if a.channel == ch {
+			n++
+		}
+	}
+	return n
 }

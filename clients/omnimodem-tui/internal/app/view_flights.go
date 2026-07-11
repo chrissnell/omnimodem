@@ -70,7 +70,7 @@ func (v *flightsView) Render(w, h int) string {
 }
 
 func (v *flightsView) Title() string {
-	return fmt.Sprintf("Flights CH%d (%d)", v.ch, len(v.m.aircraftForChannel(v.ch)))
+	return fmt.Sprintf("Flights CH%d (%d)", v.ch, v.m.countForChannel(v.ch))
 }
 
 func (v *flightsView) Hints() []ui.Hint {
