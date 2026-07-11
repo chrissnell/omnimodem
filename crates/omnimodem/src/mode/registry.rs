@@ -5,6 +5,7 @@
 use super::{ModeConfig, NullMode};
 use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
+    adsb::{AdsbDemod, AdsbMod},
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
     contestia::{ContestiaDemod, ContestiaMod},
     cw::{CwDemod, CwMod},
@@ -140,6 +141,10 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
+        // ADS-B streams magnitude, not audio: the daemon binds it to the rtl_tcp
+        // `RawMag` capture, which delivers full-rate |I+jQ| the resampler drops to
+        // the demod's 2 MHz native rate.
+        ModeConfig::Adsb => DemodKind::Streaming(Box::new(AdsbDemod::new())),
     }
 }
 
@@ -230,6 +235,9 @@ pub fn build_modulator(cfg: &ModeConfig) -> Option<Box<dyn Modulator>> {
         ModeConfig::Olivia { tones, bandwidth_hz } => {
             Some(Box::new(OliviaMod::new(*tones, *bandwidth_hz)))
         }
+        // Loopback/self-test only — 1090 MHz is protected spectrum, so this never
+        // keys a radio; it renders magnitude PPM to exercise the demod end-to-end.
+        ModeConfig::Adsb => Some(Box::new(AdsbMod::new())),
     }
 }
 
@@ -478,6 +486,18 @@ mod tests {
         let cfg = ModeConfig::Olivia { tones: 32, bandwidth_hz: 1000 };
         assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)));
         assert!(build_modulator(&cfg).is_some());
+        assert_eq!(tx_slot_s(&cfg), None);
+    }
+
+    #[test]
+    fn adsb_is_streaming_at_2mhz_with_a_loopback_modulator() {
+        let cfg = ModeConfig::Adsb;
+        assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "adsb not streaming");
+        assert!(build_modulator(&cfg).is_some(), "no loopback modulator for adsb");
+        // The demod's native rate is dump1090's 2 MHz magnitude convention; the
+        // daemon resamples the wideband capture down to it.
+        assert_eq!(native_rate(&cfg), Some(2_000_000));
+        // Streaming, so it transmits without a time slot.
         assert_eq!(tx_slot_s(&cfg), None);
     }
 

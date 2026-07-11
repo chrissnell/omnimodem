@@ -42,6 +42,10 @@ const SQUELCH_HYSTERESIS_DB: f32 = 6.0;
 const WATERFALL_NFFT: usize = 1024;
 /// Requested waterfall bin count (rendered uint8 line width).
 const WATERFALL_BINS: usize = 256;
+/// Scale applied to `RawMag` magnitude so the u8-IQ maximum (|±1 ±1j| = √2) fits in
+/// [0,1] ahead of the i16 delivery clamp. The ADS-B PPM demod is scale-independent,
+/// so this only prevents strong-pulse saturation.
+const INV_SQRT2: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 /// Exponential reconnect backoff after a dropped `rtl_tcp` link. Mirrors
 /// `cpal_backend::REBUILD_BACKOFF` (that module is `#[cfg(not(test))]`, so the
@@ -303,8 +307,16 @@ impl RtlCmd {
 // Runtime control cell
 // ---------------------------------------------------------------------------
 
-/// Selectable demodulator. All modes are implemented (NBFM in Phase A; AM/WFM/SSB
-/// in Phase B) and dispatched by the capture thread via [`SdrDemod`].
+/// Full-rate ADS-B capture rate (2.4 Msps): the dongle rate the [`DemodMode::RawMag`]
+/// path streams so the RX worker can resample it to the `adsb` demod's 2 MHz native
+/// rate. 2.4M is a rate every R820-class dongle accepts (see [`supported_sample_rates`]).
+pub const ADSB_CAPTURE_RATE: u32 = 2_400_000;
+
+/// Selectable demodulator. The audio modes (NBFM/AM/WFM/SSB) are dispatched by the
+/// capture thread via [`SdrDemod`], which tunes + channelizes to narrowband audio.
+/// `RawMag` is the odd one out: it bypasses `SdrDemod` entirely and emits the
+/// full-rate magnitude envelope `|I+jQ|` for the wideband `adsb` mode — the daemon
+/// selects it internally when a channel's mode is ADS-B (never via `ConfigureSdr`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DemodMode {
@@ -313,6 +325,7 @@ pub enum DemodMode {
     Wfm = 2,
     Usb = 3,
     Lsb = 4,
+    RawMag = 5,
 }
 
 impl DemodMode {
@@ -322,14 +335,18 @@ impl DemodMode {
             2 => DemodMode::Wfm,
             3 => DemodMode::Usb,
             4 => DemodMode::Lsb,
+            5 => DemodMode::RawMag,
             _ => DemodMode::Nbfm,
         }
     }
 
     /// Map to the DSP crate's mode enum, which drives [`SdrDemod`]'s back-end.
+    /// `RawMag` has no `SdrDemod` equivalent — the capture thread bypasses the
+    /// channelizing demod for it — so this maps it to a harmless default that is
+    /// never actually built (guarded by the `raw_mag` branch in the capture loop).
     pub fn to_dsp(self) -> DemodKind {
         match self {
-            DemodMode::Nbfm => DemodKind::Nbfm,
+            DemodMode::Nbfm | DemodMode::RawMag => DemodKind::Nbfm,
             DemodMode::Am => DemodKind::Am,
             DemodMode::Wfm => DemodKind::Wfm,
             DemodMode::Usb => DemodKind::Usb,
@@ -784,16 +801,24 @@ fn emit_waterfall(
 
 impl AudioBackend for RtlTcpBackend {
     fn open_capture(&self, requested_rate: u32) -> Result<CaptureHandle, AudioError> {
-        // The audio channel rate delivered downstream (capped like the soundcard
-        // path). The dongle streams at `self.capture_rate`; we decimate to this.
-        let channel_rate = requested_rate.min(MAX_SAMPLE_RATE);
+        // ADS-B binds the channel to the wideband `RawMag` path: it needs the full
+        // magnitude envelope, not a channelized audio slice. The core sets the demod
+        // mode before opening the capture, so detect it here and deliver samples at
+        // the full 2.4 Msps ADS-B rate — bypassing the audio `MAX_SAMPLE_RATE` cap —
+        // so the RX worker resamples 2.4M → the demod's 2 MHz native rate. Every
+        // other mode keeps the decimate-to-audio path.
+        let raw_mag = self.control.demod_mode() == DemodMode::RawMag;
+        let seed_rate = if raw_mag { ADSB_CAPTURE_RATE } else { self.capture_rate };
+        // The sample rate delivered downstream. Audio modes decimate to the (capped)
+        // channel rate; `RawMag` delivers samples at the full capture rate.
+        let channel_rate =
+            if raw_mag { seed_rate } else { requested_rate.min(MAX_SAMPLE_RATE) };
 
         let addr = format!("{}:{}", self.host, self.port);
 
-        // Seed the shared capture rate from this backend's configured default
-        // (unity in production); the control cell is authoritative thereafter, so
-        // `ConfigureSdr` can change the rate on a running capture.
-        self.control.set_capture_rate(self.capture_rate);
+        // Seed the shared capture rate. The control cell is authoritative thereafter,
+        // so `ConfigureSdr` can change the rate on a running (audio) capture.
+        self.control.set_capture_rate(seed_rate);
 
         // Initial connect is synchronous so a bad address / non-rtl_tcp server
         // fails fast and the tuner caps publish before we return. This connection
@@ -854,14 +879,20 @@ impl AudioBackend for RtlTcpBackend {
                     // re-commanded to match by `connect_and_handshake`.
                     let mut cur_rate = control.capture_rate();
                     let mut cur_mode = control.demod_mode();
-                    let mut rx_chain = SdrDemod::new(
-                        cur_mode.to_dsp(),
-                        cur_rate,
-                        channel_rate,
-                        control.offset_hz(),
-                        deviation_hz,
-                        control.effective_squelch(),
-                    );
+                    // `RawMag` (ADS-B) bypasses the channelizing demod entirely and
+                    // emits the full-rate magnitude envelope; build an `SdrDemod`
+                    // only for the audio modes.
+                    let mut raw_mag = cur_mode == DemodMode::RawMag;
+                    let mut rx_chain = (!raw_mag).then(|| {
+                        SdrDemod::new(
+                            cur_mode.to_dsp(),
+                            cur_rate,
+                            channel_rate,
+                            control.offset_hz(),
+                            deviation_hz,
+                            control.effective_squelch(),
+                        )
+                    });
                     let mut seen_gen = control.generation();
                     let mut carry: Option<u8> = None;
 
@@ -899,20 +930,28 @@ impl AudioBackend for RtlTcpBackend {
                                     cur_rate = want_rate;
                                 }
                                 cur_mode = want_mode;
-                                rx_chain = SdrDemod::new(
-                                    cur_mode.to_dsp(),
-                                    cur_rate,
-                                    channel_rate,
-                                    control.offset_hz(),
-                                    deviation_hz,
-                                    control.effective_squelch(),
-                                );
+                                // Rebuild the RX chain for the new rate/mode. Crossing
+                                // the `RawMag` boundary at runtime changes the delivered
+                                // sample rate, which a live capture can't re-negotiate;
+                                // the core re-opens the capture on such a mode switch, so
+                                // here we only track the flag and skip the audio demod.
+                                raw_mag = cur_mode == DemodMode::RawMag;
+                                rx_chain = (!raw_mag).then(|| {
+                                    SdrDemod::new(
+                                        cur_mode.to_dsp(),
+                                        cur_rate,
+                                        channel_rate,
+                                        control.offset_hz(),
+                                        deviation_hz,
+                                        control.effective_squelch(),
+                                    )
+                                });
                                 if rate_changed {
                                     let _ = cmd_sock.write_all(&RtlCmd::SampleRate(cur_rate).encode());
                                 }
-                            } else {
-                                rx_chain.retune(control.offset_hz());
-                                rx_chain.set_squelch(control.effective_squelch());
+                            } else if let Some(rc) = rx_chain.as_mut() {
+                                rc.retune(control.offset_hz());
+                                rc.set_squelch(control.effective_squelch());
                             }
                             let _ = apply_hardware(&mut cmd_sock, &control);
                         }
@@ -923,7 +962,15 @@ impl AudioBackend for RtlTcpBackend {
                             );
                         }
 
-                        let audio = rx_chain.push_iq(&iq);
+                        let audio = match rx_chain.as_mut() {
+                            Some(rc) => rc.push_iq(&iq),
+                            // `RawMag`: emit the full-rate magnitude envelope, scaled
+                            // by 1/√2 so the u8-IQ maximum (|±1 ±1j| = √2) maps into
+                            // [0,1] without clipping the i16 delivery path. The PPM
+                            // demod is scale-independent, so the scale is otherwise
+                            // free; it only keeps strong pulses from saturating.
+                            None => iq.iter().map(|c| c.norm() * INV_SQRT2).collect(),
+                        };
                         if audio.is_empty() {
                             continue;
                         }
@@ -1316,6 +1363,35 @@ mod tests {
 
         let total = drain_burst(&cap.rx);
         assert!(total > 0, "expected demodulated AM audio, got none");
+    }
+
+    #[test]
+    fn raw_mag_capture_delivers_full_rate_magnitude() {
+        // RawMag (ADS-B) must bypass the channelizer: deliver |I+jQ| at the full
+        // 2.4 Msps capture rate (not the 48 kHz audio cap), scaled by 1/√2.
+        // Constant near-full-scale I with zero Q → magnitude ≈ 1.0 → delivered ≈ 0.707.
+        let iq: Vec<u8> = std::iter::repeat_n([255u8, 127u8], 4000).flatten().collect();
+        let port = spawn_fake_server(iq);
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        backend.control.set_demod_mode(DemodMode::RawMag);
+        let cap = backend.open_capture(48_000).unwrap();
+        // The delivered rate is the full ADS-B capture rate, NOT the 48 kHz cap.
+        assert_eq!(cap.sample_rate, ADSB_CAPTURE_RATE);
+
+        // Collect the burst; every delivered sample is the scaled magnitude ≈ 0.707.
+        let mut samples: Vec<i16> = Vec::new();
+        while let Ok(chunk) = cap.rx.recv_timeout(Duration::from_millis(500)) {
+            samples.extend(chunk);
+        }
+        assert!(!samples.is_empty(), "no magnitude samples delivered");
+        let expect = (INV_SQRT2 * 32767.0) as i16; // ≈ 23170
+        // Allow a few LSB slack for the 1/127.5 quantization of the u8 IQ.
+        let within = samples.iter().filter(|&&s| (s - expect).abs() < 300).count();
+        assert!(
+            within as f32 > samples.len() as f32 * 0.9,
+            "magnitude not ≈{expect}: {within}/{} within tol",
+            samples.len(),
+        );
     }
 
     #[test]
