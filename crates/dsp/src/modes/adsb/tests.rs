@@ -146,6 +146,35 @@ fn rejects_pure_noise() {
 }
 
 #[test]
+fn tolerates_leaked_energy_in_pulse_adjacent_slot() {
+    // On a real off-air envelope the guard slot right next to a preamble pulse
+    // carries leaked pulse energy. The old strict correlator required *every*
+    // guard slot below every pulse, so a single elevated adjacent slot vetoed
+    // the match; the noise-floor-relative detector ignores the pulse-adjacent
+    // slots (they are not in PREAMBLE_QUIET_SLOTS) and still decodes the frame.
+    let frame = hex(KLM1023);
+    let mut wave = PpmModulator::new(2).modulate_padded(&frame, 4, 4);
+    // Preamble starts after the 4 µs (8-sample) lead; slot 1 is one sample in,
+    // adjacent to the pulse in slot 0. Lift it to the pulse level.
+    wave[8 + 1] = 1.0;
+    let frames = PpmDemodulator::new(2).scan(&wave, true).0;
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].crc_ok());
+    assert_eq!(frames[0].bytes, frame);
+}
+
+#[test]
+fn rejects_preamble_with_loud_guard_slot() {
+    // Energy in a *tested* guard slot (the gap before the data, slot 11) above
+    // the ceiling means the four pulse positions aren't the dominant energy —
+    // not a real preamble. The detector rejects it.
+    let frame = hex(KLM1023);
+    let mut wave = PpmModulator::new(2).modulate_padded(&frame, 4, 4);
+    wave[8 + 11] = 2.0; // slot 11, well above QUIET_CEIL_RATIO × the pulse level
+    assert!(PpmDemodulator::new(2).scan(&wave, true).0.is_empty());
+}
+
+#[test]
 fn airborne_position_cpr_global_decode() {
     let even = hex("8D40621D58C382D690C8AC2863A7");
     let odd = hex("8D40621D58C386435CC412692AD6");

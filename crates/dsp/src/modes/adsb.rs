@@ -25,6 +25,7 @@ mod tests;
 pub use message::{cpr_decode_airborne, encode_identification, AirbornePosition, ModeS};
 pub use ppm::RawFrame;
 
+use crate::frontend::detector::EnvelopeDetector;
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
 use crate::types::{Frame, FrameMeta, FramePayload, Sample};
 
@@ -47,8 +48,13 @@ pub const DATA_SLOTS_PER_BIT: usize = 2;
 
 /// Preamble slots that carry a pulse — pulses at 0.0, 1.0, 3.5, 4.5 µs.
 pub const PREAMBLE_HIGH_SLOTS: [usize; 4] = [0, 2, 7, 9];
-/// Preamble slots that must be quiet.
-pub const PREAMBLE_LOW_SLOTS: [usize; 12] = [1, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15];
+/// Preamble guard slots the detector tests for quiet: the gap between the two
+/// pulse pairs (4, 5) and the gap before the data starts (11–14). The slots
+/// immediately adjacent to a pulse (1, 3, 6, 8, 10, 15) are deliberately *not*
+/// tested — on a real off-air envelope out-of-phase pulse energy leaks into
+/// them, and requiring them quiet is what made the old strict correlator reject
+/// valid preambles (dump1090 skips them for the same reason).
+pub const PREAMBLE_QUIET_SLOTS: [usize; 6] = [4, 5, 11, 12, 13, 14];
 
 /// True when downlink format `df` denotes a 112-bit (long) frame.
 pub fn long_frame_df(df: u8) -> bool {
@@ -69,14 +75,27 @@ fn payload_kind(p: &FramePayload) -> &'static str {
 /// a frame straddling a chunk boundary is not lost.
 pub struct AdsbDemod {
     demod: ppm::PpmDemodulator,
+    /// Adaptive noise-floor follower advanced once per fed sample. Persisting it
+    /// across `feed` calls keeps the floor continuous, so a frame landing near a
+    /// chunk boundary is gated against the true noise level rather than a floor
+    /// that was just reset and is still warming up.
+    det: EnvelopeDetector,
     buf: Vec<f32>,
+    /// Per-sample noise floor entering each sample of `buf` (kept aligned with it).
+    floor: Vec<f32>,
     /// Absolute sample index of `buf[0]` in the fed stream.
     base: u64,
 }
 
 impl AdsbDemod {
     pub fn new() -> Self {
-        AdsbDemod { demod: ppm::PpmDemodulator::new(SAMPLES_PER_US), buf: Vec::new(), base: 0 }
+        AdsbDemod {
+            demod: ppm::PpmDemodulator::new(SAMPLES_PER_US),
+            det: ppm::new_floor_detector(),
+            buf: Vec::new(),
+            floor: Vec::new(),
+            base: 0,
+        }
     }
 
     fn emit(&self, raw: ppm::RawFrame) -> Frame {
@@ -94,8 +113,20 @@ impl AdsbDemod {
     fn drain(&mut self, frames: Vec<ppm::RawFrame>, consumed: usize) -> Vec<Frame> {
         let out: Vec<Frame> = frames.into_iter().map(|r| self.emit(r)).collect();
         self.buf.drain(..consumed);
+        self.floor.drain(..consumed);
         self.base += consumed as u64;
         out
+    }
+
+    /// Advance the persistent floor over the newly fed samples, recording the
+    /// floor entering each one, then append them to the working buffer.
+    fn ingest(&mut self, samples: &[Sample]) {
+        self.floor.reserve(samples.len());
+        for &s in samples {
+            self.floor.push(self.det.floor());
+            self.det.push(s);
+        }
+        self.buf.extend_from_slice(samples);
     }
 }
 
@@ -117,18 +148,20 @@ impl Demodulator for AdsbDemod {
     }
 
     fn feed(&mut self, samples: &[Sample]) -> Vec<Frame> {
-        self.buf.extend_from_slice(samples);
-        let (frames, consumed) = self.demod.scan(&self.buf, false);
+        self.ingest(samples);
+        let (frames, consumed) = self.demod.scan_with_floor(&self.buf, &self.floor, false);
         self.drain(frames, consumed)
     }
 
     fn reset(&mut self) {
         self.buf.clear();
+        self.floor.clear();
+        self.det = ppm::new_floor_detector();
         self.base = 0;
     }
 
     fn flush(&mut self) -> Vec<Frame> {
-        let (frames, consumed) = self.demod.scan(&self.buf, true);
+        let (frames, consumed) = self.demod.scan_with_floor(&self.buf, &self.floor, true);
         self.drain(frames, consumed)
     }
 }
