@@ -18,6 +18,13 @@
 //!   detection doubles the bandwidth, so decimating it aliases sharp pulse edges.
 //!   Kept so the ruler can reproduce the pre-R1 baseline on any recording.
 //!
+//! The `mag` path is the one the live daemon runs today (it takes the magnitude
+//! at the 2.4 Msps capture rate and the RX worker decimates the envelope to
+//! 2 MHz). `complex` is the *intended* R1 front end and currently runs ahead of
+//! production — it is not yet wired into the daemon's `RawMag` transport, whose
+//! i16 audio path carries an envelope rather than I/Q. Read a default (`complex`)
+//! run as the R1 target, not as the shipping decoder's yield.
+//!
 //! (The live daemon additionally scales the envelope by 1/√2 and quantizes it to
 //! i16 for its audio-delivery path; the PPM demod is scale-independent, so the
 //! bench skips both and the decode is equivalent, not bit-identical.)
@@ -40,7 +47,7 @@ use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
 use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
 use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
-use omnimodem_dsp::types::{FramePayload, Sample};
+use omnimodem_dsp::types::{Cplx, FramePayload, Sample};
 
 /// Default capture rate — the wideband rate the daemon commands the dongle to
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
@@ -61,6 +68,36 @@ impl Front {
         match self {
             Front::Complex => "complex (resample I/Q → magnitude)",
             Front::Mag => "mag (magnitude → resample envelope)",
+        }
+    }
+}
+
+/// The stateful resampler for the selected front end. Only the chosen variant is
+/// constructed, and it persists across chunk windows so decimation phase and
+/// filter history carry over.
+enum FrontEnd {
+    Complex(ComplexResampler),
+    Mag(Resampler),
+}
+
+impl FrontEnd {
+    fn new(front: Front, in_rate: u32) -> Self {
+        match front {
+            Front::Complex => FrontEnd::Complex(ComplexResampler::new(in_rate, ADSB_RATE, 16)),
+            Front::Mag => FrontEnd::Mag(Resampler::new(in_rate, ADSB_RATE, 16)),
+        }
+    }
+
+    /// Turn one window of capture-rate I/Q into the 2 MHz magnitude envelope.
+    fn envelope(&mut self, chunk: &[Cplx]) -> Vec<Sample> {
+        match self {
+            // R1: band-limited complex decimation first, magnitude at 2 MHz.
+            FrontEnd::Complex(rs) => rs.process(chunk).iter().map(|c| c.norm()).collect(),
+            // R0: magnitude at the capture rate, then decimate the envelope.
+            FrontEnd::Mag(rs) => {
+                let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
+                rs.process(&mag)
+            }
         }
     }
 }
@@ -174,27 +211,18 @@ fn run(args: &Args) -> Result<(), String> {
 
     // Resample the capture down to the 2 MHz working rate, then feed the
     // envelope to the streaming demod. `--front` selects where the magnitude is
-    // taken relative to the decimation (see [`Front`]). Both resamplers are
-    // stateful, so a single instance spans every window; `AdsbDemod` itself
+    // taken relative to the decimation (see [`FrontEnd`]). The resampler is
+    // stateful, so the single instance spans every window; `AdsbDemod` itself
     // buffers frames straddling a window boundary. Windowing only bounds peak
     // memory on long captures.
-    let mut mag_rs = Resampler::new(args.in_rate, ADSB_RATE, 16);
-    let mut iq_rs = ComplexResampler::new(args.in_rate, ADSB_RATE, 16);
+    let mut front = FrontEnd::new(args.front, args.in_rate);
     let mut demod = AdsbDemod::new();
     let mut report = Report::default();
     let mut samples_work = 0u64;
 
     let window = args.in_rate as usize; // ~1 s of complex samples per window
     for chunk in iq.chunks(window.max(1)) {
-        let envelope: Vec<Sample> = match args.front {
-            // R1: band-limited complex decimation first, magnitude at 2 MHz.
-            Front::Complex => iq_rs.process(chunk).iter().map(|c| c.norm()).collect(),
-            // R0: magnitude at the capture rate, then decimate the envelope.
-            Front::Mag => {
-                let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
-                mag_rs.process(&mag)
-            }
-        };
+        let envelope = front.envelope(chunk);
         samples_work += envelope.len() as u64;
         for frame in demod.feed(&envelope) {
             tally(&mut report, &frame.payload, frame.meta.crc_ok);
@@ -435,6 +463,9 @@ mod tests {
             Front::Mag
         );
         assert!(parse_args(&args(&["rec.iq", "--front", "bogus"])).is_err());
+        // `--front` greedily consumes the next token as its value, so an
+        // adjacent flag is read as a (bad) value rather than silently ignored.
+        assert!(parse_args(&args(&["rec.iq", "--front", "--json"])).is_err());
         // A valued --front must not be mistaken for the input path.
         let p = parse_args(&args(&["--front", "mag", "rec.iq"])).unwrap();
         assert_eq!(p.path, "rec.iq");
