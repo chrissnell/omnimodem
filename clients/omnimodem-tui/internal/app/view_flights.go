@@ -32,14 +32,10 @@ var flightsCols = []ui.Column{
 
 func (v *flightsView) Update(msg tea.Msg) (View, tea.Cmd) {
 	if k, ok := msg.(tea.KeyMsg); ok {
-		switch k.String() {
-		case "esc":
+		// esc pops back to the channels list, where `q` quits; a subview never
+		// quits the app itself (only ctrl+c does), matching the SDR/operate views.
+		if k.String() == "esc" {
 			v.m.pop()
-		case "q":
-			if v.m.cancel != nil {
-				v.m.cancel()
-			}
-			return v, tea.Quit
 		}
 	}
 	return v, nil
@@ -80,7 +76,6 @@ func (v *flightsView) Title() string {
 func (v *flightsView) Hints() []ui.Hint {
 	return []ui.Hint{
 		{Key: "esc", Action: "back"},
-		{Key: "q", Action: "quit"},
 	}
 }
 

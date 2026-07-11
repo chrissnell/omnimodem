@@ -87,6 +87,11 @@ func TestFlightsViewRendersRows(t *testing.T) {
 			t.Fatalf("flights table must contain %q; got:\n%s", want, out)
 		}
 	}
+	// The unidentified 0x484200 contact carries no position/speed/altitude, so
+	// those columns must render the em-dash placeholder rather than a zero value.
+	if !strings.Contains(out, "—") {
+		t.Fatalf("absent fields must render as an em-dash placeholder; got:\n%s", out)
+	}
 }
 
 // The view only lists contacts on its own channel.

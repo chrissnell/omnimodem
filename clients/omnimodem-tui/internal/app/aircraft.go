@@ -41,6 +41,9 @@ func (m *Model) applyAircraft(r *pb.AircraftReport, now time.Time) {
 		a = &aircraftLive{icao: r.GetIcao()}
 		m.aircraft[r.GetIcao()] = a
 	}
+	// Keyed by ICAO alone: an aircraft is heard on exactly one ADS-B channel
+	// (one receiver per channel), so the channel is stored for the view's filter
+	// rather than folded into the key.
 	a.channel = r.GetChannel()
 	if f := r.GetFlight(); f != "" {
 		a.flight = f
