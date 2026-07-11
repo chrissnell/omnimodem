@@ -1,9 +1,9 @@
 //! adsb_bench — offline frame-yield ruler for the omnimodem ADS-B decoder.
 //!
-//! Reads a raw uint8 interleaved I/Q recording (as `rtl_tcp` streams it),
 //! resamples it to the 2 MHz working rate, and runs the envelope through
-//! [`AdsbDemod`], tallying what came out: CRC-valid frames, unique aircraft, and
-//! DF / DF17-type-code histograms.
+//! `AdsbDemod`, tallying what came out: CRC-valid frames, unique aircraft, and
+//! DF / DF17-type-code histograms. The decode itself lives in the crate library
+//! ([`adsb_bench::decode_iq`]) so the CI regression gate asserts the same path.
 //!
 //! ## Front ends (`--front`)
 //! Two ways to get from the 2.4 Msps capture to the 2 MHz magnitude envelope the
@@ -51,66 +51,8 @@
 //! The recording is captured off the air, never re-transmitted: 1090 MHz is
 //! protected aeronautical spectrum. This tool only reads.
 
-use std::collections::BTreeMap;
-
-use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
-use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
-use omnimodem_dsp::mode::Demodulator;
-use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE, ADSB_SLICER_PHASES};
-use omnimodem_dsp::types::{Cplx, FramePayload, Sample};
-
-/// Default capture rate — the wideband rate the daemon commands the dongle to
-/// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
-const DEFAULT_IN_RATE: u32 = 2_400_000;
-
-/// How the 2.4 Msps capture becomes the 2 MHz magnitude envelope. See the module
-/// doc for the DSP rationale.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Front {
-    /// R1: complex-decimate the I/Q 2.4M→2.0M, then take magnitude.
-    Complex,
-    /// R0: take magnitude at the capture rate, then decimate the envelope.
-    Mag,
-}
-
-impl Front {
-    fn label(self) -> &'static str {
-        match self {
-            Front::Complex => "complex (resample I/Q → magnitude)",
-            Front::Mag => "mag (magnitude → resample envelope)",
-        }
-    }
-}
-
-/// The stateful resampler for the selected front end. Only the chosen variant is
-/// constructed, and it persists across chunk windows so decimation phase and
-/// filter history carry over.
-enum FrontEnd {
-    Complex(ComplexResampler),
-    Mag(Resampler),
-}
-
-impl FrontEnd {
-    fn new(front: Front, in_rate: u32) -> Self {
-        match front {
-            Front::Complex => FrontEnd::Complex(ComplexResampler::new(in_rate, ADSB_RATE, 16)),
-            Front::Mag => FrontEnd::Mag(Resampler::new(in_rate, ADSB_RATE, 16)),
-        }
-    }
-
-    /// Turn one window of capture-rate I/Q into the 2 MHz magnitude envelope.
-    fn envelope(&mut self, chunk: &[Cplx]) -> Vec<Sample> {
-        match self {
-            // R1: band-limited complex decimation first, magnitude at 2 MHz.
-            FrontEnd::Complex(rs) => rs.process(chunk).iter().map(|c| c.norm()).collect(),
-            // R0: magnitude at the capture rate, then decimate the envelope.
-            FrontEnd::Mag(rs) => {
-                let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
-                rs.process(&mag)
-            }
-        }
-    }
-}
+use adsb_bench::{decode_iq, Front, Report, DEFAULT_IN_RATE, DEFAULT_PHASES};
+use omnimodem_dsp::modes::adsb::ADSB_RATE;
 
 struct Args {
     path: String,
@@ -132,7 +74,7 @@ fn main() {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
-                 [--front complex|mag] [--phases {ADSB_SLICER_PHASES}] [--json] \
+                 [--front complex|mag] [--phases {DEFAULT_PHASES}] [--json] \
                  [--baseline-frames N] [--baseline-aircraft M]"
             );
             std::process::exit(2);
@@ -172,7 +114,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 Ok(n) => Ok(n),
             })
             .transpose()?
-            .unwrap_or(ADSB_SLICER_PHASES),
+            .unwrap_or(DEFAULT_PHASES),
         json: raw.iter().any(|a| a == "--json"),
         baseline_frames: flag(raw, "--baseline-frames")
             .map(|s| s.parse().map_err(|_| "bad --baseline-frames".to_string()))
@@ -185,10 +127,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
 
 /// Read `--name value` from the arg list.
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
 /// First positional token — the input path — skipping flags and the values
@@ -209,104 +148,34 @@ fn positional(args: &[String]) -> Option<&String> {
     None
 }
 
-/// Tally accumulated over every frame the demod emitted. `AdsbDemod` gates on
-/// parity (`require_crc`), so every emitted frame is CRC-valid — this counts the
-/// decoder's usable yield, the number each R-phase is trying to move.
-#[derive(Default)]
-struct Report {
-    frames_valid: u64,
-    /// Airborne-position frames (DF17/18, TC 9-18/20-22) that passed CRC.
-    airborne_pos: u64,
-    /// Distinct 24-bit ICAO addresses seen in CRC-valid DF11/17/18 frames.
-    aircraft: BTreeMap<u32, u64>,
-    /// DF → count, CRC-valid frames only.
-    df_hist: BTreeMap<u8, u64>,
-    /// DF17/18 type code → count, CRC-valid frames only.
-    tc_hist: BTreeMap<u8, u64>,
-}
-
 fn run(args: &Args) -> Result<(), String> {
     let bytes = std::fs::read(&args.path).map_err(|e| format!("read {}: {e}", args.path))?;
-    let iq = u8_iq_to_cplx(&bytes);
-    let samples_in = iq.len();
-
-    // Resample the capture down to the 2 MHz working rate, then feed the
-    // envelope to the streaming demod. `--front` selects where the magnitude is
-    // taken relative to the decimation (see [`FrontEnd`]). The resampler is
-    // stateful, so the single instance spans every window; `AdsbDemod` itself
-    // buffers frames straddling a window boundary. Windowing only bounds peak
-    // memory on long captures.
-    let mut front = FrontEnd::new(args.front, args.in_rate);
-    let mut demod = AdsbDemod::with_phases(args.phases);
-    let mut report = Report::default();
-    let mut samples_work = 0u64;
-
-    let window = args.in_rate as usize; // ~1 s of complex samples per window
-    for chunk in iq.chunks(window.max(1)) {
-        let envelope = front.envelope(chunk);
-        samples_work += envelope.len() as u64;
-        for frame in demod.feed(&envelope) {
-            tally(&mut report, &frame.payload, frame.meta.crc_ok);
-        }
-    }
-    for frame in demod.flush() {
-        tally(&mut report, &frame.payload, frame.meta.crc_ok);
-    }
-
-    let dur_in = samples_in as f64 / args.in_rate as f64;
+    // `--front` selects the front end that turns the capture into the 2 MHz
+    // envelope and `--phases` the slicer ensemble width; the decode itself is
+    // the shared library path (see [`adsb_bench::decode_iq`]), so the CLI and
+    // the CI gate agree.
+    let report = decode_iq(&bytes, args.in_rate, args.front, args.phases);
+    let dur_in = report.samples_in as f64 / args.in_rate as f64;
     if args.json {
-        print_json(args, &report, samples_in, dur_in, samples_work);
+        print_json(args, &report, dur_in);
     } else {
-        print_human(args, &report, samples_in, dur_in, samples_work);
+        print_human(args, &report, dur_in);
     }
     Ok(())
 }
 
-fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool) {
-    // Both guards are defensive: `AdsbDemod` only ever emits CRC-valid `Packet`
-    // frames today, but keep counting honest if that ever changes.
-    let FramePayload::Packet(bytes) = payload else {
-        return;
-    };
-    if !crc_ok {
-        return;
-    }
-    report.frames_valid += 1;
-    let msg = ModeS::new(bytes);
-    let df = msg.df();
-    *report.df_hist.entry(df).or_default() += 1;
-
-    // ICAO lives in bits 8..32 for all-call replies (DF11) and extended
-    // squitters (DF17/18); other DFs carry it XOR-folded into the parity, so
-    // only count the address where it is read directly.
-    if matches!(df, 11 | 17 | 18) {
-        *report.aircraft.entry(msg.icao()).or_default() += 1;
-    }
-    if matches!(df, 17 | 18) {
-        if let Some(tc) = msg.type_code() {
-            *report.tc_hist.entry(tc).or_default() += 1;
-        }
-        if msg.airborne_position().is_some() {
-            report.airborne_pos += 1;
-        }
-    }
-}
-
-fn print_human(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_work: u64) {
+fn print_human(args: &Args, r: &Report, dur_in: f64) {
     println!("adsb_bench {}", args.path);
     println!(
         "  input:        {} Hz uint8 IQ, {} samples ({:.1} s)",
-        args.in_rate, samples_in, dur_in
-    );
-    println!(
-        "  working rate: {} Hz, {} samples after resample",
-        ADSB_RATE, samples_work
+        args.in_rate, r.samples_in, dur_in
     );
     println!("  front end:    {}", args.front.label());
     println!("  slicer phases: {}", args.phases);
+    println!("  working rate: {} Hz, {} samples after resample", ADSB_RATE, r.samples_work);
     println!("  frames (CRC-valid):  {}", r.frames_valid);
     println!("  airborne positions:  {}", r.airborne_pos);
-    println!("  unique aircraft:     {}", r.aircraft.len());
+    println!("  unique aircraft:     {}", r.unique_aircraft());
     if !r.aircraft.is_empty() {
         let list: Vec<String> = r.aircraft.keys().map(|a| format!("{a:06X}")).collect();
         println!("    {}", list.join(", "));
@@ -339,10 +208,10 @@ fn print_delta(args: &Args, r: &Report) {
         pct(r.frames_valid, base_frames)
     );
     if let Some(base_ac) = args.baseline_aircraft {
-        let gap = r.aircraft.len() as i64 - base_ac as i64;
+        let gap = r.unique_aircraft() as i64 - base_ac as i64;
         println!(
             "    aircraft: ours {} / baseline {}  (delta {gap:+})",
-            r.aircraft.len(),
+            r.unique_aircraft(),
             base_ac
         );
     }
@@ -355,18 +224,10 @@ fn pct(ours: u64, base: u64) -> f64 {
     100.0 * ours as f64 / base as f64
 }
 
-fn print_json(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_work: u64) {
+fn print_json(args: &Args, r: &Report, dur_in: f64) {
     let aircraft: Vec<String> = r.aircraft.keys().map(|a| format!("\"{a:06X}\"")).collect();
-    let df: Vec<String> = r
-        .df_hist
-        .iter()
-        .map(|(k, v)| format!("\"{k}\":{v}"))
-        .collect();
-    let tc: Vec<String> = r
-        .tc_hist
-        .iter()
-        .map(|(k, v)| format!("\"{k}\":{v}"))
-        .collect();
+    let df: Vec<String> = r.df_hist.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
+    let tc: Vec<String> = r.tc_hist.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
     print!("{{");
     print!("\"path\":{},", json_str(&args.path));
     print!("\"in_rate\":{},", args.in_rate);
@@ -378,13 +239,13 @@ fn print_json(args: &Args, r: &Report, samples_in: usize, dur_in: f64, samples_w
         }
     );
     print!("\"phases\":{},", args.phases);
-    print!("\"samples_in\":{samples_in},");
+    print!("\"samples_in\":{},", r.samples_in);
     print!("\"duration_s\":{dur_in:.3},");
     print!("\"work_rate\":{ADSB_RATE},");
-    print!("\"samples_work\":{samples_work},");
+    print!("\"samples_work\":{},", r.samples_work);
     print!("\"frames_crc_valid\":{},", r.frames_valid);
     print!("\"airborne_positions\":{},", r.airborne_pos);
-    print!("\"unique_aircraft\":{},", r.aircraft.len());
+    print!("\"unique_aircraft\":{},", r.unique_aircraft());
     print!("\"aircraft\":[{}],", aircraft.join(","));
     print!("\"df_hist\":{{{}}},", df.join(","));
     print!("\"tc_hist\":{{{}}}", tc.join(","));
@@ -463,7 +324,7 @@ mod tests {
         assert_eq!(p.path, "rec.iq");
         assert_eq!(p.in_rate, DEFAULT_IN_RATE);
         assert_eq!(p.front, Front::Complex); // R1 complex front end is the default
-        assert_eq!(p.phases, ADSB_SLICER_PHASES); // R3 ensemble is the default
+        assert_eq!(p.phases, DEFAULT_PHASES); // R3 ensemble is the default
         assert!(!p.json);
         assert_eq!(p.baseline_frames, None);
     }

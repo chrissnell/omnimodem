@@ -5,9 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "adsb_bench"
+path = "src/lib.rs"
+
 [[bin]]
 name = "adsb_bench"
 path = "src/main.rs"
+
+# Dev tool: regenerates testdata/adsb_ci_clip.iq (the CI regression fixture).
+[[bin]]
+name = "make_fixture"
+path = "src/bin/make_fixture.rs"
 
 [dependencies]
 omnimodem-dsp = { path = "../dsp" }
