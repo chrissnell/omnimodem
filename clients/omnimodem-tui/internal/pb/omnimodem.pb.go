@@ -5004,12 +5004,11 @@ func (x *GetSdrCapsResponse) GetDirectSamplingSupported() bool {
 }
 
 // Per-aircraft ADS-B state, folded from decoded Mode S extended squitters on an
-// ADS-B channel (delivered as Event.aircraft_report). LOSSY class: only the
-// latest state per aircraft matters, so a lagging subscriber may drop
-// intermediate reports. An aircraft is reported as soon as it is heard, so the
-// position, velocity, and altitude fields are `optional` — absent until the
-// squitter that carries them arrives (position in particular needs a matched
-// even/odd CPR pair).
+// ADS-B channel (delivered as Event.aircraft_report). LOSSY class: a lagging
+// subscriber may drop intermediate reports. An aircraft is reported as soon as
+// it is heard, so the position, velocity, and altitude fields are `optional` —
+// absent until the squitter that carries them arrives (position in particular
+// needs a matched even/odd CPR pair).
 type AircraftReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Channel       uint32                 `protobuf:"varint,1,opt,name=channel,proto3" json:"channel,omitempty"`                                           // channel that decoded the frame

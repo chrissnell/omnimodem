@@ -135,8 +135,10 @@ impl<'a> ModeS<'a> {
             }
             3 | 4 => {
                 let unit = if subtype == 4 { 4.0 } else { 1.0 };
-                let heading = (get_bits(self.bytes, 46, 1) == 1)
-                    .then(|| get_bits(self.bytes, 47, 10) as f64 * 360.0 / 1024.0);
+                // ME bit 45 = heading-available; 46-55 = heading; 56 = airspeed
+                // type; 57-66 = airspeed (1-offset, 0 == no data).
+                let heading = (get_bits(self.bytes, 45, 1) == 1)
+                    .then(|| get_bits(self.bytes, 46, 10) as f64 * 360.0 / 1024.0);
                 let as_raw = get_bits(self.bytes, 57, 10);
                 let speed = (as_raw != 0).then_some((as_raw as f64 - 1.0) * unit);
                 (speed, heading)

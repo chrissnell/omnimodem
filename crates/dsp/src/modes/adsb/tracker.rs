@@ -90,6 +90,10 @@ impl AircraftTracker {
             return Ingest::Ignored;
         }
         let msg = ModeS::new(frame);
+        // DF17 is a genuine ADS-B squitter. DF18 (TIS-B/ADS-R) reuses the same
+        // ME layout but its CA byte is a Control Field; some CF values carry no
+        // real ICAO position. TODO(phase2): gate DF18 on CF once the live SDR
+        // feed can surface them — the loopback/canonical path is DF17 only.
         if !matches!(msg.df(), 17 | 18) {
             return Ingest::Ignored;
         }
@@ -119,8 +123,13 @@ impl AircraftTracker {
             }
             9..=18 | 20..=22 => {
                 if let Some(pos) = msg.airborne_position() {
-                    if let Some(alt) = pos.altitude {
-                        track.ac.altitude_ft = Some(alt);
+                    // Only TC 9-18 carry a barometric AC12 altitude. TC 20-22
+                    // encode a GNSS height in metres, which `decode_ac12` would
+                    // misread — take the position but leave altitude untouched.
+                    if (9..=18).contains(&tc) {
+                        if let Some(alt) = pos.altitude {
+                            track.ac.altitude_ft = Some(alt);
+                        }
                     }
                     Self::solve_position(track, pos, now_ms);
                 }

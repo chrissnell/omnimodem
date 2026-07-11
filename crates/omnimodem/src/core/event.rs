@@ -96,10 +96,10 @@ pub enum TelemetryEvent {
         demod_mode: u8,
         squelch_db: f32,
     },
-    /// Per-aircraft ADS-B state from an ADS-B channel (lossy: only the latest
-    /// per aircraft matters). Emitted when a decoded squitter changes the
-    /// aircraft's reportable state; position/velocity/altitude are optional
-    /// until their carrying squitter has been heard.
+    /// Per-aircraft ADS-B state from an ADS-B channel (lossy: intermediate
+    /// reports may be dropped under lag). Emitted when a decoded squitter
+    /// changes the aircraft's reportable state; position/velocity/altitude are
+    /// optional until their carrying squitter has been heard.
     AircraftReport {
         channel: ChannelId,
         icao: u32,

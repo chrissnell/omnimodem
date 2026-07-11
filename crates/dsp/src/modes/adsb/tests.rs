@@ -164,3 +164,22 @@ fn airborne_altitude_decode() {
     let bytes = hex("8D40621D58C382D690C8AC2863A7");
     assert_eq!(ModeS::new(&bytes).airborne_position().unwrap().altitude, Some(38000));
 }
+
+#[test]
+fn airborne_velocity_ground_speed_decode() {
+    // mode-s.org subtype-1 ground-speed vector: 159.2 kt, 182.88 deg, -832 fpm.
+    let v = ModeS::new(&hex("8D485020994409940838175B284F")).airborne_velocity().unwrap();
+    assert!((v.ground_speed.unwrap() - 159.20).abs() < 0.1, "gs={:?}", v.ground_speed);
+    assert!((v.track.unwrap() - 182.88).abs() < 0.1, "track={:?}", v.track);
+    assert_eq!(v.vertical_rate, Some(-832));
+}
+
+#[test]
+fn airborne_velocity_airspeed_heading_decode() {
+    // pyModeS subtype-3 (airspeed + magnetic heading) vector: 375 kt, 243.98 deg,
+    // -2304 fpm. Guards the ME bit-45 heading offset.
+    let v = ModeS::new(&hex("8DA05F219B06B6AF189400CBC33F")).airborne_velocity().unwrap();
+    assert!((v.ground_speed.unwrap() - 375.0).abs() < 0.5, "as={:?}", v.ground_speed);
+    assert!((v.track.unwrap() - 243.98).abs() < 0.1, "hdg={:?}", v.track);
+    assert_eq!(v.vertical_rate, Some(-2304));
+}
