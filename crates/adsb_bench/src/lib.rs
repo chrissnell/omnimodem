@@ -1,23 +1,78 @@
 //! adsb_bench decode core — the offline frame-yield path shared by the CLI
 //! (`main.rs`) and the CI regression gate (`tests/regression_gate.rs`).
 //!
-//! [`decode_iq`] runs a raw uint8 interleaved I/Q buffer through the exact
-//! daemon DSP path — `|I+jQ|` magnitude → resample to the 2 MHz working rate
-//! (the same polyphase [`Resampler`]) → [`AdsbDemod`] — and returns a [`Report`]
-//! tallying the decoder's usable yield. Keeping the decode here (not in the
-//! binary) lets a test assert the same numbers the CLI prints.
+//! [`decode_iq`] runs a raw uint8 interleaved I/Q buffer through the same DSP
+//! path the daemon uses — resample the 2.4 Msps capture to the 2 MHz working
+//! rate, take the `|I+jQ|` magnitude envelope, feed [`AdsbDemod`] — and returns
+//! a [`Report`] tallying the decoder's usable yield. Keeping the decode here
+//! (not in the binary) lets a test assert the same numbers the CLI prints.
+//!
+//! `--front` (see [`Front`]) selects where the magnitude is taken relative to
+//! the 2.4M→2.0M decimation; the CLI defaults to the R1 `complex` front end,
+//! while the CI gate feeds a clip already at the working rate so the resample is
+//! a no-op.
 
 use std::collections::BTreeMap;
 
 use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
-use omnimodem_dsp::frontend::resample::Resampler;
+use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
 use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
-use omnimodem_dsp::types::{FramePayload, Sample};
+use omnimodem_dsp::types::{Cplx, FramePayload, Sample};
 
 /// Default capture rate — the wideband rate the daemon commands the dongle to
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
 pub const DEFAULT_IN_RATE: u32 = 2_400_000;
+
+/// How the 2.4 Msps capture becomes the 2 MHz magnitude envelope. See the
+/// `main.rs` module doc for the DSP rationale.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Front {
+    /// R1: complex-decimate the I/Q 2.4M→2.0M, then take magnitude.
+    Complex,
+    /// R0: take magnitude at the capture rate, then decimate the envelope.
+    Mag,
+}
+
+impl Front {
+    /// Human-readable label for the front end, printed by the CLI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Front::Complex => "complex (resample I/Q → magnitude)",
+            Front::Mag => "mag (magnitude → resample envelope)",
+        }
+    }
+}
+
+/// The stateful resampler for the selected front end. Only the chosen variant is
+/// constructed, and it persists across chunk windows so decimation phase and
+/// filter history carry over.
+enum FrontEnd {
+    Complex(ComplexResampler),
+    Mag(Resampler),
+}
+
+impl FrontEnd {
+    fn new(front: Front, in_rate: u32) -> Self {
+        match front {
+            Front::Complex => FrontEnd::Complex(ComplexResampler::new(in_rate, ADSB_RATE, 16)),
+            Front::Mag => FrontEnd::Mag(Resampler::new(in_rate, ADSB_RATE, 16)),
+        }
+    }
+
+    /// Turn one window of capture-rate I/Q into the 2 MHz magnitude envelope.
+    fn envelope(&mut self, chunk: &[Cplx]) -> Vec<Sample> {
+        match self {
+            // R1: band-limited complex decimation first, magnitude at 2 MHz.
+            FrontEnd::Complex(rs) => rs.process(chunk).iter().map(|c| c.norm()).collect(),
+            // R0: magnitude at the capture rate, then decimate the envelope.
+            FrontEnd::Mag(rs) => {
+                let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
+                rs.process(&mag)
+            }
+        }
+    }
+}
 
 /// Tally accumulated over every frame the demod emitted. `AdsbDemod` gates on
 /// parity (`require_crc`), so every emitted frame is CRC-valid — this counts the
@@ -49,23 +104,22 @@ impl Report {
 
 /// Decode a raw uint8 interleaved I/Q buffer at `in_rate` and tally the yield.
 ///
-/// Mirrors the daemon path: magnitude envelope at the capture rate, resampled to
-/// [`ADSB_RATE`] through the same polyphase resampler, fed to the streaming
+/// Mirrors the daemon path: the `front` front end turns the capture into the
+/// 2 MHz magnitude envelope (see [`Front`]), which is fed to the streaming
 /// demod. The resampler is stateful, so a single instance spans every window;
 /// `AdsbDemod` buffers frames straddling a window boundary. Windowing only
 /// bounds peak memory on long captures.
-pub fn decode_iq(bytes: &[u8], in_rate: u32) -> Report {
+pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front) -> Report {
     let iq = u8_iq_to_cplx(bytes);
-    let mut rs = Resampler::new(in_rate, ADSB_RATE, 16);
+    let mut front_end = FrontEnd::new(front, in_rate);
     let mut demod = AdsbDemod::new();
     let mut report = Report { samples_in: iq.len(), ..Default::default() };
 
     let window = (in_rate as usize).max(1); // ~1 s of complex samples per window
     for chunk in iq.chunks(window) {
-        let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
-        let resampled = rs.process(&mag);
-        report.samples_work += resampled.len() as u64;
-        for frame in demod.feed(&resampled) {
+        let envelope = front_end.envelope(chunk);
+        report.samples_work += envelope.len() as u64;
+        for frame in demod.feed(&envelope) {
             tally(&mut report, &frame.payload, frame.meta.crc_ok);
         }
     }

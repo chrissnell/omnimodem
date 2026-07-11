@@ -23,7 +23,7 @@ pub use mode::{
     BlockDemodulator, DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator,
 };
 pub use modes::{
-    adsb::{AdsbDemod, AdsbMod},
+    adsb::{Aircraft, AircraftTracker, AdsbDemod, AdsbMod, Ingest},
     afsk1200::{Afsk1200Demod, Afsk1200Ensemble, Afsk1200Mod},
     cw::{CwDemod, CwMod},
     ft4::{Ft4Demod, Ft4Mod},

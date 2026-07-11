@@ -15,10 +15,15 @@
 
 use std::collections::BTreeMap;
 
-use adsb_bench::decode_iq;
+use adsb_bench::{decode_iq, Front};
 
 /// The fixture is generated at the working rate, so decode with no resample.
 const IN_RATE: u32 = 2_000_000;
+
+/// The clip already sits at the 2 MHz working rate, so take the magnitude
+/// envelope directly (the `mag` front end): a Mode S pulse is a single sample
+/// here, and running it through the `complex` anti-alias filter would smear it.
+const FRONT: Front = Front::Mag;
 
 /// Full CRC-valid yield of the committed clip. The floors below sit at this
 /// value: the clip is synthetic and lossless, so every frame must decode. Raise
@@ -31,7 +36,7 @@ const EXPECT_DF17: u64 = 3;
 fn load_report() -> adsb_bench::Report {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/adsb_ci_clip.iq");
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
-    decode_iq(&bytes, IN_RATE)
+    decode_iq(&bytes, IN_RATE, FRONT)
 }
 
 #[test]

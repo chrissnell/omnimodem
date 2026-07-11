@@ -23,7 +23,22 @@ capture (no channelization), not a soundcard. See
 
 | Mode | File | What it is | RX/TX | Output |
 |---|---|---|---|---|
-| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude. DSP + KATs landed; daemon wiring / typed `AircraftReport` / TUI flights table are Phases 2-4. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
+| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude + TC 19 velocity. DSP + KATs and the ICAO-keyed `tracker` (CPR pairing, callsign, altitude, velocity, age-out) landed; the typed `AircraftReport` event is emitted by `core::adsb::AdsbReporter`. Daemon capture wiring (Phase 2) and the TUI flights table (Phase 4) are still open. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
+
+**Decoder benchmark (the ruler).** [`../../crates/adsb_bench/`](../../crates/adsb_bench/)
+replays a raw uint8 I/Q recording (2.4 Msps, as `rtl_tcp` streams it) through the
+demod and reports CRC-valid frames, unique aircraft, and DF/type-code histograms
+— the yardstick the decoder-quality phases (R1–R5) are measured against. Its
+`--front` flag picks the front end: `complex` (default) band-limits and decimates
+the I/Q 2.4M→2.0M before taking the magnitude; `mag` takes the magnitude at the
+capture rate then decimates the envelope (the path the daemon ships today). The
+`complex` front end avoids aliasing the sharp Mode S pulse edges that magnitude
+decimation folds back, and is the R1 improvement. `ComplexResampler`'s anti-alias
+lowpass is centered at DC, so `complex` assumes the signal sits near DC — true of
+the `rtl_sdr` reference recording (tuned to 1090 MHz) but **not** of a
+daemon-produced capture, which the tuner parks ~600 kHz above center to dodge the
+R820T DC spike (`RawMag` bypasses the NCO). Porting `complex` into the daemon
+needs an NCO shift to DC first.
 
 ## WSJT-X weak-signal family (windowed / time-aligned)
 
