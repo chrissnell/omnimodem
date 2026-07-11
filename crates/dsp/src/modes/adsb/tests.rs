@@ -127,6 +127,47 @@ fn ensemble_keeps_distinct_frames_far_apart() {
 }
 
 #[test]
+fn ensemble_recovers_off_grid_frame_single_phase_misses() {
+    // The core R3 win: a frame whose bit timing lands off the 2 MHz integer grid
+    // that the single-phase slicer cannot decode, but a sub-sample phase does.
+    //
+    // Ideal square pulses can't demonstrate this — every phase reads the flat
+    // pulse top, so a shift changes nothing. Off-air the pulses are band-limited,
+    // so their energy smears across slot boundaries; then a fractional timing
+    // offset pushes the integer-grid slot centers into the wrong side and the
+    // slice flips. Reproduce that: modulate 8× oversampled, low-pass with a
+    // ~1-sample moving average to round the edges, then sample at 2 MHz from a
+    // ¾-sample offset. A quiet lead seeds the noise floor past its warmup.
+    let frame = hex(KLM1023);
+    let fine_spu = 16usize;
+    let fine = PpmModulator::new(fine_spu).modulate_padded(&frame, 6, 6);
+    let smooth = fine_spu; // ±8 fine taps ≈ one 2 MHz sample of edge rounding
+    let rounded: Vec<f32> = (0..fine.len())
+        .map(|i| {
+            let lo = i.saturating_sub(smooth / 2);
+            let hi = (i + smooth / 2).min(fine.len() - 1);
+            fine[lo..=hi].iter().sum::<f32>() / (hi - lo + 1) as f32
+        })
+        .collect();
+    let decim = fine_spu / 2; // 16× fine -> 2 MHz
+    let phase_off = 6usize; // 6/8 of a 2 MHz sample — off the integer grid
+    let mut wave = vec![0.0f32; 300];
+    wave.extend(rounded.iter().skip(phase_off).step_by(decim).copied());
+
+    let single = ParallelDemodulator::new(2, 1).scan(&wave, true).0;
+    assert!(
+        !single.iter().any(|f| f.crc_ok() && f.bytes == frame),
+        "single-phase should miss the off-grid frame"
+    );
+    let ensemble = ParallelDemodulator::new(2, 4).scan(&wave, true).0;
+    assert_eq!(
+        ensemble.iter().filter(|f| f.crc_ok() && f.bytes == frame).count(),
+        1,
+        "ensemble should recover it exactly once"
+    );
+}
+
+#[test]
 fn short_frame_roundtrip() {
     // 56-bit short frame, non-extended DF (DF11 all-call). Valid parity, so the
     // demod must select the short length from the DF rather than over-reading.
