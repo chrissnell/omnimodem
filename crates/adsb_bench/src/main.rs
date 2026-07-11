@@ -46,13 +46,22 @@
 //!
 //! Usage:
 //!   adsb_bench <file.iq> [--in-rate 2400000] [--front complex|mag] [--phases N]
-//!             [--json] [--baseline-frames N] [--baseline-aircraft M]
+//!             [--min-conf C] [--dump] [--json] [--baseline-frames N] [--baseline-aircraft M]
+//!
+//! `--min-conf 0` disables the R4 soft-decision gate, so a before/after pair
+//! (`--min-conf 0` vs the default) shows exactly which frames the gate rejects.
+//! `--dump` lists every accepted frame (df/tc/icao/conf/bytes, plus the DF18
+//! control field) to stderr, so a frame flagged as a false positive can be
+//! audited on the evidence — frame count, control field, soft confidence.
 //!
 //! The recording is captured off the air, never re-transmitted: 1090 MHz is
 //! protected aeronautical spectrum. This tool only reads.
 
-use adsb_bench::{decode_iq, Front, Report, DEFAULT_IN_RATE, DEFAULT_PHASES};
-use omnimodem_dsp::modes::adsb::ADSB_RATE;
+use adsb_bench::{
+    decode_iq, decode_iq_with, Front, Report, DEFAULT_IN_RATE, DEFAULT_MIN_CONF, DEFAULT_PHASES,
+};
+use omnimodem_dsp::modes::adsb::{ModeS, ADSB_RATE};
+use omnimodem_dsp::types::{Frame, FramePayload};
 
 struct Args {
     path: String,
@@ -61,6 +70,11 @@ struct Args {
     /// Sub-sample slicer phases (R3 ensemble). Default matches the shipping
     /// decoder; `--phases 1` reproduces the pre-R3 single-phase baseline.
     phases: usize,
+    /// R4 soft-decision reject threshold. Default matches the shipping decoder;
+    /// `--min-conf 0` disables the gate to reveal the ghosts it rejects.
+    min_conf: f32,
+    /// Print every accepted frame (df/tc/icao/conf/bytes) to stderr.
+    dump: bool,
     json: bool,
     baseline_frames: Option<u64>,
     baseline_aircraft: Option<u64>,
@@ -74,7 +88,8 @@ fn main() {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
-                 [--front complex|mag] [--phases {DEFAULT_PHASES}] [--json] \
+                 [--front complex|mag] [--phases {DEFAULT_PHASES}] \
+                 [--min-conf {DEFAULT_MIN_CONF}] [--dump] [--json] \
                  [--baseline-frames N] [--baseline-aircraft M]"
             );
             std::process::exit(2);
@@ -91,6 +106,7 @@ const VALUED_FLAGS: &[&str] = &[
     "--in-rate",
     "--front",
     "--phases",
+    "--min-conf",
     "--baseline-frames",
     "--baseline-aircraft",
 ];
@@ -115,6 +131,14 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             })
             .transpose()?
             .unwrap_or(DEFAULT_PHASES),
+        min_conf: flag(raw, "--min-conf")
+            .map(|s| match s.parse::<f32>() {
+                Ok(c) if (0.0..=1.0).contains(&c) => Ok(c),
+                _ => Err("bad --min-conf (want a float in [0, 1])".to_string()),
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_MIN_CONF),
+        dump: raw.iter().any(|a| a == "--dump"),
         json: raw.iter().any(|a| a == "--json"),
         baseline_frames: flag(raw, "--baseline-frames")
             .map(|s| s.parse().map_err(|_| "bad --baseline-frames".to_string()))
@@ -151,10 +175,19 @@ fn positional(args: &[String]) -> Option<&String> {
 fn run(args: &Args) -> Result<(), String> {
     let bytes = std::fs::read(&args.path).map_err(|e| format!("read {}: {e}", args.path))?;
     // `--front` selects the front end that turns the capture into the 2 MHz
-    // envelope and `--phases` the slicer ensemble width; the decode itself is
-    // the shared library path (see [`adsb_bench::decode_iq`]), so the CLI and
-    // the CI gate agree.
-    let report = decode_iq(&bytes, args.in_rate, args.front, args.phases);
+    // envelope, `--phases` the slicer ensemble width, and `--min-conf` the R4
+    // soft-decision gate; the decode itself is the shared library path (see
+    // [`adsb_bench::decode_iq`]), so the CLI and the CI gate agree. `--dump`
+    // routes every accepted frame through the audit hook on the way past.
+    let report = if args.dump {
+        decode_iq_with(&bytes, args.in_rate, args.front, args.phases, args.min_conf, |f| {
+            if let Some(line) = dump_line(f) {
+                eprintln!("{line}");
+            }
+        })
+    } else {
+        decode_iq(&bytes, args.in_rate, args.front, args.phases, args.min_conf)
+    };
     let dur_in = report.samples_in as f64 / args.in_rate as f64;
     if args.json {
         print_json(args, &report, dur_in);
@@ -162,6 +195,30 @@ fn run(args: &Args) -> Result<(), String> {
         print_human(args, &report, dur_in);
     }
     Ok(())
+}
+
+/// Format one accepted frame for `--dump`, or `None` for a non-packet payload.
+/// The per-frame audit trail behind the aggregate counts: `df`/`tc`/`icao`, the
+/// soft `conf`, the sample offset, and the raw hex. For DF18 it also prints the
+/// control field `cf` — a real ADS-B/TIS-B frame uses cf 0-6; cf 7 is reserved,
+/// so a lone cf=7 frame is a CRC-lucky slice, not a transmitter. Pair with
+/// `--min-conf 0` to also see the frames the gate rejects.
+fn dump_line(frame: &Frame) -> Option<String> {
+    let FramePayload::Packet(b) = &frame.payload else {
+        return None;
+    };
+    let m = ModeS::new(b);
+    let df = m.df();
+    let tc = m.type_code().map(|t| t as i32).unwrap_or(-1);
+    // DF18 control field = the low 3 bits of byte 0 (same bits `ca()` returns).
+    let cf = if df == 18 { format!(" cf={}", m.ca()) } else { String::new() };
+    let hex: String = b.iter().map(|x| format!("{x:02X}")).collect();
+    Some(format!(
+        "frame df={df}{cf} tc={tc} icao={:06X} conf={:.3} off={} {hex}",
+        m.icao(),
+        frame.meta.confidence.unwrap_or(0.0),
+        frame.meta.sample_offset
+    ))
 }
 
 fn print_human(args: &Args, r: &Report, dur_in: f64) {
@@ -172,8 +229,16 @@ fn print_human(args: &Args, r: &Report, dur_in: f64) {
     );
     println!("  front end:    {}", args.front.label());
     println!("  slicer phases: {}", args.phases);
+    println!(
+        "  min confidence: {:.2}{}",
+        args.min_conf,
+        if args.min_conf == 0.0 { " (gate disabled)" } else { "" }
+    );
     println!("  working rate: {} Hz, {} samples after resample", ADSB_RATE, r.samples_work);
     println!("  frames (CRC-valid):  {}", r.frames_valid);
+    if let (Some(mean), Some(min)) = (r.conf_mean(), r.conf_min) {
+        println!("  frame confidence:    mean {mean:.3}, min {min:.3} (gate {:.2})", args.min_conf);
+    }
     println!("  airborne positions:  {}", r.airborne_pos);
     println!("  unique aircraft:     {}", r.unique_aircraft());
     if !r.aircraft.is_empty() {
@@ -239,11 +304,14 @@ fn print_json(args: &Args, r: &Report, dur_in: f64) {
         }
     );
     print!("\"phases\":{},", args.phases);
+    print!("\"min_conf\":{:.3},", args.min_conf);
     print!("\"samples_in\":{},", r.samples_in);
     print!("\"duration_s\":{dur_in:.3},");
     print!("\"work_rate\":{ADSB_RATE},");
     print!("\"samples_work\":{},", r.samples_work);
     print!("\"frames_crc_valid\":{},", r.frames_valid);
+    print!("\"conf_mean\":{:.3},", r.conf_mean().unwrap_or(0.0));
+    print!("\"conf_min\":{:.3},", r.conf_min.unwrap_or(0.0));
     print!("\"airborne_positions\":{},", r.airborne_pos);
     print!("\"unique_aircraft\":{},", r.unique_aircraft());
     print!("\"aircraft\":[{}],", aircraft.join(","));
@@ -325,8 +393,48 @@ mod tests {
         assert_eq!(p.in_rate, DEFAULT_IN_RATE);
         assert_eq!(p.front, Front::Complex); // R1 complex front end is the default
         assert_eq!(p.phases, DEFAULT_PHASES); // R3 ensemble is the default
+        assert_eq!(p.min_conf, DEFAULT_MIN_CONF); // R4 gate on by default
+        assert!(!p.dump);
         assert!(!p.json);
         assert_eq!(p.baseline_frames, None);
+    }
+
+    #[test]
+    fn min_conf_flag_parses_and_bounds() {
+        assert_eq!(parse_args(&args(&["rec.iq", "--min-conf", "0"])).unwrap().min_conf, 0.0);
+        assert_eq!(parse_args(&args(&["rec.iq", "--min-conf", "0.5"])).unwrap().min_conf, 0.5);
+        assert!(parse_args(&args(&["rec.iq", "--min-conf", "1.5"])).is_err());
+        assert!(parse_args(&args(&["rec.iq", "--min-conf", "-0.1"])).is_err());
+        assert!(parse_args(&args(&["rec.iq", "--min-conf", "high"])).is_err());
+    }
+
+    #[test]
+    fn dump_flag_parses() {
+        assert!(!parse_args(&args(&["rec.iq"])).unwrap().dump);
+        assert!(parse_args(&args(&["rec.iq", "--dump"])).unwrap().dump);
+    }
+
+    #[test]
+    fn dump_line_formats_df18_control_field() {
+        use omnimodem_dsp::types::FrameMeta;
+        // The reference ghost: DF18, reserved CF=7, TC=18, ICAO B6A22C.
+        let bytes = vec![
+            0x97, 0xB6, 0xA2, 0x2C, 0x91, 0xD7, 0x47, 0x55, 0xA6, 0x75, 0xA6, 0x64, 0xD7, 0xEA,
+        ];
+        let f = Frame {
+            payload: FramePayload::Packet(bytes),
+            meta: FrameMeta { confidence: Some(0.258), sample_offset: 19349634, ..Default::default() },
+        };
+        let line = dump_line(&f).unwrap();
+        assert!(line.contains("df=18 cf=7 tc=18 icao=B6A22C"), "line: {line}");
+        assert!(line.contains("conf=0.258"), "line: {line}");
+        assert!(line.ends_with("97B6A22C91D74755A675A664D7EA"), "line: {line}");
+        // A short (non-DF18) frame carries no cf= field.
+        let short = Frame {
+            payload: FramePayload::Packet(vec![0x5D, 0xA6, 0xC8, 0x8E, 0x15, 0xC0, 0xA7]),
+            meta: FrameMeta::default(),
+        };
+        assert!(!dump_line(&short).unwrap().contains("cf="));
     }
 
     #[test]

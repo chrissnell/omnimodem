@@ -40,6 +40,24 @@ daemon-produced capture, which the tuner parks ~600 kHz above center to dodge th
 R820T DC spike (`RawMag` bypasses the NCO). Porting `complex` into the daemon
 needs an NCO shift to DC first.
 
+**Decoder-quality phases (measured on the reference recording).** The slicer lives
+in [`adsb/ppm.rs`](../../crates/dsp/src/modes/adsb/ppm.rs) and its tuned constants
+in [`adsb.rs`](../../crates/dsp/src/modes/adsb.rs). R2 replaced the strict preamble
+correlator with a noise-floor-relative detector (`PpmDemodulator::preamble_ok`). R3
+added the multi-phase slicer ensemble (`ParallelDemodulator`, `ADSB_SLICER_PHASES`)
+that runs the demod over sub-sample timing phases and unions the decodes. R4 added a
+soft-decision accept/reject gate: `soft_confidence` scores each candidate's mean
+per-bit eye (matched-filter pulse metric normalized by a decision-feedback AGC),
+and `ADSB_MIN_CONFIDENCE` rejects the CRC-lucky ghosts a wide ensemble would
+otherwise admit — which let the phase count rise from 4 to 12 (25 → 31 CRC-valid
+frames on the reference, same three aircraft as readsb). The gate reads only the
+eye, never the ICAO address, so a strong signal of any origin passes; the ghost it
+drops is address-independently identifiable (a lone DF18 hit with reserved control
+field CF 7 and the lowest eye, vs 8–13 coherent frames per real aircraft).
+`adsb_bench --min-conf 0` disables the gate to show which frames it drops, `--dump`
+lists every frame (df/tc/icao/conf/bytes) for per-frame audit, and `--phases N`
+sweeps the ensemble width. Gate confidence rides on every `FrameMeta.confidence`.
+
 ## WSJT-X weak-signal family (windowed / time-aligned)
 
 Block-demod modes that buffer a time slot and decode multi-pass. LDPC or K=32

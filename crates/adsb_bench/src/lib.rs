@@ -18,11 +18,15 @@ use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
 use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
 use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
-use omnimodem_dsp::types::{Cplx, FramePayload, Sample};
+use omnimodem_dsp::types::{Cplx, Frame, FramePayload, Sample};
 
 /// Default slicer-phase count — re-exported so the CLI default and the CI gate
 /// can name the shipping decoder's ensemble width (see [`decode_iq`]).
 pub use omnimodem_dsp::modes::adsb::ADSB_SLICER_PHASES as DEFAULT_PHASES;
+
+/// Default R4 soft-decision reject threshold — re-exported so the CLI default and
+/// the CI gate match the shipping decoder's gate (see [`decode_iq`]).
+pub use omnimodem_dsp::modes::adsb::ADSB_MIN_CONFIDENCE as DEFAULT_MIN_CONF;
 
 /// Default capture rate — the wideband rate the daemon commands the dongle to
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
@@ -85,6 +89,11 @@ impl FrontEnd {
 pub struct Report {
     /// CRC-valid frames emitted.
     pub frames_valid: u64,
+    /// Sum of accepted-frame soft confidences (for the mean); `conf_min` is the
+    /// weakest frame that cleared the R4 gate. Together they show the headroom the
+    /// accepted set keeps above the reject threshold. `None` min if no frames.
+    pub conf_sum: f64,
+    pub conf_min: Option<f32>,
     /// Airborne-position frames (DF17/18, TC 9-18/20-22) that passed CRC.
     pub airborne_pos: u64,
     /// Distinct 24-bit ICAO addresses seen in CRC-valid DF11/17/18 frames → count.
@@ -104,6 +113,11 @@ impl Report {
     pub fn unique_aircraft(&self) -> usize {
         self.aircraft.len()
     }
+
+    /// Mean soft confidence over the accepted frames, or `None` if none.
+    pub fn conf_mean(&self) -> Option<f64> {
+        (self.frames_valid > 0).then(|| self.conf_sum / self.frames_valid as f64)
+    }
 }
 
 /// Decode a raw uint8 interleaved I/Q buffer at `in_rate` and tally the yield.
@@ -115,10 +129,24 @@ impl Report {
 /// baseline). The resampler is stateful, so a single instance spans every
 /// window; `AdsbDemod` buffers frames straddling a window boundary. Windowing
 /// only bounds peak memory on long captures.
-pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front, phases: usize) -> Report {
+pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front, phases: usize, min_conf: f32) -> Report {
+    decode_iq_with(bytes, in_rate, front, phases, min_conf, |_| {})
+}
+
+/// Like [`decode_iq`], but invokes `on_frame` for every accepted frame before it
+/// is tallied — the hook behind the CLI's `--dump` per-frame audit trail. The
+/// decode path is otherwise identical, so the callback cannot change the counts.
+pub fn decode_iq_with(
+    bytes: &[u8],
+    in_rate: u32,
+    front: Front,
+    phases: usize,
+    min_conf: f32,
+    mut on_frame: impl FnMut(&Frame),
+) -> Report {
     let iq = u8_iq_to_cplx(bytes);
     let mut front_end = FrontEnd::new(front, in_rate);
-    let mut demod = AdsbDemod::with_phases(phases);
+    let mut demod = AdsbDemod::with_phases_min_conf(phases, min_conf);
     let mut report = Report { samples_in: iq.len(), ..Default::default() };
 
     let window = (in_rate as usize).max(1); // ~1 s of complex samples per window
@@ -126,16 +154,18 @@ pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front, phases: usize) -> Rep
         let envelope = front_end.envelope(chunk);
         report.samples_work += envelope.len() as u64;
         for frame in demod.feed(&envelope) {
-            tally(&mut report, &frame.payload, frame.meta.crc_ok);
+            on_frame(&frame);
+            tally(&mut report, &frame.payload, frame.meta.crc_ok, frame.meta.confidence);
         }
     }
     for frame in demod.flush() {
-        tally(&mut report, &frame.payload, frame.meta.crc_ok);
+        on_frame(&frame);
+        tally(&mut report, &frame.payload, frame.meta.crc_ok, frame.meta.confidence);
     }
     report
 }
 
-fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool) {
+fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool, confidence: Option<f32>) {
     // Both guards are defensive: `AdsbDemod` only ever emits CRC-valid `Packet`
     // frames today, but keep counting honest if that ever changes.
     let FramePayload::Packet(bytes) = payload else {
@@ -145,6 +175,10 @@ fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool) {
         return;
     }
     report.frames_valid += 1;
+    if let Some(c) = confidence {
+        report.conf_sum += c as f64;
+        report.conf_min = Some(report.conf_min.map_or(c, |m| m.min(c)));
+    }
     let msg = ModeS::new(bytes);
     let df = msg.df();
     *report.df_hist.entry(df).or_default() += 1;

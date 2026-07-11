@@ -14,8 +14,8 @@
 
 use super::crc;
 use super::{
-    long_frame_df, DATA_SLOTS_PER_BIT, LONG_FRAME_BITS, PREAMBLE_HIGH_SLOTS, PREAMBLE_QUIET_SLOTS,
-    PREAMBLE_SLOTS, SHORT_FRAME_BITS,
+    long_frame_df, ADSB_MIN_CONFIDENCE, DATA_SLOTS_PER_BIT, LONG_FRAME_BITS, PREAMBLE_HIGH_SLOTS,
+    PREAMBLE_QUIET_SLOTS, PREAMBLE_SLOTS, SHORT_FRAME_BITS,
 };
 use crate::frontend::detector::EnvelopeDetector;
 
@@ -66,6 +66,13 @@ pub struct RawFrame {
     pub crc_residual: u32,
     /// Sample offset of the preamble start within the scanned buffer.
     pub offset: usize,
+    /// Soft-decision confidence in `[0, 1]`: the mean per-bit eye (matched-filter
+    /// pulse metric normalized by a decision-feedback AGC) the R4 gate accepts on.
+    /// See [`PpmDemodulator::soft_confidence`]. In the ensemble this is the eye of
+    /// the earliest-offset surviving phase (the one [`DedupWindow`] keeps), not
+    /// necessarily the highest-scoring phase — every phase's copy already cleared
+    /// the gate, so it is a lower bound on the frame's best eye, not the max.
+    pub confidence: f32,
 }
 
 impl RawFrame {
@@ -141,6 +148,11 @@ pub struct PpmDemodulator {
     /// frames are returned regardless of residual (DF0/4/5/11/20/21 overlay
     /// their parity with an address).
     pub require_crc: bool,
+    /// Soft-decision accept/reject gate (R4): a CRC-valid candidate is dropped
+    /// unless its mean per-bit eye ([`Self::soft_confidence`]) clears this. `0.0`
+    /// disables the gate — every parity-clean frame is kept. See
+    /// [`ADSB_MIN_CONFIDENCE`](super::ADSB_MIN_CONFIDENCE).
+    pub min_confidence: f32,
 }
 
 impl PpmDemodulator {
@@ -149,7 +161,7 @@ impl PpmDemodulator {
             samples_per_us >= 2 && samples_per_us.is_multiple_of(2),
             "samples_per_us must be even and >= 2"
         );
-        Self { samples_per_us, require_crc: true }
+        Self { samples_per_us, require_crc: true, min_confidence: ADSB_MIN_CONFIDENCE }
     }
 
     fn slot_len(&self) -> usize {
@@ -217,6 +229,54 @@ impl PpmDemodulator {
         bytes
     }
 
+    /// Mean per-bit **eye**: the soft-decision confidence the R4 gate accepts or
+    /// rejects on. Each PPM bit is a 0.5 µs pulse in one of its two half-µs slots,
+    /// so `pulse - trough` (the matched filter for a ±pulse bit template) measures
+    /// how cleanly the bit resolves. A decision-feedback AGC tracks the running
+    /// pulse amplitude and normalizes each bit against it, so the score is
+    /// amplitude-independent and follows a fading carrier through the frame; the
+    /// per-bit eye is `(pulse - trough) / agc` clamped to `[0, 1]`, and the frame
+    /// confidence is their mean.
+    ///
+    /// A genuine transmission drives one slot to the pulse level and leaves the
+    /// other near noise, so the eye is wide; a CRC-lucky ghost that an
+    /// over-interpolated ensemble phase slices out of noise has near-equal slots
+    /// and a mushy eye. On the KSLC reference the two classes separate cleanly —
+    /// real frames ≥ 0.39, the lone ghost at 0.26 — which is what makes the gate
+    /// safe (see [`ADSB_MIN_CONFIDENCE`](super::ADSB_MIN_CONFIDENCE)).
+    ///
+    /// The empty slot carries the noise floor, not zero, so with the AGC tracking
+    /// the pulse level the eye is effectively `1 - noise/signal` — an SNR measure.
+    /// That is deliberate: it is exactly what separates a clean frame from a
+    /// noise-sliced ghost, and it is why the metric is *not* noise-subtracted
+    /// (cancelling the floor out of both slots would leave the numerator
+    /// unchanged; normalizing it out of the denominator would flatten every real
+    /// frame to ~1 and erase the discrimination). The trade-off is that a genuine
+    /// but very low-SNR frame scores low and can be gated — acceptable because the
+    /// threshold sits well under the weakest real frame observed (0.39), but the
+    /// reason the gate rejects weak frames when it does.
+    fn soft_confidence(&self, mag: &[f32], i: usize, nbits: usize) -> f32 {
+        let slot = self.slot_len();
+        let data_start = i + PREAMBLE_SLOTS * slot;
+        // DFB-AGC seeded from the first bit's pulse; slews at 0.1/bit so it rides
+        // a fading amplitude without chasing a single strong bit.
+        let mut agc = 0.0f32;
+        let mut sum = 0.0f32;
+        for j in 0..nbits {
+            let base = data_start + j * DATA_SLOTS_PER_BIT * slot;
+            let first = self.slot_mag(mag, base);
+            let second = self.slot_mag(mag, base + slot);
+            let pulse = first.max(second);
+            let trough = first.min(second);
+            if agc == 0.0 {
+                agc = pulse.max(f32::MIN_POSITIVE);
+            }
+            sum += ((pulse - trough) / agc).clamp(0.0, 1.0);
+            agc += (pulse - agc) * 0.1;
+        }
+        sum / nbits as f32
+    }
+
     /// Samples spanned by a full frame (preamble + `nbits` data).
     fn frame_samples(&self, nbits: usize) -> usize {
         (PREAMBLE_SLOTS + nbits * DATA_SLOTS_PER_BIT) * self.slot_len()
@@ -280,8 +340,14 @@ impl PpmDemodulator {
             // up) would otherwise slice to a spurious "valid" DF0 frame. A real
             // Mode S transmission is never all zeros; reject it.
             let degenerate = bytes.iter().all(|&b| b == 0);
-            if !degenerate && (!self.require_crc || residual == 0) {
-                frames.push(RawFrame { bytes, df, crc_residual: residual, offset: i });
+            let parity_ok = !degenerate && (!self.require_crc || residual == 0);
+            // R4 soft-decision gate: a parity-clean candidate is still rejected
+            // if its eye is too mushy to be a real transmission. This is what
+            // makes a wide slicer ensemble safe — the extra phases recover more
+            // weak frames, and the gate discards the CRC-lucky ghosts they admit.
+            let confidence = if parity_ok { self.soft_confidence(mag, i, nbits) } else { 0.0 };
+            if parity_ok && confidence >= self.min_confidence {
+                frames.push(RawFrame { bytes, df, crc_residual: residual, offset: i, confidence });
                 i += self.frame_samples(nbits);
             } else {
                 i += 1;
@@ -321,6 +387,13 @@ impl ParallelDemodulator {
     pub fn new(samples_per_us: usize, phases: usize) -> Self {
         assert!(phases >= 1, "phases must be >= 1");
         Self { demod: PpmDemodulator::new(samples_per_us), phases, shifted: Vec::new() }
+    }
+
+    /// Override the R4 soft-decision accept/reject threshold every phase applies
+    /// (`0.0` disables the gate). The offline `adsb_bench` uses this to sweep the
+    /// threshold and measure the accept/reject split.
+    pub fn set_min_confidence(&mut self, min_confidence: f32) {
+        self.demod.min_confidence = min_confidence;
     }
 
     /// Interpolate `mag` to a `frac`-sample fractional offset into `self.shifted`.
