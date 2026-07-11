@@ -14,9 +14,46 @@
 
 use super::crc;
 use super::{
-    long_frame_df, DATA_SLOTS_PER_BIT, LONG_FRAME_BITS, PREAMBLE_HIGH_SLOTS, PREAMBLE_LOW_SLOTS,
+    long_frame_df, DATA_SLOTS_PER_BIT, LONG_FRAME_BITS, PREAMBLE_HIGH_SLOTS, PREAMBLE_QUIET_SLOTS,
     PREAMBLE_SLOTS, SHORT_FRAME_BITS,
 };
+use crate::frontend::detector::EnvelopeDetector;
+
+// Noise-floor-relative preamble-detector parameters. Tuned on the KSLC 2.4 Msps
+// reference recording (complex front end): the strict correlator these replace
+// yielded 12 CRC-valid frames, this detector yields 16 (+33%). See GRA-325.
+//
+/// Envelope-follower attack/decay for the adaptive noise floor. Fast attack, slow
+/// decay so the envelope rides pulse energy; the floor slews toward it only while
+/// the squelch is closed, so it settles on the quiescent 1090 MHz noise between
+/// bursts and freezes through one.
+const DET_ATTACK: f32 = 0.4;
+const DET_DECAY: f32 = 0.05;
+/// Floor slew rate — deliberately slow so a weak burst that never trips the
+/// squelch cannot drag the noise estimate up over its ~112 µs, while still
+/// tracking receiver-gain drift across a recording.
+const DET_FLOOR_COEFF: f32 = 0.001;
+/// The detector's own squelch ratio: the floor freezes once the envelope clears
+/// this multiple of it. Governs the floor estimate, not preamble acceptance.
+const DET_SQUELCH_RATIO: f32 = 2.0;
+/// Noise-floor-relative preamble gate: the mean pulse level must clear the floor
+/// by this ratio. Real frames on the reference recording sit at ≥3× the floor, so
+/// this leaves headroom while rejecting noise — the check the strict correlator
+/// lacked.
+const DET_GATE_RATIO: f32 = 2.0;
+/// Guard-slot ceiling as a fraction of the mean pulse level. Above the strict
+/// dump1090 `2/3` because the resampled envelope leaks pulse energy into the guard
+/// slots; the check still rejects positions where a guard slot dominates the
+/// pulses. Kept below the point where it stops discriminating.
+const QUIET_CEIL_RATIO: f32 = 1.5;
+
+/// A fresh adaptive noise-floor follower configured with this module's tuned
+/// constants. The streaming demodulator keeps one running across the whole
+/// stream (never restarted per buffer) so the floor stays continuous; the
+/// one-shot [`PpmDemodulator::scan`] spins up its own over the given buffer.
+pub(super) fn new_floor_detector() -> EnvelopeDetector {
+    EnvelopeDetector::new(DET_ATTACK, DET_DECAY, DET_FLOOR_COEFF, DET_SQUELCH_RATIO)
+}
 
 /// A demodulated Mode S frame with its position in the fed stream.
 #[derive(Clone, Debug, PartialEq)]
@@ -129,26 +166,39 @@ impl PpmDemodulator {
         sum / len as f32
     }
 
-    /// Preamble match at offset `i`: every high slot exceeds every low slot.
+    /// Preamble match at offset `i`, dump1090-style and relative to the adaptive
+    /// noise floor `noise` (the quiescent-noise envelope entering slot `i`).
     ///
-    /// This strict correlation is tuned for a clean modulator/offline stream —
-    /// on a noisy off-air envelope a single elevated low slot rejects the
-    /// match. A field-grade detector would add a per-pulse threshold and
-    /// margin; that is deferred to the live rtl_tcp wiring.
-    fn preamble_ok(&self, mag: &[f32], i: usize) -> bool {
+    /// Three gates, replacing the old strict "weakest pulse beats strongest
+    /// quiet slot" correlation that a single noisy guard slot could veto:
+    ///   1. Each of the four pulses must individually clear the noise floor, so
+    ///      a lone spike can't fake the whole preamble through the mean.
+    ///   2. The mean pulse level must exceed the floor by [`DET_GATE_RATIO`] —
+    ///      the noise-floor-relative presence gate.
+    ///   3. The guard slots ([`PREAMBLE_QUIET_SLOTS`], the non-pulse-adjacent
+    ///      ones) must sit below [`QUIET_CEIL_RATIO`]× the mean pulse level —
+    ///      dump1090's tolerant ceiling, relaxed for the resampled envelope.
+    fn preamble_ok(&self, mag: &[f32], noise: f32, i: usize) -> bool {
         let slot = self.slot_len();
-        let mut high_min = f32::MAX;
+        let mut high_sum = 0.0f32;
         for &s in &PREAMBLE_HIGH_SLOTS {
-            high_min = high_min.min(self.slot_mag(mag, i + s * slot));
+            let p = self.slot_mag(mag, i + s * slot);
+            if p <= noise {
+                return false;
+            }
+            high_sum += p;
         }
-        if high_min <= 0.0 {
+        let high_mean = high_sum / PREAMBLE_HIGH_SLOTS.len() as f32;
+        if high_mean <= noise * DET_GATE_RATIO {
             return false;
         }
-        let mut low_max = 0.0f32;
-        for &s in &PREAMBLE_LOW_SLOTS {
-            low_max = low_max.max(self.slot_mag(mag, i + s * slot));
+        let ceil = high_mean * QUIET_CEIL_RATIO;
+        for &s in &PREAMBLE_QUIET_SLOTS {
+            if self.slot_mag(mag, i + s * slot) >= ceil {
+                return false;
+            }
         }
-        high_min > low_max
+        true
     }
 
     /// Slice `nbits` PPM data bits following the preamble at offset `i`.
@@ -172,19 +222,40 @@ impl PpmDemodulator {
         (PREAMBLE_SLOTS + nbits * DATA_SLOTS_PER_BIT) * self.slot_len()
     }
 
-    /// Scan `mag` for frames. Returns the accepted frames plus the number of
-    /// samples consumed; `mag[consumed..]` is the unscanned tail the caller
-    /// retains for the next call. When `flush` is false the scan stops one long
-    /// frame short of the end so a frame straddling the buffer boundary is
-    /// deferred rather than truncated.
+    /// Scan a self-contained buffer, building a fresh adaptive noise floor over
+    /// it. Convenience for one-shot decodes in tests; the streaming path uses
+    /// [`scan_with_floor`](Self::scan_with_floor) with a floor that persists
+    /// across calls so it never re-warms mid-stream.
+    #[cfg(test)]
     pub fn scan(&self, mag: &[f32], flush: bool) -> (Vec<RawFrame>, usize) {
+        let mut det = new_floor_detector();
+        let mut noise = Vec::with_capacity(mag.len());
+        for &m in mag {
+            noise.push(det.floor());
+            det.push(m);
+        }
+        self.scan_with_floor(mag, &noise, flush)
+    }
+
+    /// Scan `mag` for frames against a caller-supplied adaptive noise floor
+    /// `noise` (per-sample, the floor entering each sample). Returns the accepted
+    /// frames plus the number of samples consumed; `mag[consumed..]` is the
+    /// unscanned tail the caller retains for the next call. When `flush` is false
+    /// the scan stops one long frame short of the end so a frame straddling the
+    /// buffer boundary is deferred rather than truncated.
+    pub fn scan_with_floor(
+        &self,
+        mag: &[f32],
+        noise: &[f32],
+        flush: bool,
+    ) -> (Vec<RawFrame>, usize) {
         let long_span = self.frame_samples(LONG_FRAME_BITS);
         let short_span = self.frame_samples(SHORT_FRAME_BITS);
         let limit = if flush { short_span } else { long_span };
         let mut frames = Vec::new();
         let mut i = 0usize;
         while i + limit <= mag.len() {
-            if !self.preamble_ok(mag, i) {
+            if !self.preamble_ok(mag, noise[i], i) {
                 i += 1;
                 continue;
             }
@@ -204,7 +275,12 @@ impl PpmDemodulator {
             };
 
             let residual = crc::checksum(&bytes);
-            if !self.require_crc || residual == 0 {
+            // An all-zero message has a zero CRC residual by construction, so a
+            // flat stretch (e.g. a DC region before the noise floor has warmed
+            // up) would otherwise slice to a spurious "valid" DF0 frame. A real
+            // Mode S transmission is never all zeros; reject it.
+            let degenerate = bytes.iter().all(|&b| b == 0);
+            if !degenerate && (!self.require_crc || residual == 0) {
                 frames.push(RawFrame { bytes, df, crc_residual: residual, offset: i });
                 i += self.frame_samples(nbits);
             } else {
