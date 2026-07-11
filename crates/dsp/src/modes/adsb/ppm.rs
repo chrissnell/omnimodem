@@ -359,7 +359,8 @@ impl PpmDemodulator {
             // up) would otherwise slice to a spurious "valid" DF0 frame. A real
             // Mode S transmission is never all zeros; reject it.
             let degenerate = bytes.iter().all(|&b| b == 0);
-            let Some((residual, recovered_icao)) = self.classify(&mut bytes, residual, degenerate, roster)
+            let Some((residual, recovered_icao)) =
+                self.classify(&mut bytes, df, residual, degenerate, roster)
             else {
                 i += 1;
                 continue;
@@ -401,9 +402,17 @@ impl PpmDemodulator {
     /// [`Self::require_crc`] is false the parity check is skipped entirely and
     /// every non-degenerate candidate is eligible, so the recovery levers only
     /// widen acceptance in the parity-gated (production) path.
+    ///
+    /// `df` is the downlink format the caller read *before* any repair — it fixed
+    /// the frame length (`nbits`) already sliced. A single-bit repair may land in
+    /// the DF field; a flip that changes the short/long class would leave the
+    /// repaired frame inconsistent with the samples sliced for it, so such a repair
+    /// is rejected rather than trusted (it is far more likely a mis-slice than a
+    /// real frame). A flip within the same length class is fine.
     fn classify(
         &self,
         bytes: &mut [u8],
+        df: u8,
         residual: u32,
         degenerate: bool,
         roster: Option<&IcaoRoster>,
@@ -417,11 +426,21 @@ impl PpmDemodulator {
         if residual == 0 {
             return Some((0, None));
         }
-        if self.repair && crc::try_repair_single_bit(bytes) {
-            return Some((0, None));
+        if self.repair {
+            if let Some(p) = crc::locate_single_bit_error(residual, bytes.len() * 8) {
+                // The DF is byte 0 bits 0..4, so a flip there (p < 5) can change
+                // the format. Compute the repaired DF without mutating, and only
+                // apply the flip when it keeps the same short/long length class the
+                // slice was cut for — otherwise leave `bytes` pristine for the
+                // roster branch and reject.
+                let repaired_df = if p < 5 { (bytes[0] ^ (1 << (7 - p))) >> 3 } else { df };
+                if long_frame_df(repaired_df) == long_frame_df(df) {
+                    bytes[p / 8] ^= 1 << (7 - (p % 8));
+                    return Some((0, None));
+                }
+            }
         }
         if let Some(roster) = roster {
-            let df = bytes[0] >> 3;
             if roster::is_address_overlaid(df) && roster.contains(residual) {
                 return Some((residual, Some(residual)));
             }

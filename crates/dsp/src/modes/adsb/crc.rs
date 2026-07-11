@@ -94,23 +94,6 @@ fn single_bit_syndrome(p: usize, nbits: usize) -> u32 {
     checksum(&buf)
 }
 
-/// Attempt to correct a single-bit error in `frame` (7 or 14 bytes) in place.
-///
-/// Returns `true` and leaves `frame` checksumming to zero when exactly one bit
-/// flip repairs it; returns `false` and leaves `frame` untouched otherwise (a
-/// clean frame, or damage no single flip explains). See
-/// [`locate_single_bit_error`] for why only single-bit repair is attempted.
-pub fn try_repair_single_bit(frame: &mut [u8]) -> bool {
-    let nbits = frame.len() * 8;
-    match locate_single_bit_error(checksum(frame), nbits) {
-        Some(p) => {
-            frame[p / 8] ^= 1 << (7 - (p % 8));
-            true
-        }
-        None => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,15 +105,26 @@ mod tests {
         ]
     }
 
+    /// Locate then apply a single-bit repair — the flip the demod's `classify`
+    /// performs (subject to its DF-class guard). Returns whether one was found.
+    fn repair(frame: &mut [u8]) -> bool {
+        match locate_single_bit_error(checksum(frame), frame.len() * 8) {
+            Some(p) => {
+                frame[p / 8] ^= 1 << (7 - (p % 8));
+                true
+            }
+            None => false,
+        }
+    }
+
     #[test]
     fn repairs_every_single_bit_flip() {
         let clean = clean_frame();
-        let nbits = clean.len() * 8;
-        for p in 0..nbits {
+        for p in 0..clean.len() * 8 {
             let mut f = clean.clone();
             f[p / 8] ^= 1 << (7 - (p % 8));
             assert_ne!(checksum(&f), 0, "bit {p} flip should break parity");
-            assert!(try_repair_single_bit(&mut f), "bit {p} should be repairable");
+            assert!(repair(&mut f), "bit {p} should be repairable");
             assert_eq!(checksum(&f), 0, "bit {p} repaired frame must checksum clean");
             assert_eq!(f, clean, "bit {p} repair must restore the original frame");
         }
@@ -150,10 +144,9 @@ mod tests {
     #[test]
     fn declines_clean_and_double_bit_frames() {
         let clean = clean_frame();
-        // A clean frame has nothing to repair.
-        let mut f = clean.clone();
-        assert!(!try_repair_single_bit(&mut f));
-        assert_eq!(f, clean);
+        let nbits = clean.len() * 8;
+        // A clean frame has nothing to locate.
+        assert_eq!(locate_single_bit_error(checksum(&clean), nbits), None);
         // A two-bit error has no single-flip explanation, so repair declines
         // rather than guessing (the false-positive discipline R5 preserves).
         let mut two = clean.clone();
@@ -161,7 +154,7 @@ mod tests {
         two[9] ^= 0x40;
         assert_ne!(checksum(&two), 0);
         let before = two.clone();
-        assert!(!try_repair_single_bit(&mut two));
+        assert!(!repair(&mut two));
         assert_eq!(two, before, "declined repair must not mutate the frame");
     }
 
@@ -175,7 +168,7 @@ mod tests {
         append_parity(&mut f);
         let clean = f;
         f[4] ^= 0x08;
-        assert!(try_repair_single_bit(&mut f));
+        assert!(repair(&mut f));
         assert_eq!(f, clean);
     }
 }

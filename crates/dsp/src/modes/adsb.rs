@@ -29,7 +29,7 @@ pub use message::{
     AirborneVelocity, ModeS, CA_LEVEL2,
 };
 pub use ppm::RawFrame;
-pub use roster::{is_address_overlaid, IcaoRoster, DEFAULT_ROSTER_CAP};
+pub use roster::IcaoRoster;
 pub use tracker::{Aircraft, AircraftTracker, Ingest};
 
 use crate::frontend::detector::EnvelopeDetector;
