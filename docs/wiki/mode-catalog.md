@@ -108,3 +108,13 @@ Independent of the mode: any channel can set `rsid_tx`/`rsid_rx`
 prepends the active mode's RSID (Reed-Solomon Identifier) burst before each TX and/or
 runs the RSID detector over received audio, surfacing matches as `RsidDetected`
 events (fldigi-compatible tags). Detector/generator: `frontend/rsid.rs`.
+
+`rsid_tx` is sticky per channel, so it survives a mode switch. TX gating uses
+`ModeConfig::rsid_tx_key` (not `rsid_key`), which announces only for the fldigi
+sound-card modes. It returns `None` for **CW** (keyed by ear) and **JT65** (a WSJT-X
+slot mode with its own sync — a burst ahead of it is meaningless and would shift the
+timed slot); every other WSJT-X mode already has no `rsid_key`, so those were the only
+two that could leak a burst when the flag carried over from a prior digital mode
+(GRA-318). RX detection still uses the full `rsid_key` table, so CW and JT65 remain
+identifiable on receive. The emitting set is locked by
+`tx_rsid_never_announces_on_cw_or_wsjtx_modes` in `mode/mod.rs`.

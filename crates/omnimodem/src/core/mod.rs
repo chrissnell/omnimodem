@@ -906,8 +906,11 @@ fn try_spawn_workers(
             let driver = live.drivers.remove(&channel).unwrap();
             let slot_s = registry::tx_slot_s(&mode);
             // Resolve the mode's RSID burst once at spawn (key + audio offset).
+            // `rsid_tx_key` (not `rsid_key`) gates TX: CW never prepends a burst,
+            // even when the channel's sticky rsid_tx carried over from a prior
+            // digital mode (GRA-318).
             let rsid = (rsid_tx)
-                .then(|| mode.rsid_key().map(|k| (k, mode.rsid_center_hz())))
+                .then(|| mode.rsid_tx_key().map(|k| (k, mode.rsid_center_hz())))
                 .flatten();
             let (tx_delay_ms, tx_tail_ms) = supervisor.channel_ptt_timing(channel);
             let w = tx_worker::spawn(TxWorkerCfg {
