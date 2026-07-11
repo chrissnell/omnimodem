@@ -32,10 +32,13 @@ demod and reports CRC-valid frames, unique aircraft, and DF/type-code histograms
 `--front` flag picks the front end: `complex` (default) band-limits and decimates
 the I/Q 2.4M→2.0M before taking the magnitude; `mag` takes the magnitude at the
 capture rate then decimates the envelope (the path the daemon ships today). The
-`complex` front end preserves the sharp Mode S pulse edges that magnitude
-decimation aliases, and is the R1 improvement. `ComplexResampler` assumes a
-DC-centered channel, which the ADS-B capture is (tuned to 1090 MHz, no NCO
-offset).
+`complex` front end avoids aliasing the sharp Mode S pulse edges that magnitude
+decimation folds back, and is the R1 improvement. `ComplexResampler`'s anti-alias
+lowpass is centered at DC, so `complex` assumes the signal sits near DC — true of
+the `rtl_sdr` reference recording (tuned to 1090 MHz) but **not** of a
+daemon-produced capture, which the tuner parks ~600 kHz above center to dodge the
+R820T DC spike (`RawMag` bypasses the NCO). Porting `complex` into the daemon
+needs an NCO shift to DC first.
 
 ## WSJT-X weak-signal family (windowed / time-aligned)
 

@@ -12,7 +12,8 @@
 //!   [`ComplexResampler`] resamples the I/Q 2.4M→2.0M, then `|I+jQ|` magnitude.
 //!   This is apples-to-apples with how readsb consumes its native rate: the
 //!   anti-alias lowpass sees the true channel, not the doubled-bandwidth
-//!   envelope, so pulse edges survive decimation intact.
+//!   envelope, so the pulse edges are not aliased the way the envelope path
+//!   aliases them.
 //! - `mag` (R0 baseline): the original path — `|I+jQ|` magnitude at the capture
 //!   rate, then a real [`Resampler`] decimates the envelope 2.4M→2.0M. Envelope
 //!   detection doubles the bandwidth, so decimating it aliases sharp pulse edges.
@@ -24,6 +25,15 @@
 //! production — it is not yet wired into the daemon's `RawMag` transport, whose
 //! i16 audio path carries an envelope rather than I/Q. Read a default (`complex`)
 //! run as the R1 target, not as the shipping decoder's yield.
+//!
+//! Center-frequency caveat: [`ComplexResampler`]'s anti-alias lowpass is centered
+//! at DC, so `complex` assumes the 1090 MHz signal sits near DC. That holds for
+//! the `rtl_sdr`-captured reference recording (tuned directly to 1090 MHz). It is
+//! *not* automatically true of a daemon-produced capture: the daemon's tuner
+//! plan parks the signal a quarter-band (~600 kHz) above hardware center to dodge
+//! the R820T DC spike, and `RawMag` bypasses the NCO, so a daemon I/Q recording
+//! is offset from DC. Wiring `complex` into the daemon therefore needs an NCO
+//! shift to DC (or an on-1090 tune) first — part of that follow-up, not R1.
 //!
 //! (The live daemon additionally scales the envelope by 1/√2 and quantizes it to
 //! i16 for its audio-delivery path; the PPM demod is scale-independent, so the
