@@ -68,9 +68,10 @@ front end resamples *up* to 4 MHz, preserving the full captured bandwidth so the
 slicer sees the un-smeared pulse. `AdsbDemod::with_rate_phases_min_conf` builds the
 demod at the chosen rate; 2.4 MHz cannot be used directly (a half-µs slot must be a
 whole number of samples). *Lever 2a — single-bit CRC repair* (`--repair`):
-`crc::try_repair_single_bit` corrects a *unique* single-bit error via the GF(2)
-syndrome (dump1090's default `--fix`); two-bit search is deliberately omitted (it
-fabricates frames). *Lever 2b — ICAO-roster recovery* (`--roster`): the
+`crc::locate_single_bit_error` finds a *unique* single-bit error via the GF(2)
+syndrome (dump1090's default `--fix`), which `ppm::PpmDemodulator::classify`
+corrects when the flip preserves the frame's short/long length class; two-bit
+search is deliberately omitted (it fabricates frames). *Lever 2b — ICAO-roster recovery* (`--roster`): the
 address-overlaid DFs (DF0/4/5/16/20/21) fold their ICAO into the parity, so a
 correct frame checksums to the address — nothing to validate. `IcaoRoster` holds the
 addresses seen in clean DF11/17/18 decodes, and an overlaid frame is accepted only

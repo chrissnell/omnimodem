@@ -43,8 +43,8 @@ const SAMPLES_PER_US: usize = (ADSB_RATE / 1_000_000) as usize;
 
 /// R5 native-rate working option: 4 Msps. The 2.4 Msps capture cannot be decoded
 /// at a working rate of exactly 2.4 MHz — the slicer needs an even integer number
-/// of samples per microsecond (a half-µs PPM slot is [`slot_len`] whole samples),
-/// and 2.4 is not integer. Downsampling to the 2.0 MHz [`ADSB_RATE`] instead
+/// of samples per microsecond (a half-µs PPM slot must be a whole number of
+/// samples), and 2.4 is not integer. Downsampling to the 2.0 MHz [`ADSB_RATE`] instead
 /// band-limits away the sharp 0.5 µs pulse edges (its anti-alias cutoff sits at
 /// the 1.0 MHz Nyquist, below the pulse's spectral content), which costs weak- and
 /// short-frame sensitivity — the measured DF11 gap to dump1090, which demodulates

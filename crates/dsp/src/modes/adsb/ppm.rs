@@ -168,7 +168,7 @@ pub struct PpmDemodulator {
     /// [`ADSB_MIN_CONFIDENCE`](super::ADSB_MIN_CONFIDENCE).
     pub min_confidence: f32,
     /// R5 single-bit CRC repair: when set, a parity-failing candidate is retried
-    /// after correcting a unique single-bit error (see [`crc::try_repair_single_bit`]).
+    /// after correcting a unique single-bit error (see [`crc::locate_single_bit_error`]).
     /// Off by default — the confidence gate still applies to the repaired frame.
     pub repair: bool,
 }
