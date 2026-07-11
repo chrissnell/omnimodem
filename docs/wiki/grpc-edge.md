@@ -50,7 +50,7 @@ The queue is bounded (`COMMAND_QUEUE_DEPTH`); a full queue backpressures the han
 | Class | Type | Ring | Overflow policy |
 |---|---|---|---|
 | **Lossless** | `FrameEvent` (decoded `RxFrame`) | `FRAME_RING = 1024` | A subscriber that lags is **disconnected** (resource-exhausted), never silently dropped. |
-| **Lossy** | `TelemetryEvent` (levels, status, metrics, PTT, spectrum, clock, device, RSID) | `TELEMETRY_RING = 256` | A subscriber that lags **skips** intermediate values and continues. |
+| **Lossy** | `TelemetryEvent` (levels, status, metrics, PTT, spectrum, clock, device, RSID, SDR state, ADS-B `AircraftReport`) | `TELEMETRY_RING = 256` | A subscriber that lags **skips** intermediate values and continues. |
 
 A decoded frame is expensive and irreplaceable, so losing one is a correctness bug;
 a stale audio-level reading is harmless. Clients must treat `RxFrame` as a reliable

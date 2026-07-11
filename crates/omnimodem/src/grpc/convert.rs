@@ -297,6 +297,29 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             demod_mode: demod_mode as i32,
             squelch_db,
         }),
+        TelemetryEvent::AircraftReport {
+            channel,
+            icao,
+            callsign,
+            latitude,
+            longitude,
+            altitude_ft,
+            ground_speed_kt,
+            track_deg,
+            vertical_rate_fpm,
+            last_seen_ms,
+        } => Kind::AircraftReport(proto::AircraftReport {
+            channel: channel.0,
+            icao,
+            flight: callsign.unwrap_or_default(),
+            latitude,
+            longitude,
+            altitude_ft,
+            ground_speed_kt,
+            track_deg,
+            vert_rate_fpm: vertical_rate_fpm,
+            last_seen_ms,
+        }),
     };
     proto::Event { kind: Some(kind) }
 }
@@ -471,6 +494,60 @@ mod tests {
         };
         let ci = &snapshot_to_proto(&snap).channels[0];
         assert_eq!(ci.ptt_device_id, "virtual:BlackHole 2ch");
+    }
+
+    #[test]
+    fn aircraft_report_maps_onto_the_wire_event() {
+        use crate::ids::ChannelId;
+        let ev = TelemetryEvent::AircraftReport {
+            channel: ChannelId(4),
+            icao: 0x40621D,
+            callsign: Some("KLM1023".into()),
+            latitude: Some(52.2572),
+            longitude: Some(3.91937),
+            altitude_ft: Some(38000),
+            ground_speed_kt: Some(159.2),
+            track_deg: Some(182.88),
+            vertical_rate_fpm: Some(-832),
+            last_seen_ms: 1_500,
+        };
+        let proto::event::Kind::AircraftReport(r) =
+            telemetry_event_to_proto(ev).kind.expect("kind")
+        else {
+            panic!("expected AircraftReport");
+        };
+        assert_eq!(r.channel, 4);
+        assert_eq!(r.icao, 0x40621D);
+        assert_eq!(r.flight, "KLM1023");
+        assert_eq!(r.altitude_ft, Some(38000));
+        assert_eq!(r.vert_rate_fpm, Some(-832));
+        assert_eq!(r.last_seen_ms, 1_500);
+    }
+
+    #[test]
+    fn aircraft_report_omits_absent_fields() {
+        use crate::ids::ChannelId;
+        // Freshly heard aircraft: no position/velocity yet, empty callsign.
+        let ev = TelemetryEvent::AircraftReport {
+            channel: ChannelId(0),
+            icao: 0xABCDEF,
+            callsign: None,
+            latitude: None,
+            longitude: None,
+            altitude_ft: None,
+            ground_speed_kt: None,
+            track_deg: None,
+            vertical_rate_fpm: None,
+            last_seen_ms: 0,
+        };
+        let proto::event::Kind::AircraftReport(r) =
+            telemetry_event_to_proto(ev).kind.expect("kind")
+        else {
+            panic!("expected AircraftReport");
+        };
+        assert_eq!(r.flight, "");
+        assert!(r.latitude.is_none());
+        assert!(r.ground_speed_kt.is_none());
     }
 
     #[test]

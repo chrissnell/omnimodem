@@ -23,7 +23,7 @@ capture (no channelization), not a soundcard. See
 
 | Mode | File | What it is | RX/TX | Output |
 |---|---|---|---|---|
-| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude. DSP + KATs landed; daemon wiring / typed `AircraftReport` / TUI flights table are Phases 2-4. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
+| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude + TC 19 velocity. DSP + KATs and the ICAO-keyed `tracker` (CPR pairing, callsign, altitude, velocity, age-out) landed; the typed `AircraftReport` event is emitted by `core::adsb::AdsbReporter`. Daemon capture wiring (Phase 2) and the TUI flights table (Phase 4) are still open. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
 
 **Decoder benchmark (the ruler).** [`../../crates/adsb_bench/`](../../crates/adsb_bench/)
 replays a raw uint8 I/Q recording (2.4 Msps, as `rtl_tcp` streams it) through the

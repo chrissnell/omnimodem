@@ -12,18 +12,22 @@
 //! to render offline test vectors, never to key a radio.
 //!
 //! Building blocks live in submodules: [`crc`] (Mode S parity), [`ppm`] (the
-//! magnitude PPM mod/demod), and [`message`] (field/CPR/altitude decode + DF17
-//! frame construction).
+//! magnitude PPM mod/demod), [`message`] (field/CPR/altitude/velocity decode +
+//! DF17 frame construction), and [`tracker`] (ICAO-keyed per-aircraft state).
 
 mod crc;
 mod message;
 mod ppm;
+mod tracker;
 
 #[cfg(test)]
 mod tests;
 
-pub use message::{cpr_decode_airborne, encode_identification, AirbornePosition, ModeS};
+pub use message::{
+    cpr_decode_airborne, encode_identification, AirbornePosition, AirborneVelocity, ModeS,
+};
 pub use ppm::RawFrame;
+pub use tracker::{Aircraft, AircraftTracker, Ingest};
 
 use crate::mode::{DemodShape, Demodulator, Duplex, ModError, ModeCaps, Modulator};
 use crate::types::{Frame, FrameMeta, FramePayload, Sample};

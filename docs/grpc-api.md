@@ -209,6 +209,7 @@ both — treat the snapshot as authoritative and tolerate a duplicate follow-up.
 | `spectrum_frame` | lossy | One waterfall line (see below). |
 | `rsid_detected` | lossy | An RSID burst was identified (tag, mode, freq, extended). |
 | `sdr_state` | lossy | An SDR channel's tune/gain/demod-mode/squelch changed (see SDR control). |
+| `aircraft_report` | lossy | Per-aircraft ADS-B state from an ADS-B channel (icao, flight, lat/lon, altitude, speed/track/vertical-rate, `last_seen_ms`). Position/velocity/altitude fields are `optional`, absent until their squitter is heard. |
 
 ### Transmit
 

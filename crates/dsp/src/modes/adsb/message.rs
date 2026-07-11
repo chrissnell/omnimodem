@@ -100,6 +100,77 @@ impl<'a> ModeS<'a> {
             altitude: decode_ac12(get_bits(self.bytes, 40, 12) as u16),
         })
     }
+
+    /// Decode an airborne-velocity ME field (TC 19). Subtypes 1/2 carry ground
+    /// speed as an east/west + north/south velocity pair; subtypes 3/4 carry
+    /// airspeed + magnetic heading. Both fold into ground speed, track (degrees
+    /// clockwise from north), and barometric vertical rate (feet/min).
+    pub fn airborne_velocity(&self) -> Option<AirborneVelocity> {
+        if self.type_code()? != 19 {
+            return None;
+        }
+        let subtype = get_bits(self.bytes, 37, 3) as u8;
+
+        let (speed, track) = match subtype {
+            1 | 2 => {
+                // Raw 10-bit velocities are 1-offset; 0 == "no data". Subtype 2
+                // (supersonic) counts in 4 kt units.
+                let unit = if subtype == 2 { 4.0 } else { 1.0 };
+                let ew_raw = get_bits(self.bytes, 46, 10);
+                let ns_raw = get_bits(self.bytes, 57, 10);
+                if ew_raw == 0 || ns_raw == 0 {
+                    (None, None)
+                } else {
+                    // East positive, north positive.
+                    let ew_dir = if get_bits(self.bytes, 45, 1) == 1 { -1.0 } else { 1.0 };
+                    let ns_dir = if get_bits(self.bytes, 56, 1) == 1 { -1.0 } else { 1.0 };
+                    let vx = ew_dir * (ew_raw as f64 - 1.0) * unit;
+                    let vy = ns_dir * (ns_raw as f64 - 1.0) * unit;
+                    let mut trk = vx.atan2(vy).to_degrees();
+                    if trk < 0.0 {
+                        trk += 360.0;
+                    }
+                    (Some(vx.hypot(vy)), Some(trk))
+                }
+            }
+            3 | 4 => {
+                let unit = if subtype == 4 { 4.0 } else { 1.0 };
+                // ME bit 45 = heading-available; 46-55 = heading; 56 = airspeed
+                // type; 57-66 = airspeed (1-offset, 0 == no data).
+                let heading = (get_bits(self.bytes, 45, 1) == 1)
+                    .then(|| get_bits(self.bytes, 46, 10) as f64 * 360.0 / 1024.0);
+                let as_raw = get_bits(self.bytes, 57, 10);
+                let speed = (as_raw != 0).then_some((as_raw as f64 - 1.0) * unit);
+                (speed, heading)
+            }
+            _ => (None, None),
+        };
+
+        // Vertical rate: 9-bit magnitude, 1-offset, 64 ft/min per count; bit 68
+        // is the sign (0 = climb, 1 = descent).
+        let vr_raw = get_bits(self.bytes, 69, 9);
+        let vertical_rate = (vr_raw != 0).then(|| {
+            let mag = (vr_raw as i32 - 1) * 64;
+            if get_bits(self.bytes, 68, 1) == 1 {
+                -mag
+            } else {
+                mag
+            }
+        });
+
+        Some(AirborneVelocity { ground_speed: speed, track, vertical_rate })
+    }
+}
+
+/// A decoded airborne-velocity report (TC 19).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirborneVelocity {
+    /// Ground speed in knots (airspeed for subtypes 3/4), if present.
+    pub ground_speed: Option<f64>,
+    /// Track angle in degrees clockwise from true north (0..360), if present.
+    pub track: Option<f64>,
+    /// Barometric vertical rate in feet/minute (+ climb, - descent), if present.
+    pub vertical_rate: Option<i32>,
 }
 
 /// One half of an airborne CPR position report.
