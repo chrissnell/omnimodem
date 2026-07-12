@@ -21,8 +21,8 @@ pub(crate) use gain::AudioGain;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use crate::audio::rtlsdr::{
-    plan_tune, snap_gain, supported_sample_rates, DemodMode, SdrControl,
-    DIRECT_SAMPLING_MAX_HZ, DIRECT_SAMPLING_Q_BRANCH,
+    plan_tune, snap_gain, supported_sample_rates, DemodMode, SdrControl, ADSB_CAPTURE_RATE,
+    ADSB_FREQ_HZ, DIRECT_SAMPLING_MAX_HZ, DIRECT_SAMPLING_Q_BRANCH,
 };
 use crate::core::clock::ClockSource;
 use crate::core::rx_worker::RxWorker;
@@ -673,6 +673,36 @@ fn get_sdr_caps(live: &LiveBindings, channel: ChannelId) -> Result<SdrCapsOk, Co
     })
 }
 
+/// Couple an SDR control cell to a channel's mode before the capture opens, so
+/// the capture thread sends the correct demod mode and tune to `rtl_tcp` on
+/// connect. Runs on every (re)bind.
+///
+/// ADS-B is the special case: it needs the wideband magnitude path (`RawMag`,
+/// full-rate `|I+jQ|` at 2.4 Msps instead of channelized audio) **and** a tune to
+/// its fixed 1090 MHz. Unlike the audio modes, the operator never tunes ADS-B, so
+/// nothing else sets the frequency — without this the control keeps its 0 Hz
+/// default and the daemon commands `rtl_tcp` to `set freq 0` (PLL unlocked, no
+/// signal, zero aircraft). The tune is planned from a cold center so 1090 MHz
+/// lands a quarter-band off hardware center, clear of the R820T DC spike; the
+/// magnitude envelope is offset-invariant, so that placement does not hurt the
+/// decode. Every other mode uses the channelizing demod and leaves tuning to the
+/// operator — but a channel that was previously ADS-B must not stay stuck in
+/// `RawMag`.
+fn couple_sdr_mode_to_channel(control: &SdrControl, mode: &crate::mode::ModeConfig) {
+    match mode {
+        crate::mode::ModeConfig::Adsb => {
+            control.set_demod_mode(DemodMode::RawMag);
+            let (center, offset) = plan_tune(0.0, ADSB_CAPTURE_RATE, ADSB_FREQ_HZ);
+            control.set_center_hz(center);
+            control.set_offset_hz(offset);
+        }
+        _ if control.demod_mode() == DemodMode::RawMag => {
+            control.set_demod_mode(DemodMode::Nbfm);
+        }
+        _ => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn configure_audio(
     supervisor: &mut Supervisor,
@@ -727,21 +757,9 @@ fn configure_audio(
     // switch); a departing device clears it in poll_hotplug.
     if matches!(device_id, DeviceId::RtlTcp { .. }) {
         let control = live.sdr_controls.entry(id).or_default().clone();
-        // Couple the channel mode to the SDR front-end before opening the capture.
-        // ADS-B needs the wideband magnitude path (`RawMag`), which delivers full-rate
-        // |I+jQ| at 2.4 Msps instead of channelized audio; every other mode uses the
-        // channelizing demod. This runs on every (re)bind, and `configure_audio`
-        // always re-opens the capture — so a mode switch across the `RawMag` boundary
-        // (which changes the delivered sample rate) re-negotiates it correctly.
-        match supervisor.channel_mode(id) {
-            crate::mode::ModeConfig::Adsb => control.set_demod_mode(DemodMode::RawMag),
-            // Don't clobber the operator-selected audio demod mode, but make sure a
-            // channel that was previously ADS-B doesn't stay stuck in RawMag.
-            _ if control.demod_mode() == DemodMode::RawMag => {
-                control.set_demod_mode(DemodMode::Nbfm)
-            }
-            _ => {}
-        }
+        // Couple the channel mode to the SDR front-end before opening the capture,
+        // so the capture thread sends the right demod mode + tune on connect.
+        couple_sdr_mode_to_channel(&control, &supervisor.channel_mode(id));
         rx_backend.attach_sdr_context(id, telemetry.clone(), control);
     } else {
         // Rebinding to a non-SDR device: drop any stale control cell so a later
@@ -1711,6 +1729,41 @@ mod tests {
         assert_eq!(ctrl.direct_sampling(), 0);
         let restored = get_sdr_caps(&live, ChannelId(0)).unwrap();
         assert_eq!(restored.freq_min_hz, base.freq_min_hz);
+    }
+
+    #[test]
+    fn couple_sdr_mode_to_channel_tunes_adsb_to_1090_clear_of_dc_spike() {
+        use crate::audio::rtlsdr::{DemodMode, ADSB_FREQ_HZ};
+        use crate::mode::ModeConfig;
+        // Regression: an ADS-B bind used to only select RawMag and leave the
+        // frequency at its 0 Hz default, so the daemon told rtl_tcp `set freq 0`
+        // and decoded nothing. A fresh control is untuned...
+        let ctrl = SdrControl::default();
+        assert_eq!(ctrl.center_hz(), 0.0);
+
+        couple_sdr_mode_to_channel(&ctrl, &ModeConfig::Adsb);
+
+        // ...after coupling it runs the wideband magnitude path AND is tuned to
+        // exactly 1090 MHz (center + NCO offset).
+        assert_eq!(ctrl.demod_mode(), DemodMode::RawMag);
+        assert_eq!(ctrl.center_hz() + ctrl.offset_hz() as f64, ADSB_FREQ_HZ);
+        // The hardware is actually tuned (not `set freq 0`), and 1090 sits off
+        // center so it clears the R820T DC spike.
+        assert_ne!(ctrl.center_hz(), 0.0);
+        assert!((ctrl.center_hz() - ADSB_FREQ_HZ).abs() > 100_000.0);
+    }
+
+    #[test]
+    fn couple_sdr_mode_to_channel_resets_raw_mag_when_leaving_adsb() {
+        use crate::audio::rtlsdr::DemodMode;
+        use crate::mode::ModeConfig;
+        let ctrl = SdrControl::default();
+        couple_sdr_mode_to_channel(&ctrl, &ModeConfig::Adsb);
+        assert_eq!(ctrl.demod_mode(), DemodMode::RawMag);
+        // Rebinding the same channel to a non-ADS-B mode must not leave it stuck
+        // in the wideband path.
+        couple_sdr_mode_to_channel(&ctrl, &ModeConfig::None);
+        assert_eq!(ctrl.demod_mode(), DemodMode::Nbfm);
     }
 
     #[test]
