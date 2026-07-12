@@ -32,9 +32,10 @@ impl AdsbReporter {
         Self { channel, tracker: AircraftTracker::new(), ttl_ms }
     }
 
-    /// Ingest one decoded Mode S packet (raw message bytes, CRC already checked
-    /// by the demod) at time `now_ms`. Returns an `AircraftReport` telemetry
-    /// event when the aircraft's reportable state changed, else `None`.
+    /// Ingest one decoded Mode S packet (raw message bytes the demod already
+    /// validated — CRC-clean, single-bit-repaired, or roster-confirmed) at time
+    /// `now_ms`. Returns an `AircraftReport` telemetry event when the aircraft's
+    /// reportable state changed, else `None`.
     pub fn on_packet(&mut self, bytes: &[u8], now_ms: u64) -> Option<TelemetryEvent> {
         match self.tracker.ingest(bytes, now_ms) {
             Ingest::Updated(icao) => {

@@ -192,10 +192,6 @@ struct Scored {
     bytes: Vec<u8>,
     /// Higher = more confident; used to keep the best of the sliced phases.
     score: i32,
-    /// `true` when the accepted bytes checksum to zero (clean or repaired).
-    /// Address-overlaid frames validated by the roster are accepted but not
-    /// CRC-zero.
-    crc_ok: bool,
     /// Address to add to the roster because this frame proves it in the clear —
     /// a clean DF17 or a clean DF11 acquisition squitter (IID 0). `None` otherwise.
     seed_icao: Option<u32>,
@@ -230,10 +226,10 @@ fn score_candidate(mut bytes: Vec<u8>, roster: &IcaoRoster) -> Option<Scored> {
                 let icao = clear_icao(&bytes);
                 let score = if roster.contains(icao) { 1800 } else { 1400 };
                 let seed_icao = (df == 17).then_some(icao);
-                Some(Scored { bytes, score, crc_ok: true, seed_icao })
+                Some(Scored { bytes, score, seed_icao })
             } else if repair_single_bit(&mut bytes) {
                 let score = if roster.contains(clear_icao(&bytes)) { 900 } else { 700 };
-                Some(Scored { bytes, score, crc_ok: true, seed_icao: None })
+                Some(Scored { bytes, score, seed_icao: None })
             } else {
                 None
             }
@@ -245,21 +241,21 @@ fn score_candidate(mut bytes: Vec<u8>, roster: &IcaoRoster) -> Option<Scored> {
                 let iid = residual & 0x7f;
                 if iid == 0 {
                     let score = if roster.contains(icao) { 1600 } else { 750 };
-                    Some(Scored { bytes, score, crc_ok: true, seed_icao: Some(icao) })
+                    Some(Scored { bytes, score, seed_icao: Some(icao) })
                 } else if roster.contains(icao) {
-                    Some(Scored { bytes, score: 1000, crc_ok: true, seed_icao: None })
+                    Some(Scored { bytes, score: 1000, seed_icao: None })
                 } else {
                     None
                 }
             } else if repair_single_bit(&mut bytes) && roster.contains(clear_icao(&bytes)) {
-                Some(Scored { bytes, score: 900, crc_ok: true, seed_icao: None })
+                Some(Scored { bytes, score: 900, seed_icao: None })
             } else {
                 None
             }
         }
         _ if is_address_overlaid(df) => {
             if roster.contains(residual) {
-                Some(Scored { bytes, score: 1000, crc_ok: false, seed_icao: None })
+                Some(Scored { bytes, score: 1000, seed_icao: None })
             } else {
                 None
             }
@@ -345,7 +341,12 @@ fn scan_buf(m: &[f32], roster: &mut IcaoRoster, base: u64, stop: usize) -> (Vec<
             frames.push(Frame {
                 payload: FramePayload::Packet(s.bytes),
                 meta: FrameMeta {
-                    crc_ok: s.crc_ok,
+                    // Every emitted frame is one the score accepted as valid — a
+                    // clean/repaired CRC, or an address-overlaid frame the roster
+                    // confirmed. Downstream (FER metrics, the bench yield tally)
+                    // treats `crc_ok` as "this is a good frame", so all accepted
+                    // frames are marked valid, matching the R1–R5 core.
+                    crc_ok: true,
                     sample_offset: base + i as u64,
                     decoder: Some("adsb-native".to_string()),
                     ..Default::default()
@@ -638,5 +639,36 @@ mod tests {
         let out = decode(&synth_stream(&[&df17, &df20]));
         assert!(out.contains(&df17), "the seeding DF17 should decode");
         assert!(out.contains(&df20), "the DF20 should be recovered once its address is known");
+    }
+
+    #[test]
+    fn sample_offset_stays_stream_global_after_flush() {
+        // `flush` must advance the stream position by exactly the samples it
+        // retires, so a demod reused after a flush reports correct absolute
+        // offsets. Decode the same waveform twice through one demod (each round
+        // ended by a flush): the second frame must sit exactly one buffer length
+        // past the first. A `base` that double-counts the flushed prefix breaks it.
+        let frame = encode_identification(0x4840D6, "KLM1023").to_vec();
+        let mag = synth_2400(&frame, 0);
+        let offset = |frames: &[Frame]| {
+            frames
+                .iter()
+                .find_map(|f| match &f.payload {
+                    FramePayload::Packet(b) if *b == frame => Some(f.meta.sample_offset),
+                    _ => None,
+                })
+                .expect("frame decoded")
+        };
+
+        let mut d = Demod2400::new();
+        d.feed(&mag);
+        let off1 = offset(&d.flush());
+        d.feed(&mag);
+        let off2 = offset(&d.flush());
+        assert_eq!(
+            off2 - off1,
+            mag.len() as u64,
+            "second round's offset must be exactly one buffer length past the first"
+        );
     }
 }

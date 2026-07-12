@@ -265,8 +265,8 @@ fn decode_native(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(&Fram
 }
 
 fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool, confidence: Option<f32>) {
-    // Both guards are defensive: `AdsbDemod` only ever emits CRC-valid `Packet`
-    // frames today, but keep counting honest if that ever changes.
+    // Both guards are defensive: the ADS-B demods emit only accepted `Packet`
+    // frames (all flagged valid) today, but keep counting honest if that changes.
     let FramePayload::Packet(bytes) = payload else {
         return;
     };
