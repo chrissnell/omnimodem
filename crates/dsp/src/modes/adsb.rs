@@ -16,6 +16,7 @@
 //! DF17 frame construction), and [`tracker`] (ICAO-keyed per-aircraft state).
 
 mod crc;
+mod demod2400;
 mod message;
 mod ppm;
 mod roster;
@@ -24,6 +25,7 @@ mod tracker;
 #[cfg(test)]
 mod tests;
 
+pub use demod2400::Demod2400;
 pub use message::{
     cpr_decode_airborne, encode_all_call_reply, encode_identification, AirbornePosition,
     AirborneVelocity, ModeS, CA_LEVEL2,
@@ -38,6 +40,11 @@ use crate::types::{Frame, FrameMeta, FramePayload, Sample};
 
 /// ADS-B working rate: 2 Msps (dump1090's 2 MHz convention).
 pub const ADSB_RATE: u32 = 2_000_000;
+/// ADS-B capture rate: 2.4 Msps, the wideband rate the daemon commands the
+/// dongle to and the rate readsb/dump1090-fa demodulate at natively. The R6
+/// native core ([`Demod2400`]) slices the magnitude envelope at this rate with
+/// no resample; the R1–R5 core downsamples it to [`ADSB_RATE`] first.
+pub const ADSB_CAPTURE_RATE: u32 = 2_400_000;
 /// Samples per microsecond at [`ADSB_RATE`].
 const SAMPLES_PER_US: usize = (ADSB_RATE / 1_000_000) as usize;
 
