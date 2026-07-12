@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 /// Shared per-channel metrics accumulator: the RX worker writes it on each
@@ -59,6 +59,10 @@ impl RxWorker {
         gain: crate::core::AudioGain,
         spectrum: SpectrumControl,
         rsid_rx: bool,
+        // ADS-B channels pass a reporter that folds each decoded Mode S packet into
+        // per-aircraft state and emits `AircraftReport` telemetry (the flights the
+        // TUI shows). `None` for every other mode.
+        mut reporter: Option<crate::core::adsb::AdsbReporter>,
     ) -> Self {
         let in_rate = capture.sample_rate;
         let native = demod.caps().native_rate;
@@ -74,9 +78,21 @@ impl RxWorker {
                 let mut rsid = rsid_rx.then(|| RsidDetector::new(native, 1));
                 let mut tap: Option<SpectrumTap> = None;
                 let mut tap_gen = u64::MAX; // force first reconcile
+                // Monotonic clock for the ADS-B reporter's CPR pairing recency and
+                // stale-contact TTL (elapsed ms since worker start).
+                let started = Instant::now();
+                let mut last_prune = started;
                 loop {
                     if !run.load(Ordering::Relaxed) {
                         break;
+                    }
+                    // Age out ADS-B contacts that stopped transmitting, so the
+                    // tracker (and any client aging off `last_seen_ms`) stays clean.
+                    if let Some(rep) = reporter.as_mut() {
+                        if last_prune.elapsed() >= Duration::from_secs(1) {
+                            rep.prune(started.elapsed().as_millis() as u64);
+                            last_prune = Instant::now();
+                        }
                     }
                     match capture.rx.recv_timeout(STOP_POLL) {
                         Ok(chunk) => {
@@ -106,6 +122,18 @@ impl RxWorker {
                             for f in demod.feed(&samples) {
                                 record(&metrics, &f);
                                 emit(&frames, channel, &f.payload);
+                                // ADS-B: fold the decoded Mode S packet into
+                                // per-aircraft state and emit any resulting
+                                // `AircraftReport` (this is what the TUI flights
+                                // table renders).
+                                if let (Some(rep), FramePayload::Packet(bytes)) =
+                                    (reporter.as_mut(), &f.payload)
+                                {
+                                    let now_ms = started.elapsed().as_millis() as u64;
+                                    if let Some(ev) = rep.on_packet(bytes, now_ms) {
+                                        let _ = telemetry.send(ev);
+                                    }
+                                }
                                 produced = true;
                             }
                             if produced {
@@ -487,6 +515,7 @@ mod tests {
             gain,
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            None,
         );
         worker.join();
 
@@ -516,6 +545,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            None,
         );
         worker.join();
         let observed = *peak.lock().unwrap();
@@ -541,6 +571,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            None,
         );
         // Worker is blocked in recv_timeout with no data. stop() joins it.
         let start = std::time::Instant::now();
@@ -575,6 +606,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            None,
         );
         worker.join();
 
@@ -586,11 +618,13 @@ mod tests {
     }
 
     #[test]
-    fn rx_worker_decodes_a_replayed_adsb_frame() {
-        // The streaming worker drives the wideband ADS-B demod at its 2 MHz native
-        // rate (as the RawMag capture delivers it) and surfaces the decoded Mode S
-        // bytes as a Packet frame. Modulate a known DF17 identification frame, replay
-        // its magnitude envelope, and assert the same bytes come back out.
+    fn rx_worker_decodes_a_replayed_adsb_frame_and_reports_the_aircraft() {
+        // The streaming worker drives the wideband ADS-B demod, surfaces the decoded
+        // Mode S bytes as a Packet frame, AND — when given an `AdsbReporter` — folds
+        // that packet into an `AircraftReport` telemetry event (the TUI flights
+        // table's data). Modulate a known DF17 identification frame, replay its
+        // magnitude envelope, and assert both the raw frame and the report come out.
+        use crate::core::adsb::{AdsbReporter, DEFAULT_TTL_MS};
         use omnimodem_dsp::modes::adsb::{encode_identification, AdsbDemod, AdsbMod};
         let frame = encode_identification(0x3C6444, "TEST42");
         let wave = AdsbMod::new().modulate(&Frame::packet(frame.to_vec())).unwrap();
@@ -598,6 +632,7 @@ mod tests {
         let capture = backend.open_capture(2_000_000).unwrap();
 
         let (tx_b, mut rx_b) = broadcast::channel(64);
+        let (tel_tx, mut tel_rx) = broadcast::channel(64);
         let worker = RxWorker::spawn_streaming(
             ChannelId(0),
             DeviceId::placeholder(),
@@ -605,11 +640,12 @@ mod tests {
             Box::new(AdsbDemod::new()),
             RxTxInterlock::new(),
             tx_b,
-            broadcast::channel(8).0,
+            tel_tx,
             test_metrics(),
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            Some(AdsbReporter::new(ChannelId(0), DEFAULT_TTL_MS)),
         );
         worker.join();
 
@@ -618,6 +654,17 @@ mod tests {
             got.push(data);
         }
         assert!(got.iter().any(|d| d == &frame.to_vec()), "no matching ADS-B frame: {got:?}");
+
+        // The reporter must have minted an AircraftReport carrying the callsign.
+        let mut reported = false;
+        while let Ok(ev) = tel_rx.try_recv() {
+            if let TelemetryEvent::AircraftReport { icao, callsign, .. } = ev {
+                if icao == 0x3C6444 && callsign.as_deref() == Some("TEST42") {
+                    reported = true;
+                }
+            }
+        }
+        assert!(reported, "worker did not emit an AircraftReport for the decoded frame");
     }
 
     #[test]
@@ -652,6 +699,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            None,
         );
         worker.join();
         assert!(rx_b.try_recv().is_err(), "muted worker emitted a frame");
@@ -720,6 +768,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false,
+            None,
         );
         worker.join();
 
@@ -760,6 +809,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             true, // rsid_rx enabled
+            None,
         );
         worker.join();
 
@@ -793,6 +843,7 @@ mod tests {
             crate::core::AudioGain::default(),
             crate::core::spectrum::SpectrumControl::default(),
             false, // rsid_rx disabled
+            None,
         );
         worker.join();
         let any_rsid = std::iter::from_fn(|| tele_rx.try_recv().ok())
@@ -836,6 +887,7 @@ mod tests {
             crate::core::AudioGain::default(),
             spectrum,
             false,
+            None,
         );
         worker.join();
 
