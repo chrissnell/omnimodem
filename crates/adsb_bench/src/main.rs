@@ -58,7 +58,7 @@
 //! protected aeronautical spectrum. This tool only reads.
 
 use adsb_bench::{
-    decode_iq, decode_iq_with, DecodeOpts, Front, Report, ADSB_NATIVE_RATE, DEFAULT_IN_RATE,
+    decode_iq, decode_iq_with, DecodeOpts, Demod, Front, Report, ADSB_NATIVE_RATE, DEFAULT_IN_RATE,
     DEFAULT_MIN_CONF, DEFAULT_PHASES, DEFAULT_WORK_RATE,
 };
 use omnimodem_dsp::modes::adsb::ModeS;
@@ -72,6 +72,9 @@ struct Args {
     /// bandwidth instead of band-limiting it away in a 2.0 MHz downsample.
     work_rate: u32,
     front: Front,
+    /// R6 demod core. Default `legacy` is the shipping R1–R5 ensemble; `native`
+    /// runs the 2.4 Msps correlating core on the un-resampled capture.
+    demod: Demod,
     /// Sub-sample slicer phases (R3 ensemble). Default matches the shipping
     /// decoder; `--phases 1` reproduces the pre-R3 single-phase baseline.
     phases: usize,
@@ -96,6 +99,7 @@ impl Args {
             in_rate: self.in_rate,
             work_rate: self.work_rate,
             front: self.front,
+            demod: self.demod,
             phases: self.phases,
             min_conf: self.min_conf,
             repair: self.repair,
@@ -112,6 +116,7 @@ fn main() {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
+                 [--demod legacy|native] \
                  [--work-rate {DEFAULT_WORK_RATE}] [--front complex|mag] \
                  [--phases {DEFAULT_PHASES}] [--min-conf {DEFAULT_MIN_CONF}] \
                  [--repair] [--roster] [--dump] [--json] \
@@ -129,6 +134,7 @@ fn main() {
 /// Flags that consume the following token as their value.
 const VALUED_FLAGS: &[&str] = &[
     "--in-rate",
+    "--demod",
     "--work-rate",
     "--front",
     "--phases",
@@ -153,6 +159,11 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             None | Some("complex") => Front::Complex,
             Some("mag") => Front::Mag,
             Some(other) => return Err(format!("bad --front {other:?} (want complex|mag)")),
+        },
+        demod: match flag(raw, "--demod").as_deref() {
+            None | Some("legacy") => Demod::Legacy,
+            Some("native") => Demod::Native,
+            Some(other) => return Err(format!("bad --demod {other:?} (want legacy|native)")),
         },
         phases: flag(raw, "--phases")
             .map(|s| match s.parse() {
@@ -271,19 +282,30 @@ fn print_human(args: &Args, r: &Report, dur_in: f64) {
         "  input:        {} Hz uint8 IQ, {} samples ({:.1} s)",
         args.in_rate, r.samples_in, dur_in
     );
-    println!("  front end:    {}", args.front.label());
-    println!("  slicer phases: {}", args.phases);
-    println!(
-        "  min confidence: {:.2}{}",
-        args.min_conf,
-        if args.min_conf == 0.0 { " (gate disabled)" } else { "" }
-    );
-    println!(
-        "  recovery:     repair {}, roster {}",
-        onoff(args.repair),
-        onoff(args.roster)
-    );
-    println!("  working rate: {} Hz, {} samples after resample", r.work_rate, r.samples_work);
+    match args.demod {
+        Demod::Legacy => {
+            println!("  demod core:   legacy (R1–R5 resample + phase ensemble)");
+            println!("  front end:    {}", args.front.label());
+            println!("  slicer phases: {}", args.phases);
+            println!(
+                "  min confidence: {:.2}{}",
+                args.min_conf,
+                if args.min_conf == 0.0 { " (gate disabled)" } else { "" }
+            );
+            println!("  recovery:     repair {}, roster {}", onoff(args.repair), onoff(args.roster));
+            println!(
+                "  working rate: {} Hz, {} samples after resample",
+                r.work_rate, r.samples_work
+            );
+        }
+        Demod::Native => {
+            println!("  demod core:   native (R6 2.4 Msps correlating slicer, CRC-clean)");
+            println!(
+                "  working rate: {} Hz (native, no resample), {} magnitude samples",
+                r.work_rate, r.samples_work
+            );
+        }
+    }
     println!("  frames (CRC-valid):  {}", r.frames_valid);
     if let (Some(mean), Some(min)) = (r.conf_mean(), r.conf_min) {
         println!("  frame confidence:    mean {mean:.3}, min {min:.3} (gate {:.2})", args.min_conf);
@@ -353,6 +375,13 @@ fn print_json(args: &Args, r: &Report, dur_in: f64) {
     print!("{{");
     print!("\"path\":{},", json_str(&args.path));
     print!("\"in_rate\":{},", args.in_rate);
+    print!(
+        "\"demod\":\"{}\",",
+        match args.demod {
+            Demod::Legacy => "legacy",
+            Demod::Native => "native",
+        }
+    );
     print!(
         "\"front\":\"{}\",",
         match args.front {
@@ -450,6 +479,7 @@ mod tests {
         let p = parse_args(&args(&["rec.iq"])).unwrap();
         assert_eq!(p.path, "rec.iq");
         assert_eq!(p.in_rate, DEFAULT_IN_RATE);
+        assert_eq!(p.demod, Demod::Legacy); // R6 native core is opt-in, default off
         assert_eq!(p.front, Front::Complex); // R1 complex front end is the default
         assert_eq!(p.phases, DEFAULT_PHASES); // R3 ensemble is the default
         assert_eq!(p.min_conf, DEFAULT_MIN_CONF); // R4 gate on by default
@@ -502,6 +532,25 @@ mod tests {
         assert_eq!(parse_args(&args(&["rec.iq", "--phases", "6"])).unwrap().phases, 6);
         assert!(parse_args(&args(&["rec.iq", "--phases", "0"])).is_err());
         assert!(parse_args(&args(&["rec.iq", "--phases", "two"])).is_err());
+    }
+
+    #[test]
+    fn demod_flag_selects_core() {
+        assert_eq!(parse_args(&args(&["rec.iq"])).unwrap().demod, Demod::Legacy);
+        assert_eq!(
+            parse_args(&args(&["rec.iq", "--demod", "legacy"])).unwrap().demod,
+            Demod::Legacy
+        );
+        assert_eq!(
+            parse_args(&args(&["rec.iq", "--demod", "native"])).unwrap().demod,
+            Demod::Native
+        );
+        assert!(parse_args(&args(&["rec.iq", "--demod", "bogus"])).is_err());
+        // `--demod` consumes its value, so a valued flag before the path still
+        // finds the path.
+        let p = parse_args(&args(&["--demod", "native", "rec.iq"])).unwrap();
+        assert_eq!(p.path, "rec.iq");
+        assert_eq!(p.demod, Demod::Native);
     }
 
     #[test]

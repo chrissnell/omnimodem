@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
 use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
-use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS};
+use omnimodem_dsp::modes::adsb::{AdsbDemod, Demod2400, ModeS};
 use omnimodem_dsp::types::{Cplx, Frame, FramePayload, Sample};
 
 /// Default slicer-phase count — re-exported so the CLI default and the CI gate
@@ -36,6 +36,10 @@ pub use omnimodem_dsp::modes::adsb::ADSB_RATE as DEFAULT_WORK_RATE;
 /// The 4 MHz native-preserving working rate (R5 Lever 1), re-exported for the CLI.
 pub use omnimodem_dsp::modes::adsb::ADSB_NATIVE_RATE;
 
+/// The 2.4 Msps capture rate the R6 native core slices at (no resample),
+/// re-exported for the CLI's `--demod native` reporting.
+pub use omnimodem_dsp::modes::adsb::ADSB_CAPTURE_RATE;
+
 /// Default capture rate — the wideband rate the daemon commands the dongle to
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
 pub const DEFAULT_IN_RATE: u32 = 2_400_000;
@@ -53,6 +57,11 @@ pub struct DecodeOpts {
     pub work_rate: u32,
     /// Front end that turns the capture into the working-rate magnitude envelope.
     pub front: Front,
+    /// Which demod core to run (R6). [`Demod::Legacy`] is the shipping R1–R5
+    /// resample-then-slice ensemble; [`Demod::Native`] is the 2.4 Msps correlating
+    /// core, which slices the capture-rate envelope directly (no resample, so
+    /// `front`/`work_rate`/`phases`/`min_conf` do not apply).
+    pub demod: Demod,
     /// Sub-sample slicer phases (R3 ensemble).
     pub phases: usize,
     /// R4 soft-decision reject threshold (`0.0` disables the gate).
@@ -69,12 +78,24 @@ impl Default for DecodeOpts {
             in_rate: DEFAULT_IN_RATE,
             work_rate: DEFAULT_WORK_RATE,
             front: Front::Complex,
+            demod: Demod::Legacy,
             phases: DEFAULT_PHASES,
             min_conf: DEFAULT_MIN_CONF,
             repair: false,
             roster: false,
         }
     }
+}
+
+/// Which demodulator core the bench runs (R6).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Demod {
+    /// R1–R5: resample the capture to `work_rate`, take magnitude, run the
+    /// multi-phase slicer ensemble with the R4 gate and R5 recovery levers.
+    Legacy,
+    /// R6 Stage A: slice the `|I+jQ|` magnitude at the native capture rate with
+    /// the correlating matched-filter core ([`Demod2400`]), CRC-clean acceptance.
+    Native,
 }
 
 /// How the 2.4 Msps capture becomes the 2 MHz magnitude envelope. See the
@@ -183,7 +204,16 @@ pub fn decode_iq(bytes: &[u8], opts: &DecodeOpts) -> Report {
 /// Like [`decode_iq`], but invokes `on_frame` for every accepted frame before it
 /// is tallied — the hook behind the CLI's `--dump` per-frame audit trail. The
 /// decode path is otherwise identical, so the callback cannot change the counts.
-pub fn decode_iq_with(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(&Frame)) -> Report {
+pub fn decode_iq_with(bytes: &[u8], opts: &DecodeOpts, on_frame: impl FnMut(&Frame)) -> Report {
+    match opts.demod {
+        Demod::Legacy => decode_legacy(bytes, opts, on_frame),
+        Demod::Native => decode_native(bytes, opts, on_frame),
+    }
+}
+
+/// R1–R5 path: resample the capture to `work_rate`, take magnitude, run the
+/// multi-phase slicer ensemble.
+fn decode_legacy(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(&Frame)) -> Report {
     let iq = u8_iq_to_cplx(bytes);
     let mut front_end = FrontEnd::new(opts.front, opts.in_rate, opts.work_rate);
     let mut demod = AdsbDemod::with_rate_phases_min_conf(opts.work_rate, opts.phases, opts.min_conf);
@@ -195,6 +225,32 @@ pub fn decode_iq_with(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(
     let window = (opts.in_rate as usize).max(1); // ~1 s of complex samples per window
     for chunk in iq.chunks(window) {
         let envelope = front_end.envelope(chunk);
+        report.samples_work += envelope.len() as u64;
+        for frame in demod.feed(&envelope) {
+            on_frame(&frame);
+            tally(&mut report, &frame.payload, frame.meta.crc_ok, frame.meta.confidence);
+        }
+    }
+    for frame in demod.flush() {
+        on_frame(&frame);
+        tally(&mut report, &frame.payload, frame.meta.crc_ok, frame.meta.confidence);
+    }
+    report
+}
+
+/// R6 Stage A native path: take `|I+jQ|` magnitude at the native capture rate and
+/// slice it directly with the correlating [`Demod2400`] core — no resample, so
+/// the front end, working rate, phase ensemble, and R4/R5 knobs do not apply.
+/// The reported working rate is the capture rate itself.
+fn decode_native(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(&Frame)) -> Report {
+    let iq = u8_iq_to_cplx(bytes);
+    let mut demod = Demod2400::new();
+    let mut report =
+        Report { samples_in: iq.len(), work_rate: opts.in_rate, ..Default::default() };
+
+    let window = (opts.in_rate as usize).max(1); // ~1 s of complex samples per window
+    for chunk in iq.chunks(window) {
+        let envelope: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
         report.samples_work += envelope.len() as u64;
         for frame in demod.feed(&envelope) {
             on_frame(&frame);
