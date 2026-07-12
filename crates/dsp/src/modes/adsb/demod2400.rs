@@ -402,7 +402,7 @@ mod tests {
         let mut recovered = 0;
         for offset in 0..DECIM {
             let mag = synth_2400(&frame, offset);
-            if decode(&mag).iter().any(|b| *b == frame) {
+            if decode(&mag).contains(&frame) {
                 recovered += 1;
             }
         }
@@ -420,7 +420,7 @@ mod tests {
         let mag = synth_2400(&frame, 0);
         let out = decode(&mag);
         assert!(
-            out.iter().any(|b| *b == frame),
+            out.contains(&frame),
             "DF11 short frame not recovered: {out:?}"
         );
     }
@@ -444,7 +444,7 @@ mod tests {
         frame[5] ^= 0x20;
         let mag = synth_2400(&frame, 0);
         assert!(
-            !decode(&mag).iter().any(|b| *b == frame),
+            !decode(&mag).contains(&frame),
             "a CRC-broken frame must be rejected in Stage A"
         );
     }
