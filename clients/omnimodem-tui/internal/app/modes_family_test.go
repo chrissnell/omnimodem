@@ -97,3 +97,26 @@ func TestFamilyGroupingSpotChecks(t *testing.T) {
 		t.Fatalf("Hell/WEFAX must not be swept into SSTV")
 	}
 }
+
+// ADS-B must be a selectable mode: present in the modes table, classified into
+// its own "ADS-B" family so it appears in the channel-config picker, and its
+// config output must be the bare "adsb" string with no params (the wire form the
+// daemon parses into ModeConfig::Adsb).
+func TestADSBIsSelectable(t *testing.T) {
+	mi := modeByLabel("adsb")
+	if mi == nil {
+		t.Fatal("adsb missing from modes table — it won't appear in the mode picker")
+	}
+	if got := familyName("adsb"); got != "ADS-B" {
+		t.Fatalf("adsb family = %q, want %q", got, "ADS-B")
+	}
+	if got := displayMode("adsb"); got != "ADS-B" {
+		t.Fatalf("adsb display = %q, want %q", got, "ADS-B")
+	}
+	if got := modeStringFor("adsb", nil); got != "adsb" {
+		t.Fatalf("adsb mode string = %q, want %q", got, "adsb")
+	}
+	if mp := modeParamsFor("adsb", nil); mp != nil {
+		t.Fatalf("adsb ModeParams = %v, want nil (no operator params)", mp)
+	}
+}

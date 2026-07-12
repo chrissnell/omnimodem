@@ -18,12 +18,13 @@ type modeParam struct {
 // structured-QSO auto-sequence ladder (FT8/FT4/JT65/JT9); "beacon" → the spot
 // monitor (WSPR), which decodes spots and keys a single call/grid/power beacon on
 // enter; "image" → the facsimile raster surface (Hell), which scrolls the received
-// image columns and composes text that the mode paints as pixels on TX. slotSecs
-// is the T/R window length for the windowed sequencer/beacon modes (0 for the
-// streaming "chat"/"image" modes).
+// image columns and composes text that the mode paints as pixels on TX; "adsb" →
+// the receive-only live flights table (view_channels routes an ADS-B channel there
+// instead of the operate screen). slotSecs is the T/R window length for the
+// windowed sequencer/beacon modes (0 for the streaming "chat"/"image"/"adsb" modes).
 type modeInfo struct {
 	label    string
-	shape    string // "chat" | "sequencer" | "beacon" | "image"
+	shape    string // "chat" | "sequencer" | "beacon" | "image" | "adsb"
 	slotSecs float64
 	params   []modeParam
 }
@@ -227,6 +228,10 @@ var modes = []modeInfo{
 	// submode's T/R period. Registered as the Normal submode; the submode
 	// selector and full directed-protocol view are follow-on work.
 	{"js8", "chat", 0, nil},
+	// ADS-B (Mode S) 1090 MHz surveillance. Receive-only: bound to an rtl_tcp SDR,
+	// the daemon captures wideband and streams AircraftReport telemetry. No operator
+	// params and no TX; selecting it on a channel opens the live flights table.
+	{"adsb", "adsb", 0, nil},
 }
 
 // baseModeLabel strips the daemon's parameter suffix from a live mode string.
@@ -392,6 +397,8 @@ func familyName(label string) string {
 		return "WSPR"
 	case "js8":
 		return "JS8"
+	case "adsb":
+		return "ADS-B"
 	}
 	switch {
 	case strings.HasPrefix(label, "jt4"): // jt4a..jt4g
