@@ -494,13 +494,13 @@ mod tests {
     }
 
     #[test]
-    fn adsb_is_streaming_at_2mhz_with_a_loopback_modulator() {
+    fn adsb_is_streaming_at_native_capture_rate_with_a_loopback_modulator() {
         let cfg = ModeConfig::Adsb;
         assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "adsb not streaming");
         assert!(build_modulator(&cfg).is_some(), "no loopback modulator for adsb");
-        // The demod's native rate is dump1090's 2 MHz magnitude convention; the
-        // daemon resamples the wideband capture down to it.
-        assert_eq!(native_rate(&cfg), Some(2_000_000));
+        // R6: the native core (`Demod2400`) demodulates at the 2.4 Msps capture
+        // rate directly, so the RX worker feeds it the magnitude with no resample.
+        assert_eq!(native_rate(&cfg), Some(2_400_000));
         // Streaming, so it transmits without a time slot.
         assert_eq!(tx_slot_s(&cfg), None);
     }
