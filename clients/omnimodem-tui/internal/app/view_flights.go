@@ -2,10 +2,24 @@ package app
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/ui"
 )
+
+// confidentAfterReports is how many AircraftReport events a contact must
+// accumulate before it is trusted. Below it the row renders red: a mis-decoded
+// frame mints a one-off random ICAO that never repeats, so a contact heard only
+// a handful of times is likely a decode error, not a real aircraft. Real
+// aircraft cross this bar within a couple of seconds (position updates nearly
+// every squitter).
+const confidentAfterReports = 3
+
+// vsThresholdFpm is the vertical-rate magnitude (feet/min) a contact must exceed
+// before the climb/descend arrow shows — above the ADS-B 64 fpm quantum so
+// level-flight jitter reads as level, not a flapping arrow.
+const vsThresholdFpm = 128
 
 // flightsView is the ADS-B flights table: a live, read-only list of aircraft
 // heard on one ADS-B channel, folded from AircraftReport events on the shared
@@ -28,6 +42,8 @@ var flightsCols = []ui.Column{
 	{Title: "LON", Width: 10},
 	{Title: "GS kt", Width: 6},
 	{Title: "ALT ft", Width: 7},
+	{Title: "V/S", Width: 3},
+	{Title: "SEEN", Width: 6},
 }
 
 func (v *flightsView) Update(msg tea.Msg) (View, tea.Cmd) {
@@ -41,9 +57,13 @@ func (v *flightsView) Update(msg tea.Msg) (View, tea.Cmd) {
 	return v, nil
 }
 
-func (v *flightsView) rows() [][]string {
+// rowsFlagged builds the table rows and a parallel low-confidence flag per row
+// (index-aligned with `aircraftForChannel`). `now` is the client clock used for
+// the "last seen" age.
+func (v *flightsView) rowsFlagged(now time.Time) ([][]string, []bool) {
 	live := v.m.aircraftForChannel(v.ch)
 	rows := make([][]string, 0, len(live))
+	flagged := make([]bool, 0, len(live))
 	for _, a := range live {
 		rows = append(rows, []string{
 			flightLabel(a),
@@ -51,13 +71,16 @@ func (v *flightsView) rows() [][]string {
 			fmtCoord(a.hasPos, a.lon),
 			fmtMeasure(a.hasGS, a.gsKt),
 			fmtInt(a.hasAlt, int64(a.altFt)),
+			vertArrow(a.hasVR, a.vrFpm),
+			fmtAge(now.Sub(a.lastHeard)),
 		})
+		flagged = append(flagged, lowConfidence(a))
 	}
-	return rows
+	return rows, flagged
 }
 
 func (v *flightsView) Render(w, h int) string {
-	rows := v.rows()
+	rows, flagged := v.rowsFlagged(time.Now())
 	if len(rows) == 0 {
 		return "No aircraft heard yet."
 	}
@@ -65,8 +88,9 @@ func (v *flightsView) Render(w, h int) string {
 	// can't overflow the framed pane (ui.Table doesn't scroll).
 	if max := h - 1; max > 0 && len(rows) > max {
 		rows = rows[:max]
+		flagged = flagged[:max]
 	}
-	return ui.TableInset(flightsCols, rows, -1)
+	return ui.TableInsetFlagged(flightsCols, rows, -1, flagged)
 }
 
 func (v *flightsView) Title() string {
@@ -109,4 +133,42 @@ func fmtInt(has bool, v int64) string {
 		return "—"
 	}
 	return fmt.Sprintf("%d", v)
+}
+
+// vertArrow renders the climb/descend trend from the barometric vertical rate:
+// ↑ climbing, ↓ descending, blank when level (or no velocity squitter yet).
+func vertArrow(hasVR bool, vrFpm int32) string {
+	switch {
+	case !hasVR:
+		return ""
+	case vrFpm > vsThresholdFpm:
+		return "↑"
+	case vrFpm < -vsThresholdFpm:
+		return "↓"
+	default:
+		return ""
+	}
+}
+
+// fmtAge renders how long ago a contact was last heard, compactly: "45s",
+// "1m32s", "2h05m". Negative/zero ages (a report that just landed) read "0s".
+func fmtAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	secs := int(d.Seconds())
+	switch {
+	case secs < 60:
+		return fmt.Sprintf("%ds", secs)
+	case secs < 3600:
+		return fmt.Sprintf("%dm%02ds", secs/60, secs%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", secs/3600, (secs%3600)/60)
+	}
+}
+
+// lowConfidence marks a contact heard too few times to trust (likely a decode
+// error): its row renders red. See confidentAfterReports.
+func lowConfidence(a *aircraftLive) bool {
+	return a.reports < confidentAfterReports
 }

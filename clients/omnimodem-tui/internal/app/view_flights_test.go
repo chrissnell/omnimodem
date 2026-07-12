@@ -166,3 +166,86 @@ func TestFlightsViewEscPops(t *testing.T) {
 		t.Fatal("esc must pop back to the channels view")
 	}
 }
+
+func TestVertArrow(t *testing.T) {
+	cases := []struct {
+		has  bool
+		vr   int32
+		want string
+	}{
+		{false, 0, ""},     // no velocity squitter yet
+		{true, 0, ""},      // level
+		{true, 100, ""},    // below threshold → level, not a flapping arrow
+		{true, -100, ""},   // below threshold (descending slightly) → level
+		{true, 1500, "↑"},  // climbing
+		{true, -1500, "↓"}, // descending
+	}
+	for _, c := range cases {
+		if got := vertArrow(c.has, c.vr); got != c.want {
+			t.Errorf("vertArrow(%v, %d) = %q, want %q", c.has, c.vr, got, c.want)
+		}
+	}
+}
+
+func TestFmtAge(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{-time.Second, "0s"}, // a report that just landed
+		{0, "0s"},
+		{45 * time.Second, "45s"},
+		{92 * time.Second, "1m32s"},
+		{(2*3600 + 5*60) * time.Second, "2h05m"},
+	}
+	for _, c := range cases {
+		if got := fmtAge(c.d); got != c.want {
+			t.Errorf("fmtAge(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
+// A contact heard only once is low-confidence (likely a one-off mis-decode); one
+// heard enough times to corroborate the ICAO is not.
+func TestLowConfidenceUntilCorroborated(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	now := time.Unix(1_700_000_000, 0)
+
+	m.applyAircraft(&pb.AircraftReport{Channel: 2, Icao: 0xA11111, Flight: "ONE"}, now)
+	for i := 0; i < confidentAfterReports; i++ {
+		m.applyAircraft(&pb.AircraftReport{Channel: 2, Icao: 0xB22222, Flight: "MANY"}, now)
+	}
+
+	if !lowConfidence(m.aircraft[0xA11111]) {
+		t.Fatal("a single-report contact must be low-confidence")
+	}
+	if lowConfidence(m.aircraft[0xB22222]) {
+		t.Fatal("a repeatedly-heard contact must not be low-confidence")
+	}
+}
+
+// The rendered rows must carry the climb/descend arrow, the last-seen age, and a
+// low-confidence flag aligned with each row.
+func TestFlightsViewVerticalTrendAgeAndFlag(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	now := time.Unix(1_700_000_000, 0)
+	m.applyAircraft(&pb.AircraftReport{
+		Channel: 2, Icao: 0xABCDEF, Flight: "CLIMB1",
+		AltitudeFt: i32(10000), VertRateFpm: i32(1500),
+	}, now)
+
+	m.sel = 2
+	rows, flagged := newFlightsView(m).rowsFlagged(now.Add(92 * time.Second))
+	if len(rows) != 1 || len(flagged) != 1 {
+		t.Fatalf("want 1 row, got %d rows / %d flags", len(rows), len(flagged))
+	}
+	// Columns: FLIGHT, LAT, LON, GS, ALT, V/S, SEEN.
+	if row := rows[0]; row[5] != "↑" {
+		t.Errorf("V/S column must show the climb arrow, got %q (row %v)", row[5], row)
+	} else if row[6] != "1m32s" {
+		t.Errorf("SEEN column must show the age, got %q", row[6])
+	}
+	if !flagged[0] {
+		t.Error("a single-report contact must be flagged low-confidence")
+	}
+}
