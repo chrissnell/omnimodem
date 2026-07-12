@@ -81,6 +81,27 @@ decision (keep or revert each lever) is made on the reference capture via
 `adsb_bench --baseline-frames/--baseline-aircraft`; wiring the kept levers into the
 daemon is the production follow-up.
 
+**R6 replaces the demod core** ([`adsb/demod2400.rs`](../../crates/dsp/src/modes/adsb/demod2400.rs),
+`Demod2400`) — the R1–R5 path (downsample 2.4→2.0, 2-tap slot-mean slice, 12-phase
+interpolation ensemble) was structurally a rung below readsb/dump1090-fa. The native
+core is a faithful port of readsb `demod_2400.c`: it demodulates **at the 2.4 Msps
+capture rate with no resample**, slicing each bit with one of five hand-tuned FIR
+matched-filter correlators (`slice_phase0..4`) on a 6-samples-per-5-symbols phase
+walk (`slice_byte`), and keeps the best-scoring of five preamble phases. Acceptance
+is readsb's `scoreModesMessage` model (`score_candidate`): a fused CRC + recently-
+seen-ICAO-roster score, **not CRC alone**. That is load-bearing — the Mode S CRC is
+shift-invariant (`2·m = g·2q`), so a 1-bit-misaligned slice of a real frame usually
+also checksums clean and lands on an address-overlaid DF (a real DF11 right-shifted
+is a clean DF5); the roster gate rejects the ghost (its "address" was never seen in
+the clear) while recovering genuine DF0/4/5/16/20/21 surveillance replies from
+aircraft already seen via a clean DF11/17, plus single-bit-corrected frames (DF bits
+excluded from the fix, as readsb does). `Demod2400` is the **daemon default**
+(`registry.rs`, `ModeConfig::Adsb`): its `caps().native_rate` is the capture rate, so
+the RX worker feeds the magnitude untouched — ~8× cheaper than the resample-then-
+ensemble path (measured ~20× real-time vs ~2.5× in release), which also fixes the
+rtl_tcp capture overruns the legacy path caused. Measure it against the legacy core
+with `adsb_bench --demod native` vs `--demod legacy` on the reference capture.
+
 ## WSJT-X weak-signal family (windowed / time-aligned)
 
 Block-demod modes that buffer a time slot and decode multi-pass. LDPC or K=32
