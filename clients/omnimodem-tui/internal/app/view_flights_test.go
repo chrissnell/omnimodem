@@ -224,6 +224,24 @@ func TestLowConfidenceUntilCorroborated(t *testing.T) {
 	}
 }
 
+// The PKTS column shows the daemon's per-plane packet count, and it tracks the
+// latest report's cumulative total rather than counting client-side reports.
+func TestFlightsViewPacketCount(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	now := time.Unix(1_700_000_000, 0)
+	m.applyAircraft(&pb.AircraftReport{Channel: 2, Icao: 0xABCDEF, Flight: "CNT1", Messages: 7}, now)
+	m.applyAircraft(&pb.AircraftReport{Channel: 2, Icao: 0xABCDEF, Flight: "CNT1", Messages: 42}, now)
+	// A stale/reordered report with a lower total must not walk the count backward.
+	m.applyAircraft(&pb.AircraftReport{Channel: 2, Icao: 0xABCDEF, Flight: "CNT1", Messages: 40}, now)
+
+	m.sel = 2
+	rows, _ := newFlightsView(m).rowsFlagged(now)
+	// Columns: FLIGHT, LAT, LON, GS, ALT, V/S, PKTS, SEEN.
+	if got := rows[0][6]; got != "42" {
+		t.Errorf("PKTS column must show the daemon packet count, got %q (row %v)", got, rows[0])
+	}
+}
+
 // The rendered rows must carry the climb/descend arrow, the last-seen age, and a
 // low-confidence flag aligned with each row.
 func TestFlightsViewVerticalTrendAgeAndFlag(t *testing.T) {
@@ -239,11 +257,11 @@ func TestFlightsViewVerticalTrendAgeAndFlag(t *testing.T) {
 	if len(rows) != 1 || len(flagged) != 1 {
 		t.Fatalf("want 1 row, got %d rows / %d flags", len(rows), len(flagged))
 	}
-	// Columns: FLIGHT, LAT, LON, GS, ALT, V/S, SEEN.
+	// Columns: FLIGHT, LAT, LON, GS, ALT, V/S, PKTS, SEEN.
 	if row := rows[0]; row[5] != "↑" {
 		t.Errorf("V/S column must show the climb arrow, got %q (row %v)", row[5], row)
-	} else if row[6] != "1m32s" {
-		t.Errorf("SEEN column must show the age, got %q", row[6])
+	} else if row[7] != "1m32s" {
+		t.Errorf("SEEN column must show the age, got %q", row[7])
 	}
 	if !flagged[0] {
 		t.Error("a single-report contact must be flagged low-confidence")

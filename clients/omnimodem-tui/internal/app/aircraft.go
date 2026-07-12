@@ -39,7 +39,13 @@ type aircraftLive struct {
 	// aircraft squitters repeatedly (many reports); a mis-decoded frame mints a
 	// one-off random ICAO that is never heard again, so a contact still at a
 	// handful of reports is treated as low-confidence (see confidentAfterReports).
-	reports   int
+	reports int
+	// messages is the daemon tracker's running packet count for this ICAO — how
+	// many squitters it has decoded from this plane. It is cumulative and
+	// monotonic on the wire, so each report overwrites (not sums) it. Distinct
+	// from `reports`, which counts the LOSSY reports this client folded: the
+	// daemon may decode many frames between two reportable-state changes.
+	messages  int
 	lastHeard time.Time
 }
 
@@ -72,6 +78,11 @@ func (m *Model) applyAircraft(r *pb.AircraftReport, now time.Time) {
 		a.vrFpm, a.hasVR = r.GetVertRateFpm(), true
 	}
 	a.reports++
+	if n := int(r.GetMessages()); n > a.messages {
+		// Monotonic on the wire; guard against a stale/reordered report walking it
+		// backward so the displayed count never ticks down.
+		a.messages = n
+	}
 	a.lastHeard = now
 	// Pruning is the tick's job (Model.Update), not the fold's — no need to sweep
 	// the whole map on every report.

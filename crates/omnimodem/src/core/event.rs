@@ -111,5 +111,8 @@ pub enum TelemetryEvent {
         track_deg: Option<f64>,
         vertical_rate_fpm: Option<i32>,
         last_seen_ms: u64,
+        /// Running count of squitters folded into this track — "how many packets
+        /// we received from this plane".
+        messages: u32,
     },
 }

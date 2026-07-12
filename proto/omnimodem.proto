@@ -677,4 +677,5 @@ message AircraftReport {
   optional double track_deg       = 8;   // degrees clockwise from true north (0..360)
   optional sint32 vert_rate_fpm   = 9;   // barometric vertical rate, feet/min (+ up)
   uint64 last_seen_ms             = 10;  // tracker clock (ms) of the last decode
+  uint32 messages                 = 11;  // ADS-B squitters (DF17/18) decoded from this aircraft
 }
