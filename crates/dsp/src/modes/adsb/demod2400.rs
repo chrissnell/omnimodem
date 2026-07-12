@@ -199,7 +199,11 @@ impl Demod2400 {
     pub fn flush(&mut self) -> Vec<Frame> {
         let real = self.buf.len();
         self.buf.resize(real + GUARD, 0.0);
-        let frames = self.scan_and_drain(real);
+        // Scan directly (not via `scan_and_drain`, which would advance `base` by
+        // the consumed prefix): flush retires *all* `real` samples, so the buffer
+        // is cleared and `base` advances by `real` exactly once — keeping
+        // `sample_offset` correct if the demod is reused after a flush.
+        let (frames, _consumed) = self.scan(real);
         self.buf.clear();
         self.base += real as u64;
         frames
@@ -236,7 +240,9 @@ impl Demod2400 {
                 continue;
             }
             // Noise reference from five quiet preamble slots, and the correlation
-            // gate: winning preamble energy must clear base_noise * 58 / 32.
+            // gate: winning preamble energy must clear base_noise * 58 / 32. readsb
+            // works in integers and truncates (`>> 5`); the f32 port keeps the
+            // fractional part, a sub-unit difference immaterial to the gate.
             let base_noise = m[i + 5] + m[i + 8] + m[i + 16] + m[i + 17] + m[i + 18];
             let ref_level = base_noise * PREAMBLE_THRESHOLD / 32.0;
 
@@ -473,5 +479,37 @@ mod tests {
             .filter(|f| matches!(&f.payload, FramePayload::Packet(b) if *b == frame))
             .count();
         assert_eq!(hits, 1, "split frame should be recovered exactly once");
+    }
+
+    #[test]
+    fn sample_offset_stays_stream_global_after_flush() {
+        // `flush` must advance the stream position by exactly the samples it
+        // retires, so a demod reused after a flush reports correct absolute
+        // offsets. Decode the same waveform twice through one demod (each round
+        // ended by a flush): the second frame must sit exactly one buffer length
+        // past the first. A `base` that double-counts the flushed prefix breaks
+        // this.
+        let frame = encode_identification(0x4840D6, "KLM1023").to_vec();
+        let mag = synth_2400(&frame, 0);
+        let offset = |frames: &[Frame]| {
+            frames
+                .iter()
+                .find_map(|f| match &f.payload {
+                    FramePayload::Packet(b) if *b == frame => Some(f.meta.sample_offset),
+                    _ => None,
+                })
+                .expect("frame decoded")
+        };
+
+        let mut d = Demod2400::new();
+        d.feed(&mag);
+        let off1 = offset(&d.flush());
+        d.feed(&mag);
+        let off2 = offset(&d.flush());
+        assert_eq!(
+            off2 - off1,
+            mag.len() as u64,
+            "second round's offset must be exactly one buffer length past the first"
+        );
     }
 }
