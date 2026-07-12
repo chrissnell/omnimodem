@@ -312,6 +312,14 @@ impl RtlCmd {
 /// rate. 2.4M is a rate every R820-class dongle accepts (see [`supported_sample_rates`]).
 pub const ADSB_CAPTURE_RATE: u32 = 2_400_000;
 
+/// ADS-B downlink frequency (1090.0 MHz). Unlike the audio SDR modes, ADS-B is
+/// fixed-frequency — the operator never tunes it — so the daemon must tune the
+/// dongle here itself when it binds an ADS-B channel. The magnitude envelope
+/// `|I+jQ|` the [`DemodMode::RawMag`] path decodes is invariant to a residual
+/// carrier offset, so [`plan_tune`] can (and does) place 1090 MHz a quarter-band
+/// off hardware center to clear the R820T DC spike without hurting the decode.
+pub const ADSB_FREQ_HZ: f64 = 1_090_000_000.0;
+
 /// Selectable demodulator. The audio modes (NBFM/AM/WFM/SSB) are dispatched by the
 /// capture thread via [`SdrDemod`], which tunes + channelizes to narrowband audio.
 /// `RawMag` is the odd one out: it bypasses `SdrDemod` entirely and emits the
