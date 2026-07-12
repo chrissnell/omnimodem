@@ -58,6 +58,29 @@ field CF 7 and the lowest eye, vs 8–13 coherent frames per real aircraft).
 lists every frame (df/tc/icao/conf/bytes) for per-frame audit, and `--phases N`
 sweeps the ensemble width. Gate confidence rides on every `FrameMeta.confidence`.
 
+R5 closes the measured gap to dump1090 with three levers, all **off by default**
+(the daemon and CI gate are unchanged) and promoted only once shown to move the
+real-capture yield. *Lever 1 — native-rate decode* (`--work-rate 4000000`,
+`ADSB_NATIVE_RATE`): the whole PPM stack is rate-parameterized, so instead of
+band-limiting the 2.4 Msps capture down to 2.0 MHz (whose anti-alias lowpass smears
+the 0.5 µs pulse edges and costs weak/short-frame sensitivity — the DF11 gap) the
+front end resamples *up* to 4 MHz, preserving the full captured bandwidth so the
+slicer sees the un-smeared pulse. `AdsbDemod::with_rate_phases_min_conf` builds the
+demod at the chosen rate; 2.4 MHz cannot be used directly (a half-µs slot must be a
+whole number of samples). *Lever 2a — single-bit CRC repair* (`--repair`):
+`crc::locate_single_bit_error` finds a *unique* single-bit error via the GF(2)
+syndrome (dump1090's default `--fix`), which `ppm::PpmDemodulator::classify`
+corrects when the flip preserves the frame's short/long length class; two-bit
+search is deliberately omitted (it fabricates frames). *Lever 2b — ICAO-roster recovery* (`--roster`): the
+address-overlaid DFs (DF0/4/5/16/20/21) fold their ICAO into the parity, so a
+correct frame checksums to the address — nothing to validate. `IcaoRoster` holds the
+addresses seen in clean DF11/17/18 decodes, and an overlaid frame is accepted only
+when its recovered address is on the roster (the confidence gate still applies), so
+surveillance frames are recovered without inventing aircraft from noise. The gate
+decision (keep or revert each lever) is made on the reference capture via
+`adsb_bench --baseline-frames/--baseline-aircraft`; wiring the kept levers into the
+daemon is the production follow-up.
+
 ## WSJT-X weak-signal family (windowed / time-aligned)
 
 Block-demod modes that buffer a time slot and decode multi-pass. LDPC or K=32

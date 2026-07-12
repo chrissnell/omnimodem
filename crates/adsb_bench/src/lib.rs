@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
 use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
-use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS, ADSB_RATE};
+use omnimodem_dsp::modes::adsb::{AdsbDemod, ModeS};
 use omnimodem_dsp::types::{Cplx, Frame, FramePayload, Sample};
 
 /// Default slicer-phase count — re-exported so the CLI default and the CI gate
@@ -28,9 +28,54 @@ pub use omnimodem_dsp::modes::adsb::ADSB_SLICER_PHASES as DEFAULT_PHASES;
 /// the CI gate match the shipping decoder's gate (see [`decode_iq`]).
 pub use omnimodem_dsp::modes::adsb::ADSB_MIN_CONFIDENCE as DEFAULT_MIN_CONF;
 
+/// Default working rate — the shipping 2 MHz decode rate. R5 Lever 1 lets the CLI
+/// override it (`--work-rate`) to measure native-preserving decode; see
+/// [`omnimodem_dsp::modes::adsb::ADSB_NATIVE_RATE`].
+pub use omnimodem_dsp::modes::adsb::ADSB_RATE as DEFAULT_WORK_RATE;
+
+/// The 4 MHz native-preserving working rate (R5 Lever 1), re-exported for the CLI.
+pub use omnimodem_dsp::modes::adsb::ADSB_NATIVE_RATE;
+
 /// Default capture rate — the wideband rate the daemon commands the dongle to
 /// (`ADSB_CAPTURE_RATE` in the RTL-SDR front end).
 pub const DEFAULT_IN_RATE: u32 = 2_400_000;
+
+/// Everything that steers a [`decode_iq`] run. Grouped so the shared decode path,
+/// the CLI, and the CI gate all name the same knobs. `Default` is the shipping
+/// decoder: 2.4 Msps capture, 2 MHz working rate, complex front end, the R3/R4
+/// ensemble + gate, and both R5 recovery levers **off** (they are measurement-
+/// gated, promoted only once shown to move the real-capture yield).
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeOpts {
+    /// Capture (input) sample rate of the raw uint8 I/Q.
+    pub in_rate: u32,
+    /// Working rate the front end resamples to and the slicer runs at (R5 Lever 1).
+    pub work_rate: u32,
+    /// Front end that turns the capture into the working-rate magnitude envelope.
+    pub front: Front,
+    /// Sub-sample slicer phases (R3 ensemble).
+    pub phases: usize,
+    /// R4 soft-decision reject threshold (`0.0` disables the gate).
+    pub min_conf: f32,
+    /// R5 Lever 2a: single-bit CRC repair.
+    pub repair: bool,
+    /// R5 Lever 2b: ICAO-roster-gated address-overlaid recovery.
+    pub roster: bool,
+}
+
+impl Default for DecodeOpts {
+    fn default() -> Self {
+        Self {
+            in_rate: DEFAULT_IN_RATE,
+            work_rate: DEFAULT_WORK_RATE,
+            front: Front::Complex,
+            phases: DEFAULT_PHASES,
+            min_conf: DEFAULT_MIN_CONF,
+            repair: false,
+            roster: false,
+        }
+    }
+}
 
 /// How the 2.4 Msps capture becomes the 2 MHz magnitude envelope. See the
 /// `main.rs` module doc for the DSP rationale.
@@ -61,10 +106,10 @@ enum FrontEnd {
 }
 
 impl FrontEnd {
-    fn new(front: Front, in_rate: u32) -> Self {
+    fn new(front: Front, in_rate: u32, work_rate: u32) -> Self {
         match front {
-            Front::Complex => FrontEnd::Complex(ComplexResampler::new(in_rate, ADSB_RATE, 16)),
-            Front::Mag => FrontEnd::Mag(Resampler::new(in_rate, ADSB_RATE, 16)),
+            Front::Complex => FrontEnd::Complex(ComplexResampler::new(in_rate, work_rate, 16)),
+            Front::Mag => FrontEnd::Mag(Resampler::new(in_rate, work_rate, 16)),
         }
     }
 
@@ -106,6 +151,8 @@ pub struct Report {
     pub samples_in: usize,
     /// Working-rate samples produced by the resampler.
     pub samples_work: u64,
+    /// Working rate the decode ran at (echoes [`DecodeOpts::work_rate`]).
+    pub work_rate: u32,
 }
 
 impl Report {
@@ -129,27 +176,23 @@ impl Report {
 /// baseline). The resampler is stateful, so a single instance spans every
 /// window; `AdsbDemod` buffers frames straddling a window boundary. Windowing
 /// only bounds peak memory on long captures.
-pub fn decode_iq(bytes: &[u8], in_rate: u32, front: Front, phases: usize, min_conf: f32) -> Report {
-    decode_iq_with(bytes, in_rate, front, phases, min_conf, |_| {})
+pub fn decode_iq(bytes: &[u8], opts: &DecodeOpts) -> Report {
+    decode_iq_with(bytes, opts, |_| {})
 }
 
 /// Like [`decode_iq`], but invokes `on_frame` for every accepted frame before it
 /// is tallied — the hook behind the CLI's `--dump` per-frame audit trail. The
 /// decode path is otherwise identical, so the callback cannot change the counts.
-pub fn decode_iq_with(
-    bytes: &[u8],
-    in_rate: u32,
-    front: Front,
-    phases: usize,
-    min_conf: f32,
-    mut on_frame: impl FnMut(&Frame),
-) -> Report {
+pub fn decode_iq_with(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(&Frame)) -> Report {
     let iq = u8_iq_to_cplx(bytes);
-    let mut front_end = FrontEnd::new(front, in_rate);
-    let mut demod = AdsbDemod::with_phases_min_conf(phases, min_conf);
-    let mut report = Report { samples_in: iq.len(), ..Default::default() };
+    let mut front_end = FrontEnd::new(opts.front, opts.in_rate, opts.work_rate);
+    let mut demod = AdsbDemod::with_rate_phases_min_conf(opts.work_rate, opts.phases, opts.min_conf);
+    demod.set_repair(opts.repair);
+    demod.set_roster(opts.roster);
+    let mut report =
+        Report { samples_in: iq.len(), work_rate: opts.work_rate, ..Default::default() };
 
-    let window = (in_rate as usize).max(1); // ~1 s of complex samples per window
+    let window = (opts.in_rate as usize).max(1); // ~1 s of complex samples per window
     for chunk in iq.chunks(window) {
         let envelope = front_end.envelope(chunk);
         report.samples_work += envelope.len() as u64;

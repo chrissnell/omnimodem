@@ -12,11 +12,9 @@
 //! preamble correlation are scale-independent (relative comparisons), so the
 //! magnitude need not be normalized.
 
-use super::crc;
-use super::{
-    long_frame_df, ADSB_MIN_CONFIDENCE, DATA_SLOTS_PER_BIT, LONG_FRAME_BITS, PREAMBLE_HIGH_SLOTS,
-    PREAMBLE_QUIET_SLOTS, PREAMBLE_SLOTS, SHORT_FRAME_BITS,
-};
+use super::roster::{self, IcaoRoster};
+use super::{crc, long_frame_df, ADSB_MIN_CONFIDENCE, DATA_SLOTS_PER_BIT, LONG_FRAME_BITS};
+use super::{PREAMBLE_HIGH_SLOTS, PREAMBLE_QUIET_SLOTS, PREAMBLE_SLOTS, SHORT_FRAME_BITS};
 use crate::frontend::detector::EnvelopeDetector;
 
 // Noise-floor-relative preamble-detector parameters. Tuned on the KSLC 2.4 Msps
@@ -73,11 +71,27 @@ pub struct RawFrame {
     /// necessarily the highest-scoring phase — every phase's copy already cleared
     /// the gate, so it is a lower bound on the frame's best eye, not the max.
     pub confidence: f32,
+    /// ICAO address recovered by the R5 roster gate for an address-overlaid DF
+    /// (DF0/4/5/16/20/21), whose parity is XOR-folded with the address so
+    /// [`crc_residual`](Self::crc_residual) equals it. `None` for a frame that
+    /// carries its address in the clear or checksums to zero. A frame is *valid*
+    /// (see [`Self::valid`]) when it checksums clean **or** its address was
+    /// roster-confirmed here.
+    pub recovered_icao: Option<u32>,
 }
 
 impl RawFrame {
+    /// A frame whose parity checksummed to zero (a clean or single-bit-repaired
+    /// frame). Address-overlaid frames recovered by the roster gate are *valid*
+    /// but not `crc_ok` — their residual is the address, not zero.
     pub fn crc_ok(&self) -> bool {
         self.crc_residual == 0
+    }
+
+    /// A frame accepted as genuine: it checksummed clean (`crc_ok`) or an
+    /// address-overlaid frame's address was confirmed against the ICAO roster.
+    pub fn valid(&self) -> bool {
+        self.crc_ok() || self.recovered_icao.is_some()
     }
 }
 
@@ -153,6 +167,10 @@ pub struct PpmDemodulator {
     /// disables the gate — every parity-clean frame is kept. See
     /// [`ADSB_MIN_CONFIDENCE`](super::ADSB_MIN_CONFIDENCE).
     pub min_confidence: f32,
+    /// R5 single-bit CRC repair: when set, a parity-failing candidate is retried
+    /// after correcting a unique single-bit error (see [`crc::locate_single_bit_error`]).
+    /// Off by default — the confidence gate still applies to the repaired frame.
+    pub repair: bool,
 }
 
 impl PpmDemodulator {
@@ -161,7 +179,7 @@ impl PpmDemodulator {
             samples_per_us >= 2 && samples_per_us.is_multiple_of(2),
             "samples_per_us must be even and >= 2"
         );
-        Self { samples_per_us, require_crc: true, min_confidence: ADSB_MIN_CONFIDENCE }
+        Self { samples_per_us, require_crc: true, min_confidence: ADSB_MIN_CONFIDENCE, repair: false }
     }
 
     fn slot_len(&self) -> usize {
@@ -294,7 +312,7 @@ impl PpmDemodulator {
             noise.push(det.floor());
             det.push(m);
         }
-        self.scan_with_floor(mag, &noise, flush)
+        self.scan_with_floor(mag, &noise, None, flush)
     }
 
     /// Scan `mag` for frames against a caller-supplied adaptive noise floor
@@ -307,6 +325,7 @@ impl PpmDemodulator {
         &self,
         mag: &[f32],
         noise: &[f32],
+        roster: Option<&IcaoRoster>,
         flush: bool,
     ) -> (Vec<RawFrame>, usize) {
         let long_span = self.frame_samples(LONG_FRAME_BITS);
@@ -328,7 +347,7 @@ impl PpmDemodulator {
             } else {
                 SHORT_FRAME_BITS
             };
-            let bytes = if nbits == SHORT_FRAME_BITS {
+            let mut bytes = if nbits == SHORT_FRAME_BITS {
                 short_bytes
             } else {
                 self.slice_bits(mag, i, LONG_FRAME_BITS)
@@ -340,20 +359,93 @@ impl PpmDemodulator {
             // up) would otherwise slice to a spurious "valid" DF0 frame. A real
             // Mode S transmission is never all zeros; reject it.
             let degenerate = bytes.iter().all(|&b| b == 0);
-            let parity_ok = !degenerate && (!self.require_crc || residual == 0);
-            // R4 soft-decision gate: a parity-clean candidate is still rejected
-            // if its eye is too mushy to be a real transmission. This is what
-            // makes a wide slicer ensemble safe — the extra phases recover more
-            // weak frames, and the gate discards the CRC-lucky ghosts they admit.
-            let confidence = if parity_ok { self.soft_confidence(mag, i, nbits) } else { 0.0 };
-            if parity_ok && confidence >= self.min_confidence {
-                frames.push(RawFrame { bytes, df, crc_residual: residual, offset: i, confidence });
+            let Some((residual, recovered_icao)) =
+                self.classify(&mut bytes, df, residual, degenerate, roster)
+            else {
+                i += 1;
+                continue;
+            };
+            // R4 soft-decision gate: an eligible candidate — clean, single-bit
+            // repaired, or roster-confirmed — is still rejected if its eye is too
+            // mushy to be a real transmission. This is what makes a wide slicer
+            // ensemble (and R5's recovery) safe: the extra phases and the repair /
+            // roster levers recover more weak frames, and the gate discards the
+            // CRC-lucky ghosts they would otherwise admit.
+            let confidence = self.soft_confidence(mag, i, nbits);
+            if confidence >= self.min_confidence {
+                let df = bytes[0] >> 3;
+                frames.push(RawFrame {
+                    bytes,
+                    df,
+                    crc_residual: residual,
+                    offset: i,
+                    confidence,
+                    recovered_icao,
+                });
                 i += self.frame_samples(nbits);
             } else {
                 i += 1;
             }
         }
         (frames, i)
+    }
+
+    /// Decide whether a sliced candidate is eligible for acceptance, applying the
+    /// R5 recovery levers. Returns `Some((residual, recovered_icao))` for an
+    /// eligible frame — possibly with `bytes` corrected in place by a single-bit
+    /// repair — or `None` to reject it before the confidence gate.
+    ///
+    /// Eligibility, in order: a clean parity (`residual == 0`); with
+    /// [`Self::repair`], a candidate a unique single-bit flip makes clean; with a
+    /// `roster`, an address-overlaid DF whose residual (its ICAO address) is on the
+    /// roster. A degenerate all-zero slice is never eligible. When
+    /// [`Self::require_crc`] is false the parity check is skipped entirely and
+    /// every non-degenerate candidate is eligible, so the recovery levers only
+    /// widen acceptance in the parity-gated (production) path.
+    ///
+    /// `df` is the downlink format the caller read *before* any repair — it fixed
+    /// the frame length (`nbits`) already sliced. A single-bit repair may land in
+    /// the DF field; a flip that changes the short/long class would leave the
+    /// repaired frame inconsistent with the samples sliced for it, so such a repair
+    /// is rejected rather than trusted (it is far more likely a mis-slice than a
+    /// real frame). A flip within the same length class is fine.
+    fn classify(
+        &self,
+        bytes: &mut [u8],
+        df: u8,
+        residual: u32,
+        degenerate: bool,
+        roster: Option<&IcaoRoster>,
+    ) -> Option<(u32, Option<u32>)> {
+        if degenerate {
+            return None;
+        }
+        if !self.require_crc {
+            return Some((residual, None));
+        }
+        if residual == 0 {
+            return Some((0, None));
+        }
+        if self.repair {
+            if let Some(p) = crc::locate_single_bit_error(residual, bytes.len() * 8) {
+                // The DF is byte 0 bits 0..4, so a flip there (p < 5) can change
+                // the format. Compute the repaired DF without mutating, and only
+                // apply the flip when it keeps the same short/long length class the
+                // slice was cut for — otherwise leave `bytes` pristine for the
+                // roster branch and reject.
+                let repaired_df = if p < 5 { (bytes[0] ^ (1 << (7 - p))) >> 3 } else { df };
+                if long_frame_df(repaired_df) == long_frame_df(df) {
+                    bytes[p / 8] ^= 1 << (7 - (p % 8));
+                    return Some((0, None));
+                }
+            }
+        }
+        if let Some(roster) = roster {
+            if roster::is_address_overlaid(df) && roster.contains(residual) {
+                return Some((residual, Some(residual)));
+            }
+        }
+        None
     }
 }
 
@@ -396,6 +488,11 @@ impl ParallelDemodulator {
         self.demod.min_confidence = min_confidence;
     }
 
+    /// Enable or disable R5 single-bit CRC repair on every phase (off by default).
+    pub fn set_repair(&mut self, repair: bool) {
+        self.demod.repair = repair;
+    }
+
     /// Interpolate `mag` to a `frac`-sample fractional offset into `self.shifted`.
     /// The last sample has no successor to interpolate against and is copied; it
     /// falls in the unscanned tail (`scan_with_floor` stops a frame short), so it
@@ -425,13 +522,14 @@ impl ParallelDemodulator {
         &mut self,
         mag: &[f32],
         noise: &[f32],
+        roster: Option<&IcaoRoster>,
         flush: bool,
     ) -> (Vec<RawFrame>, usize) {
-        let (mut frames, mut consumed) = self.demod.scan_with_floor(mag, noise, flush);
+        let (mut frames, mut consumed) = self.demod.scan_with_floor(mag, noise, roster, flush);
         for k in 1..self.phases {
             let frac = k as f32 / self.phases as f32;
             self.interpolate(mag, frac);
-            let (more, ph_consumed) = self.demod.scan_with_floor(&self.shifted, noise, flush);
+            let (more, ph_consumed) = self.demod.scan_with_floor(&self.shifted, noise, roster, flush);
             consumed = consumed.min(ph_consumed);
             frames.extend(more);
         }
@@ -450,7 +548,7 @@ impl ParallelDemodulator {
             noise.push(det.floor());
             det.push(m);
         }
-        self.scan_with_floor(mag, &noise, flush)
+        self.scan_with_floor(mag, &noise, None, flush)
     }
 }
 

@@ -61,3 +61,114 @@ pub fn append_parity(frame: &mut [u8]) {
     frame[n - 2] = (p >> 8) as u8;
     frame[n - 1] = p as u8;
 }
+
+/// Locate a single-bit error in an `nbits`-bit frame from its CRC residual.
+///
+/// The Mode S CRC is linear over GF(2): flipping bit `p` of a frame XORs a fixed
+/// *syndrome* `checksum(e_p)` into the residual, where `e_p` is the frame that is
+/// all zeros but for bit `p`. A correctly received extended-squitter frame
+/// checksums to zero, so a frame corrupted in exactly one bit has a residual
+/// equal to that bit's syndrome. Invert that map: given a nonzero `residual`,
+/// return the bit position whose syndrome matches, or `None` when no single flip
+/// explains it (a clean frame, or two-or-more-bit damage — never guessed at).
+///
+/// This is the syndrome-locate discipline dump1090's default `--fix` uses: repair
+/// only what a *unique* single-bit flip accounts for. Two-bit search (which
+/// dump1090's `--fix-2bit` does and its default abandons) is deliberately not
+/// implemented — it fabricates frames, the false positives R5 is built to avoid.
+pub fn locate_single_bit_error(residual: u32, nbits: usize) -> Option<usize> {
+    if residual == 0 {
+        return None;
+    }
+    // Bit p from the frame start (0 = MSB of byte 0) has syndrome `checksum(e_p)`.
+    // e_p is the message x^(nbits-1-p), so its checksum is the CRC of x^(nbits-1-p)
+    // — computed directly rather than tabled, since repair is a cold path (only
+    // parity-failing candidates) and nbits <= 112 keeps the scan trivially cheap.
+    (0..nbits).find(|&p| single_bit_syndrome(p, nbits) == residual)
+}
+
+/// CRC syndrome of the `nbits`-bit frame that is all zeros except bit `p`.
+fn single_bit_syndrome(p: usize, nbits: usize) -> u32 {
+    let mut buf = vec![0u8; nbits / 8];
+    buf[p / 8] |= 1 << (7 - (p % 8));
+    checksum(&buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A clean 14-byte frame (DF17, ICAO 4840D6, "KLM1023"), checksum 0.
+    fn clean_frame() -> Vec<u8> {
+        vec![
+            0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0, 0x57, 0x60, 0x98,
+        ]
+    }
+
+    /// Locate then apply a single-bit repair — the flip the demod's `classify`
+    /// performs (subject to its DF-class guard). Returns whether one was found.
+    fn repair(frame: &mut [u8]) -> bool {
+        match locate_single_bit_error(checksum(frame), frame.len() * 8) {
+            Some(p) => {
+                frame[p / 8] ^= 1 << (7 - (p % 8));
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[test]
+    fn repairs_every_single_bit_flip() {
+        let clean = clean_frame();
+        for p in 0..clean.len() * 8 {
+            let mut f = clean.clone();
+            f[p / 8] ^= 1 << (7 - (p % 8));
+            assert_ne!(checksum(&f), 0, "bit {p} flip should break parity");
+            assert!(repair(&mut f), "bit {p} should be repairable");
+            assert_eq!(checksum(&f), 0, "bit {p} repaired frame must checksum clean");
+            assert_eq!(f, clean, "bit {p} repair must restore the original frame");
+        }
+    }
+
+    #[test]
+    fn locates_matching_bit_position() {
+        let clean = clean_frame();
+        let nbits = clean.len() * 8;
+        for p in [0usize, 7, 40, 111] {
+            let mut f = clean.clone();
+            f[p / 8] ^= 1 << (7 - (p % 8));
+            assert_eq!(locate_single_bit_error(checksum(&f), nbits), Some(p));
+        }
+    }
+
+    #[test]
+    fn declines_clean_and_double_bit_frames() {
+        let clean = clean_frame();
+        let nbits = clean.len() * 8;
+        // A clean frame has nothing to locate.
+        assert_eq!(locate_single_bit_error(checksum(&clean), nbits), None);
+        // A two-bit error has no single-flip explanation, so repair declines
+        // rather than guessing (the false-positive discipline R5 preserves).
+        let mut two = clean.clone();
+        two[0] ^= 0x01;
+        two[9] ^= 0x40;
+        assert_ne!(checksum(&two), 0);
+        let before = two.clone();
+        assert!(!repair(&mut two));
+        assert_eq!(two, before, "declined repair must not mutate the frame");
+    }
+
+    #[test]
+    fn repairs_short_frames_too() {
+        let mut f = [0u8; 7];
+        f[0] = (11 << 3) | 0x05;
+        f[1] = 0x3C;
+        f[2] = 0x64;
+        f[3] = 0x44;
+        append_parity(&mut f);
+        let clean = f;
+        f[4] ^= 0x08;
+        assert!(repair(&mut f));
+        assert_eq!(f, clean);
+    }
+}
