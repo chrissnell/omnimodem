@@ -24,15 +24,22 @@ const aircraftTTL = 60 * time.Second
 // CPR pair; velocity and altitude their own frames), so fields are merged — a
 // report that omits a value never clears one already decoded.
 type aircraftLive struct {
-	channel   uint32
-	icao      uint32
-	flight    string
-	lat, lon  float64
-	hasPos    bool
-	altFt     int32
-	hasAlt    bool
-	gsKt      float64
-	hasGS     bool
+	channel  uint32
+	icao     uint32
+	flight   string
+	lat, lon float64
+	hasPos   bool
+	altFt    int32
+	hasAlt   bool
+	gsKt     float64
+	hasGS    bool
+	vrFpm    int32 // barometric vertical rate, feet/min (+ climb, - descent)
+	hasVR    bool
+	// reports counts the AircraftReport events folded for this ICAO. A genuine
+	// aircraft squitters repeatedly (many reports); a mis-decoded frame mints a
+	// one-off random ICAO that is never heard again, so a contact still at a
+	// handful of reports is treated as low-confidence (see confidentAfterReports).
+	reports   int
 	lastHeard time.Time
 }
 
@@ -61,6 +68,10 @@ func (m *Model) applyAircraft(r *pb.AircraftReport, now time.Time) {
 	if r.GroundSpeedKt != nil {
 		a.gsKt, a.hasGS = r.GetGroundSpeedKt(), true
 	}
+	if r.VertRateFpm != nil {
+		a.vrFpm, a.hasVR = r.GetVertRateFpm(), true
+	}
+	a.reports++
 	a.lastHeard = now
 	// Pruning is the tick's job (Model.Update), not the fold's — no need to sweep
 	// the whole map on every report.

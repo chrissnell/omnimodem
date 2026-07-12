@@ -24,16 +24,24 @@ type Column struct {
 // which is deliberate: lipgloss/table drops the right border when an explicit
 // Width is combined with BorderColumn(false).
 func Table(cols []Column, rows [][]string, selected int) string {
-	return renderTable(cols, rows, selected, true)
+	return renderTable(cols, rows, selected, true, nil)
 }
 
 // TableInset renders the same table with no outer frame (only the header rule),
 // for dropping inside a Card or other container that already supplies the box.
 func TableInset(cols []Column, rows [][]string, selected int) string {
-	return renderTable(cols, rows, selected, false)
+	return renderTable(cols, rows, selected, false, nil)
 }
 
-func renderTable(cols []Column, rows [][]string, selected int, bordered bool) string {
+// TableInsetFlagged is TableInset with per-row emphasis: every data row `i` for
+// which `flagged[i]` is true renders in the error/warning colour. The ADS-B
+// flights view uses it to mark low-confidence contacts (heard too few times to
+// trust) red. `flagged` may be shorter than `rows` (missing entries are false).
+func TableInsetFlagged(cols []Column, rows [][]string, selected int, flagged []bool) string {
+	return renderTable(cols, rows, selected, false, flagged)
+}
+
+func renderTable(cols []Column, rows [][]string, selected int, bordered bool, flagged []bool) string {
 	headers := make([]string, len(cols))
 	for i, c := range cols {
 		headers[i] = c.Title
@@ -75,6 +83,8 @@ func renderTable(cols []Column, rows [][]string, selected int, bordered bool) st
 				return colStyle(col).Foreground(ColorTitle).Bold(true)
 			case row == selected:
 				return colStyle(col).Foreground(ColorFg).Background(ColorSel).Bold(true)
+			case row >= 0 && row < len(flagged) && flagged[row]:
+				return colStyle(col).Foreground(ColorError)
 			default:
 				return colStyle(col)
 			}
