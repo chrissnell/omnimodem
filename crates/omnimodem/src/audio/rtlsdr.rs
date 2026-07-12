@@ -308,8 +308,9 @@ impl RtlCmd {
 // ---------------------------------------------------------------------------
 
 /// Full-rate ADS-B capture rate (2.4 Msps): the dongle rate the [`DemodMode::RawMag`]
-/// path streams so the RX worker can resample it to the `adsb` demod's 2 MHz native
-/// rate. 2.4M is a rate every R820-class dongle accepts (see [`supported_sample_rates`]).
+/// path streams. The R6 native demod (`Demod2400`) runs at this rate directly, so the
+/// RX worker feeds it the magnitude with no resample. 2.4M is a rate every R820-class
+/// dongle accepts (see [`supported_sample_rates`]).
 pub const ADSB_CAPTURE_RATE: u32 = 2_400_000;
 
 /// ADS-B downlink frequency (1090.0 MHz). Unlike the audio SDR modes, ADS-B is

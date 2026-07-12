@@ -5,7 +5,7 @@
 use super::{ModeConfig, NullMode};
 use omnimodem_dsp::mode::{BlockDemodulator, DemodShape, Demodulator, Modulator};
 use omnimodem_dsp::modes::{
-    adsb::{AdsbDemod, AdsbMod},
+    adsb::{AdsbMod, Demod2400},
     afsk1200::{Afsk1200Demod, Afsk1200Mod},
     contestia::{ContestiaDemod, ContestiaMod},
     cw::{CwDemod, CwMod},
@@ -142,9 +142,13 @@ pub fn demod_kind(cfg: &ModeConfig) -> DemodKind {
             DemodKind::Streaming(Box::new(OliviaDemod::new(*tones, *bandwidth_hz)))
         }
         // ADS-B streams magnitude, not audio: the daemon binds it to the rtl_tcp
-        // `RawMag` capture, which delivers full-rate |I+jQ| the resampler drops to
-        // the demod's 2 MHz native rate.
-        ModeConfig::Adsb => DemodKind::Streaming(Box::new(AdsbDemod::new())),
+        // `RawMag` capture, which delivers full-rate |I+jQ|. The R6 native core
+        // ([`Demod2400`]) demodulates at the 2.4 Msps capture rate directly — no
+        // resample — with a matched-filter correlating slicer, so the RX worker
+        // feeds it the capture-rate envelope untouched (its `caps().native_rate`
+        // is the capture rate). This is ~8× cheaper than the R1–R5 resample-then-
+        // 12-phase-ensemble path *and* higher-yield (readsb/dump1090-fa's model).
+        ModeConfig::Adsb => DemodKind::Streaming(Box::new(Demod2400::new())),
     }
 }
 
@@ -490,13 +494,13 @@ mod tests {
     }
 
     #[test]
-    fn adsb_is_streaming_at_2mhz_with_a_loopback_modulator() {
+    fn adsb_is_streaming_at_native_capture_rate_with_a_loopback_modulator() {
         let cfg = ModeConfig::Adsb;
         assert!(matches!(demod_kind(&cfg), DemodKind::Streaming(_)), "adsb not streaming");
         assert!(build_modulator(&cfg).is_some(), "no loopback modulator for adsb");
-        // The demod's native rate is dump1090's 2 MHz magnitude convention; the
-        // daemon resamples the wideband capture down to it.
-        assert_eq!(native_rate(&cfg), Some(2_000_000));
+        // R6: the native core (`Demod2400`) demodulates at the 2.4 Msps capture
+        // rate directly, so the RX worker feeds it the magnitude with no resample.
+        assert_eq!(native_rate(&cfg), Some(2_400_000));
         // Streaming, so it transmits without a time slot.
         assert_eq!(tx_slot_s(&cfg), None);
     }
