@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -77,6 +78,10 @@ type Model struct {
 	// just saved. Keyed by channel; only trusted when the cached label matches the
 	// channel's current mode.
 	modeParams map[uint32]savedModeParams
+	// aircraft holds live ADS-B contacts folded from AircraftReport events,
+	// keyed by 24-bit ICAO address. The flights view reads it per channel; the
+	// tick clock ages stale contacts out. See aircraft.go.
+	aircraft map[uint32]*aircraftLive
 }
 
 // savedModeParams is the last-persisted settings for one channel's mode.
@@ -92,6 +97,7 @@ func New(c client.ModemClient, addr string) *Model {
 		myCall: id.Call, myGrid: id.Grid,
 		savedCall: id.Call, savedGrid: id.Grid,
 		modeParams: map[uint32]savedModeParams{},
+		aircraft:   map[uint32]*aircraftLive{},
 	}
 }
 
@@ -168,6 +174,8 @@ func (m *Model) applyEvent(ev *pb.Event) {
 		cl.sdrGainDb = s.GetGainDb()
 		cl.sdrDemod = s.GetDemodMode()
 		cl.sdrSquelchDb = s.GetSquelchDb()
+	case *pb.Event_AircraftReport:
+		m.applyAircraft(k.AircraftReport, time.Now())
 	}
 }
 
@@ -212,6 +220,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.toast != nil && m.toast.Expired() {
 			m.toast = nil
 		}
+		m.pruneAircraft(time.Now())
 		_, cmd := m.routeToView(msg)
 		return m, tea.Batch(cmd, tickCmd())
 	}
