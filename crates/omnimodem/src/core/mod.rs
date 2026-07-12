@@ -895,9 +895,16 @@ fn try_spawn_workers(
                         channel = channel.0, mode = mode.label(),
                         device = %rig.to_canonical_string(), "RX started (streaming)",
                     );
+                    // ADS-B folds decoded packets into aircraft state and emits
+                    // `AircraftReport` telemetry (the TUI flights table); other modes
+                    // don't. One reporter lives for the channel's RX lifetime.
+                    let reporter = matches!(mode, crate::mode::ModeConfig::Adsb).then(|| {
+                        crate::core::adsb::AdsbReporter::new(channel, crate::core::adsb::DEFAULT_TTL_MS)
+                    });
                     let w = RxWorker::spawn_streaming(
                         channel, rig, capture, demod, interlock.clone(), frames.clone(),
                         telemetry.clone(), metrics, gain.clone(), spectrum.clone(), rsid_rx,
+                        reporter,
                     );
                     live.rx_workers.insert(channel, w);
                 }
