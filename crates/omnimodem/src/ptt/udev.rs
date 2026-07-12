@@ -25,10 +25,13 @@ pub fn suggest(id: &DeviceId) -> Option<(String, String)> {
             format!("KERNELS==\"{bus}-{ports}\""),
             format!("topo-{bus}-{ports}"),
         ),
-        // A network SDR endpoint has no local device node to pin.
-        DeviceId::AlsaCard { .. } | DeviceId::RtlTcp { .. } | DeviceId::Placeholder { .. } => {
-            return None
-        }
+        // Neither a sound card, a remote SDR endpoint, an RX-only RTL dongle,
+        // nor a virtual backend has a tty node this PTT rule can pin. (Native
+        // RTL-SDR udev setup is handled separately.)
+        DeviceId::AlsaCard { .. }
+        | DeviceId::RtlTcp { .. }
+        | DeviceId::Rtl { .. }
+        | DeviceId::Placeholder { .. } => return None,
     };
     let rule = format!(
         "SUBSYSTEM==\"tty\", {matchers}, SYMLINK+=\"omnimodem/{label}\"\n"
