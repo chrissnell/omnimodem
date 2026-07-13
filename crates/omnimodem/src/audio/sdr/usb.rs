@@ -402,12 +402,11 @@ fn apply_tuner_ops(
     Ok(())
 }
 
-/// A locally-attached RTL-SDR dongle, opened and claimed for exclusive use.
-///
-/// P2-A establishes the USB seam only: identity match, claim (with Linux
-/// kernel-driver detach), and the register primitives. Baseband init, tuner
-/// probe/tune, streaming, and the [`SdrTransport`](super::SdrTransport) impl arrive
-/// in the following phases.
+/// A locally-attached RTL-SDR dongle, opened, claimed, and brought up for exclusive
+/// use. [`open`](Self::open) claims interface 0 (detaching the Linux kernel driver)
+/// and runs the full bring-up (baseband init, tuner probe/init), so a returned
+/// transport can be tuned and its [`caps`](Self::caps) read immediately. Bulk IQ
+/// streaming and the [`SdrTransport`](super::SdrTransport) impl arrive in P2-E.
 pub struct RtlUsbTransport {
     usb: NusbControl,
     /// The claimed interface number, kept for endpoint addressing in P2-E streaming.
@@ -425,11 +424,16 @@ pub struct RtlUsbTransport {
 }
 
 impl RtlUsbTransport {
-    /// List USB devices, match `key` to a present RTL dongle, open it, and claim
-    /// interface 0. On Linux the kernel DVB driver (`dvb_usb_rtl28xxu`) is detached
-    /// as part of the claim; macOS/Windows claim directly. A claim that fails
-    /// (driver still bound, no permission) maps to [`AudioError::UsbClaim`], which a
-    /// later phase classifies into `needs_setup`.
+    /// List USB devices, match `key` to a present RTL dongle, open it, claim
+    /// interface 0, and bring the device up (baseband + tuner probe/init). On Linux the
+    /// kernel DVB driver (`dvb_usb_rtl28xxu`) is detached as part of the claim;
+    /// macOS/Windows claim directly. A claim that fails (driver still bound, no
+    /// permission) maps to [`AudioError::UsbClaim`], which a later phase classifies into
+    /// `needs_setup`; a device with an unsupported tuner fails at bring-up.
+    ///
+    /// Bring-up runs here (not lazily) so a returned transport is fully initialized and
+    /// its [`caps`](Self::caps) are available immediately — matching `RtlTcpTransport`,
+    /// which handshakes and publishes caps in its constructor.
     pub fn open(key: &RtlKey) -> Result<Self, AudioError> {
         let id = DeviceId::Rtl { key: key.clone() }.to_canonical_string();
 
@@ -443,13 +447,15 @@ impl RtlUsbTransport {
             .map_err(|e| AudioError::UsbClaim(id.clone(), format!("open device: {e}")))?;
         let iface = claim_interface(&dev, RTL_INTERFACE, &id)?;
 
-        Ok(Self {
+        let mut transport = Self {
             usb: NusbControl { iface },
             iface: RTL_INTERFACE,
             tuner: None,
             tuner_shadow: [0u8; usb_regs::NUM_REGS],
             last_rate: None,
-        })
+        };
+        transport.bring_up()?;
+        Ok(transport)
     }
 
     /// Write an RTL2832U register (see [`write_reg`]).
@@ -614,11 +620,10 @@ impl RtlUsbTransport {
     }
 
     /// One-time device bring-up: RTL2832U baseband init, tuner probe, and R82xx tuner
-    /// init. Idempotent once the tuner is known, so [`apply_hardware`](Self::apply_hardware)
-    /// can call it on every invocation and pay the cost only on the first. Runs lazily
-    /// (rather than in [`open`](Self::open)) so the seam stays free of hardware state
-    /// until the pipeline first commands the dongle.
-    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    /// init. Run by [`open`](Self::open) so a fresh transport is fully initialized;
+    /// idempotent once the tuner is known, so [`apply_hardware`](Self::apply_hardware)
+    /// can guard on it defensively and pay the cost only on a not-yet-brought-up
+    /// transport.
     fn bring_up(&mut self) -> Result<(), AudioError> {
         if self.tuner.is_some() {
             return Ok(());
@@ -656,12 +661,12 @@ impl RtlUsbTransport {
     }
 
     /// The capabilities of the probed tuner, derived from the same per-tuner tables the
-    /// `rtl_tcp` path publishes so `GetSdrCaps` answers identically. Requires
-    /// [`bring_up`](Self::bring_up) (via [`apply_hardware`](Self::apply_hardware)) to
-    /// have probed the tuner first.
+    /// `rtl_tcp` path publishes so `GetSdrCaps` answers identically. The tuner is always
+    /// probed by [`open`](Self::open), so this is infallible on any transport a caller
+    /// can hold.
     #[allow(dead_code)] // Wired into the SdrTransport impl in P2-E.
     pub(crate) fn caps(&self) -> TunerCaps {
-        caps_for_tuner(self.tuner.expect("tuner probed by bring_up before caps()"))
+        caps_for_tuner(self.tuner.expect("tuner probed by open()"))
     }
 }
 
