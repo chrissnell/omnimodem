@@ -127,6 +127,11 @@ fn fir_registers() -> [u8; 20] {
 /// `rtlsdr_set_sample_rate`: reject `<= 225 kHz`, `> 3.2 MHz`, and the
 /// `(300 kHz, 900 kHz]` gap, then compute `(rtl_xtal * 2^22) / samp_rate` in
 /// floating point and mask to the ratio's valid bits.
+///
+/// The upper-gap bound is `<= 900_000`, matching `librtlsdr/librtlsdr` master
+/// (this project's reference). The older `osmocom/rtl-sdr` fork uses `< 900_000`,
+/// i.e. it accepts exactly 900 kHz; that lone value is the only behavioral
+/// difference between the two, kept here on the librtlsdr side deliberately.
 pub(crate) fn resamp_ratio(samp_rate: u32) -> Result<u32, AudioError> {
     if samp_rate <= 225_000
         || samp_rate > 3_200_000
@@ -266,6 +271,8 @@ mod tests {
 
     #[test]
     fn resamp_ratio_rejects_out_of_window_rates() {
+        // 900_000 is rejected per librtlsdr/librtlsdr master (`<= 900000`); the
+        // osmocom fork would accept it. See resamp_ratio's doc comment.
         for bad in [200_000, 300_001, 900_000, 3_200_001] {
             assert!(matches!(
                 resamp_ratio(bad),
