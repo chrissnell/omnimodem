@@ -756,7 +756,7 @@ fn configure_audio(
     // the capture thread can honor runtime tune/gain/squelch and emit the RF
     // waterfall. The control persists across rebinds (settings survive a mode
     // switch); a departing device clears it in poll_hotplug.
-    if matches!(device_id, DeviceId::RtlTcp { .. }) {
+    if device_id.is_sdr() {
         let control = live.sdr_controls.entry(id).or_default().clone();
         // Couple the channel mode to the SDR front-end before opening the capture,
         // so the capture thread sends the right demod mode + tune on connect.
@@ -873,7 +873,7 @@ fn try_spawn_workers(
     // SDR channel the RF waterfall is produced by the capture thread, so hand the
     // RX worker a throwaway control that can never enable its audio-passband tap —
     // keeping exactly one spectrum producer per channel.
-    let is_sdr = matches!(rig, Some(DeviceId::RtlTcp { .. }));
+    let is_sdr = rig.as_ref().is_some_and(DeviceId::is_sdr);
     let spectrum = if is_sdr {
         spectrum::SpectrumControl::default()
     } else {

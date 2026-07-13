@@ -1,6 +1,8 @@
 package app
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/client"
 	pb "github.com/chrissnell/omnimodem/clients/omnimodem-tui/internal/pb"
@@ -70,12 +72,12 @@ func getSdrCapsCmd(c client.ModemClient, ch uint32) tea.Cmd {
 	}
 }
 
-// isSDRDevice reports whether a channel's bound capture device is an rtl_tcp SDR
-// endpoint, whose canonical id is "rtltcp:<host>:<port>" (see crates/omnimodem
-// ids.rs). SDR channels route to the tuning view instead of the operate view.
+// isSDRDevice reports whether a channel's bound capture device is an RTL-SDR
+// front-end — a remote rtl_tcp endpoint ("rtltcp:<host>:<port>") or a local USB
+// dongle ("rtl:serial:..." / "rtl:topo:...") (see crates/omnimodem ids.rs). SDR
+// channels route to the tuning view instead of the operate view.
 func isSDRDevice(id string) bool {
-	const prefix = "rtltcp:"
-	return len(id) >= len(prefix) && id[:len(prefix)] == prefix
+	return strings.HasPrefix(id, "rtltcp:") || strings.HasPrefix(id, "rtl:")
 }
 
 // sdrSteps are the tuning step sizes (Hz) the operator cycles with `s`: 1 k, 5 k,
