@@ -66,6 +66,14 @@ impl DeviceId {
         DeviceId::Placeholder { tag: "virtual:0".to_string() }
     }
 
+    /// Whether this device is an RTL-SDR front-end — either a remote `rtl_tcp`
+    /// endpoint or a natively-attached local dongle. Both drive the runtime SDR
+    /// control path (tune/gain/squelch) and produce the RF waterfall, so callers
+    /// that gate SDR behavior must accept both variants.
+    pub fn is_sdr(&self) -> bool {
+        matches!(self, DeviceId::RtlTcp { .. } | DeviceId::Rtl { .. })
+    }
+
     /// Canonical, round-trippable string form used as the persistence key and
     /// the gRPC `device_id` field. Format: `<scheme>:<body>`.
     pub fn to_canonical_string(&self) -> String {
@@ -165,6 +173,15 @@ mod device_id_tests {
 
         // A serial may itself contain ':' and still round-trips.
         roundtrip(DeviceId::Rtl { key: RtlKey::Serial("a:b:c".into()) });
+    }
+
+    #[test]
+    fn is_sdr_covers_both_rtl_forms() {
+        assert!(DeviceId::RtlTcp { host: "h".into(), port: 1 }.is_sdr());
+        assert!(DeviceId::Rtl { key: RtlKey::Serial("s".into()) }.is_sdr());
+        assert!(DeviceId::Rtl { key: RtlKey::Topo { bus: 1, ports: "4".into() } }.is_sdr());
+        assert!(!DeviceId::AlsaCard { card_name: "x".into() }.is_sdr());
+        assert!(!DeviceId::placeholder().is_sdr());
     }
 
     #[test]
