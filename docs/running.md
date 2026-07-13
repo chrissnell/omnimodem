@@ -95,6 +95,10 @@ Each OS needs a one-time permission or driver step; when it hasn't been done the
 device still appears in `ListDevices` with **`needs_setup`** set, so the TUI can
 tell you *what* to fix instead of the dongle silently failing to open.
 
+For the full operator guide — auto/manual/remote selection, tuning, demod modes,
+gain, and the plug-in→decode-APRS bring-up checklist — see
+[`sdr-rtl-usb.md`](sdr-rtl-usb.md). The per-OS setup commands are below.
+
 ### Linux — udev rule + DVB driver blacklist
 
 Two independent things can keep the daemon from opening the dongle:
