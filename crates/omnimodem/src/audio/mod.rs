@@ -58,4 +58,13 @@ pub enum AudioError {
     /// window (librtlsdr rejects it before touching the hardware).
     #[error("unsupported RTL sample rate: {0} Hz")]
     UnsupportedSampleRate(u32),
+    /// The dongle's tuner is not an R820T/R828D. omnimodem's native USB path only
+    /// drives the R82xx family (the tuner in essentially every consumer RTL-SDR);
+    /// the i2c probe rejects everything else.
+    #[error("unsupported RTL tuner (only R820T/R828D are driven natively)")]
+    UnsupportedTuner,
+    /// A requested tuner LO frequency has no valid R82xx PLL solution (outside the
+    /// VCO's reachable range).
+    #[error("frequency {0} Hz is outside the R82xx tuning range")]
+    TunerFreqRange(u32),
 }
