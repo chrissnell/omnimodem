@@ -99,7 +99,7 @@ pub trait AudioBackend: Send {
         &mut self,
         _channel: crate::ids::ChannelId,
         _telemetry: tokio::sync::broadcast::Sender<crate::core::event::TelemetryEvent>,
-        _control: super::rtlsdr::SdrControl,
+        _control: super::sdr::SdrControl,
     ) {
     }
 }

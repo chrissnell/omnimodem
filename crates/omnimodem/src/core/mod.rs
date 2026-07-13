@@ -20,7 +20,7 @@ pub mod tx_worker;
 pub(crate) use gain::AudioGain;
 
 use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
-use crate::audio::rtlsdr::{
+use crate::audio::sdr::{
     plan_tune, snap_gain, supported_sample_rates, DemodMode, SdrControl, ADSB_CAPTURE_RATE,
     ADSB_FREQ_HZ, DIRECT_SAMPLING_MAX_HZ, DIRECT_SAMPLING_Q_BRANCH,
 };
@@ -646,7 +646,7 @@ fn configure_sdr(
 /// capture has not yet parsed the header reports an empty/unknown tuner.
 fn get_sdr_caps(live: &LiveBindings, channel: ChannelId) -> Result<SdrCapsOk, CoreError> {
     let control = sdr_control(live, channel)?;
-    let caps = control.caps().unwrap_or_else(|| crate::audio::rtlsdr::TunerCaps {
+    let caps = control.caps().unwrap_or_else(|| crate::audio::sdr::TunerCaps {
         tuner: "unknown".into(),
         freq_min_hz: 0.0,
         freq_max_hz: 0.0,
@@ -1705,7 +1705,7 @@ mod tests {
     fn configure_sdr_applies_bias_tee_and_direct_sampling_and_widens_caps() {
         // Phase C: bias-tee and direct-sampling flow through to the shared control,
         // and direct-sampling widens the reported tunable range down to HF.
-        use crate::audio::rtlsdr::{caps_from_header, RtlHeader};
+        use crate::audio::sdr::{caps_from_header, RtlHeader};
         let mut live = LiveBindings::default();
         let ctrl = SdrControl::default();
         ctrl.set_caps(caps_from_header(&RtlHeader { tuner_type: 5, tuner_gain_count: 29 }));
@@ -1740,7 +1740,7 @@ mod tests {
 
     #[test]
     fn couple_sdr_mode_to_channel_tunes_adsb_to_1090_clear_of_dc_spike() {
-        use crate::audio::rtlsdr::{DemodMode, ADSB_FREQ_HZ};
+        use crate::audio::sdr::{DemodMode, ADSB_FREQ_HZ};
         use crate::mode::ModeConfig;
         // Regression: an ADS-B bind used to only select RawMag and leave the
         // frequency at its 0 Hz default, so the daemon told rtl_tcp `set freq 0`
@@ -1762,7 +1762,7 @@ mod tests {
 
     #[test]
     fn couple_sdr_mode_to_channel_resets_raw_mag_when_leaving_adsb() {
-        use crate::audio::rtlsdr::DemodMode;
+        use crate::audio::sdr::DemodMode;
         use crate::mode::ModeConfig;
         let ctrl = SdrControl::default();
         couple_sdr_mode_to_channel(&ctrl, &ModeConfig::Adsb);
