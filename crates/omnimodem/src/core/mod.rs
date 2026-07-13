@@ -737,6 +737,7 @@ fn configure_audio(
                 label: format!("rtl_tcp {host}:{port}"),
                 has_capture: true,
                 has_playback: false,
+                needs_setup: false,
             });
         }
         sup.device_cache_mut()
@@ -1364,6 +1365,7 @@ mod tests {
             label: "BlackHole 2ch".into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         };
         let bh_id = bh.id.clone();
         let (core, join) = spawn_core(
@@ -1406,6 +1408,7 @@ mod tests {
             label: "BlackHole 2ch".into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         };
         let bh_id = bh.id.clone();
         let (core, join) = spawn_core(
@@ -1485,6 +1488,7 @@ mod tests {
             label: "loop".into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         };
         let dev_id = dev.id.clone();
         let (core, join) = spawn_core(
@@ -1619,6 +1623,7 @@ mod tests {
             label: "loop".into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         }
     }
 
@@ -1628,6 +1633,7 @@ mod tests {
             label: name.into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         }
     }
 
@@ -1782,6 +1788,7 @@ mod tests {
             label: "Rooftop".into(),
             has_capture: true,
             has_playback: false,
+            needs_setup: false,
         };
         let store = Store::open_in_memory().unwrap();
         let sup = Supervisor::new(store, Box::new(RealOpener)).unwrap();

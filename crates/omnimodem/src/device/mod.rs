@@ -28,8 +28,11 @@ impl DeviceEnumerator for RealEnumerator {
                 label: id.to_canonical_string(),
                 has_capture: backend.has_capture(),
                 has_playback: backend.has_playback(),
+                needs_setup: false,
             });
         }
+        // Append locally-attached RTL-SDR dongles discovered over USB.
+        out.extend(enumerate::scan_rtl(&enumerate::NusbLister));
         out
     }
 }
