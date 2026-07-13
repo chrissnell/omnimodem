@@ -126,6 +126,7 @@ pub(crate) fn write_reg(
     val: u16,
     len: u8,
 ) -> Result<(), AudioError> {
+    debug_assert!(len == 1 || len == 2, "register width must be 1 or 2 bytes, got {len}");
     let mut data = [0u8; 2];
     if len == 1 {
         data[0] = (val & 0xff) as u8;
@@ -153,6 +154,7 @@ pub(crate) fn read_reg(
     addr: u16,
     len: u8,
 ) -> Result<u16, AudioError> {
+    debug_assert!(len == 1 || len == 2, "register width must be 1 or 2 bytes, got {len}");
     let mut data = [0u8; 2];
     let setup = Setup {
         request_type: CTRL_IN,
@@ -160,7 +162,13 @@ pub(crate) fn read_reg(
         value: addr,
         index: (block as u16) << 8,
     };
-    usb.control_in(setup, &mut data[..len as usize])?;
+    let n = usb.control_in(setup, &mut data[..len as usize])?;
+    if n != len as usize {
+        return Err(AudioError::Usb(format!(
+            "short register read at {:#06x}: got {n} of {len} bytes",
+            addr
+        )));
+    }
     Ok(((data[1] as u16) << 8) | data[0] as u16)
 }
 
@@ -181,8 +189,8 @@ impl RtlUsbTransport {
     /// List USB devices, match `key` to a present RTL dongle, open it, and claim
     /// interface 0. On Linux the kernel DVB driver (`dvb_usb_rtl28xxu`) is detached
     /// as part of the claim; macOS/Windows claim directly. A claim that fails
-    /// (driver still bound, no permission) maps to [`AudioError::UsbClaim`] so the
-    /// caller can surface `needs_setup`.
+    /// (driver still bound, no permission) maps to [`AudioError::UsbClaim`], which a
+    /// later phase classifies into `needs_setup`.
     pub fn open(key: &RtlKey) -> Result<Self, AudioError> {
         let id = DeviceId::Rtl { key: key.clone() }.to_canonical_string();
 
@@ -397,6 +405,22 @@ mod tests {
             }
         );
         assert_eq!(val, 0xabcd); // (data[1] << 8) | data[0]
+    }
+
+    #[test]
+    fn read_reg_one_byte_leaves_high_byte_zero() {
+        let usb = FakeUsb::default();
+        usb.in_queue.borrow_mut().push(vec![0x42]); // single-byte data stage
+        let val = read_reg(&usb, Block::Demod, 0x0001, 1).unwrap();
+        assert_eq!(val, 0x0042); // only data[0]; high byte untouched
+    }
+
+    #[test]
+    fn read_reg_short_transfer_is_an_error() {
+        let usb = FakeUsb::default();
+        usb.in_queue.borrow_mut().push(vec![]); // device returned nothing
+        let err = read_reg(&usb, Block::Sys, 0x0005, 2).unwrap_err();
+        assert!(matches!(err, AudioError::Usb(_)));
     }
 
     #[test]
