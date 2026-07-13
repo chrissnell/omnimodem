@@ -287,6 +287,34 @@ mod tests {
         assert_ne!(devs[0].id, devs[1].id);
     }
 
+    /// The shipped Linux udev rules must list exactly the ids `scan_rtl`
+    /// recognizes: a dongle we discover but that has no permissions rule fails to
+    /// open, and a rule for an id we never scan is dead weight. This enforces the
+    /// "keep them in sync" comment so the file can't silently drift.
+    #[test]
+    fn udev_rules_cover_exactly_the_known_ids() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/udev/99-omnimodem-rtlsdr.rules"
+        );
+        let text = std::fs::read_to_string(path).expect("udev rules file must exist");
+        let extract = |line: &str, attr: &str| -> Option<u16> {
+            let key = format!("{attr}}}==\"");
+            let start = line.find(&key)? + key.len();
+            let end = line[start..].find('"')? + start;
+            u16::from_str_radix(&line[start..end], 16).ok()
+        };
+        let mut in_file: Vec<(u16, u16)> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && l.contains("idVendor"))
+            .filter_map(|l| Some((extract(l, "idVendor")?, extract(l, "idProduct")?)))
+            .collect();
+        let mut known: Vec<(u16, u16)> = RTL_USB_IDS.to_vec();
+        in_file.sort_unstable();
+        known.sort_unstable();
+        assert_eq!(in_file, known, "99-omnimodem-rtlsdr.rules drifted from RTL_USB_IDS");
+    }
+
     #[test]
     fn unclaimable_dongle_is_reported_with_needs_setup() {
         let d = UsbDev {

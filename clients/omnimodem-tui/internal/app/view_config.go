@@ -430,8 +430,17 @@ func (v *configView) pickerColumns(w int) []ui.Column {
 	case pickMode:
 		return []ui.Column{{Title: "MODE", Width: clampInt(w-6, 22, 28)}}
 	default: // device
+		// The I/O cell is normally width 5 ("RX·TX"), but a needs-setup device
+		// widens it with a "⚠ setup" badge; size the column to the widest cell
+		// actually present so the badge isn't truncated away. `avail` tracks the
+		// column so DEVICE/ID give back exactly the width the badge takes.
 		ioW := 5
-		avail := clampInt(w-14, 24, 56)
+		for _, d := range v.capabilityDevices() {
+			if cw := lipgloss.Width(ioFlags(d)); cw > ioW {
+				ioW = cw
+			}
+		}
+		avail := clampInt(w-9-ioW, 24, 56)
 		nameW := clampInt(avail*3/5, 12, 40)
 		idW := clampInt(avail-nameW, 10, 30)
 		return []ui.Column{{Title: "DEVICE", Width: nameW}, {Title: "ID", Width: idW}, {Title: "I/O", Width: ioW}}
