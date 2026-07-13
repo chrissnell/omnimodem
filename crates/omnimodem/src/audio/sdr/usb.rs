@@ -21,7 +21,7 @@ use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use crate::audio::{AudioChunk, CHUNK_QUEUE_DEPTH, MAX_SAMPLE_RATE};
 use crate::core::event::TelemetryEvent;
 use crate::ids::{ChannelId, DeviceId, RtlKey};
-use nusb::transfer::{Control, ControlType, Queue, Recipient, RequestBuffer};
+use nusb::transfer::{Control, ControlType, Queue, Recipient, RequestBuffer, TransferError};
 use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,7 +175,8 @@ pub(crate) trait UsbBulk: Send {
 /// buffer. The queue is built lazily on the first read so the (blocking) capture
 /// thread owns it, and a shared stop flag ends the stream promptly (the dongle
 /// streams continuously, so the next completion observes the flag within a block).
-/// Mid-capture removal / hard-stall recovery is refined in P3-A.
+/// A mid-capture removal surfaces as a [`TransferError::Disconnected`] completion,
+/// which [`classify_bulk_error`] turns into the terminal [`AudioError::UsbLost`].
 pub(crate) struct NusbBulk {
     iface: nusb::Interface,
     queue: Option<Queue<RequestBuffer>>,
@@ -204,9 +205,7 @@ impl UsbBulk for NusbBulk {
         if self.stop.load(Ordering::Relaxed) {
             return Ok(0);
         }
-        completion
-            .status
-            .map_err(|e| AudioError::Usb(format!("bulk in transfer: {e}")))?;
+        completion.status.map_err(classify_bulk_error)?;
         let n = completion.data.len().min(buf.len());
         buf[..n].copy_from_slice(&completion.data[..n]);
         // Reuse the completed buffer for a fresh transfer, keeping the pool primed.
@@ -217,6 +216,20 @@ impl UsbBulk for NusbBulk {
     fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send> {
         let stop = self.stop.clone();
         Box::new(move || stop.store(true, Ordering::Relaxed))
+    }
+}
+
+/// Classify a failed bulk-IN transfer. A dongle unplugged mid-capture surfaces as
+/// [`TransferError::Disconnected`], which becomes the terminal
+/// [`AudioError::UsbLost`] — the USB transport has no reconnect (unlike `rtl_tcp`),
+/// so `run_capture` exits, the channel unbinds, and hotplug reports `Departed`.
+/// Every other transfer failure stays a generic [`AudioError::Usb`]; both end the
+/// capture, but the removal is worth naming. Pure so the mapping is unit-tested
+/// without hardware.
+fn classify_bulk_error(err: TransferError) -> AudioError {
+    match err {
+        TransferError::Disconnected => AudioError::UsbLost(format!("bulk in transfer: {err}")),
+        _ => AudioError::Usb(format!("bulk in transfer: {err}")),
     }
 }
 
@@ -1538,26 +1551,43 @@ mod tests {
     /// A scripted [`UsbBulk`]: hands `read` a fixed IQ slice in `buf`-sized blocks,
     /// then reports the terminal `Ok(0)`. A [`shutdown_handle`](UsbBulk::shutdown_handle)
     /// ends it early, mirroring how the real stop flag unblocks the nusb queue.
+    /// `error_after` models a mid-capture unplug: after that many successful reads
+    /// the next one fails with [`AudioError::UsbLost`], exactly as
+    /// [`classify_bulk_error`] maps a real `Disconnected` completion.
     struct FakeBulk {
         iq: Vec<u8>,
         pos: usize,
+        reads: usize,
+        error_after: Option<usize>,
         stop: Arc<AtomicBool>,
     }
 
     impl FakeBulk {
         fn new(iq: Vec<u8>) -> Self {
-            FakeBulk { iq, pos: 0, stop: Arc::new(AtomicBool::new(false)) }
+            FakeBulk { iq, pos: 0, reads: 0, error_after: None, stop: Arc::new(AtomicBool::new(false)) }
+        }
+
+        /// A stream that delivers `n` blocks and then reports the dongle removed.
+        fn erroring_after(iq: Vec<u8>, n: usize) -> Self {
+            FakeBulk { error_after: Some(n), ..FakeBulk::new(iq) }
         }
     }
 
     impl UsbBulk for FakeBulk {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, AudioError> {
-            if self.stop.load(Ordering::Relaxed) || self.pos >= self.iq.len() {
+            if self.stop.load(Ordering::Relaxed) {
+                return Ok(0);
+            }
+            if self.error_after == Some(self.reads) {
+                return Err(AudioError::UsbLost("bulk in transfer: device disconnected".into()));
+            }
+            if self.pos >= self.iq.len() {
                 return Ok(0);
             }
             let n = buf.len().min(self.iq.len() - self.pos);
             buf[..n].copy_from_slice(&self.iq[self.pos..self.pos + n]);
             self.pos += n;
+            self.reads += 1;
             Ok(n)
         }
 
@@ -1609,6 +1639,38 @@ mod tests {
         stop();
         let mut buf = [0u8; 8];
         assert_eq!(transport.read_iq(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn classify_bulk_error_maps_disconnect_to_usb_lost() {
+        // A device unplugged mid-capture is the terminal `UsbLost`...
+        assert!(matches!(
+            classify_bulk_error(TransferError::Disconnected),
+            AudioError::UsbLost(_)
+        ));
+        // ...while a stall / fault / unknown stays a generic transfer error (still
+        // terminal for the pipeline, but not a removal).
+        for e in [TransferError::Stall, TransferError::Fault, TransferError::Unknown] {
+            assert!(matches!(classify_bulk_error(e), AudioError::Usb(_)));
+        }
+    }
+
+    #[test]
+    fn read_iq_reports_usb_lost_after_mid_capture_removal() {
+        // A dongle unplugged after streaming a few blocks: the first reads hand back
+        // IQ, then the transport surfaces the terminal `UsbLost` (no reconnect, unlike
+        // rtl_tcp). `run_capture` breaks on that error and the channel unbinds.
+        let bulk = FakeBulk::erroring_after(vec![7u8; 32], 2);
+        let mut transport =
+            RtlUsbTransport::from_fake(FakeUsb::default(), bulk, usb_regs::TunerKind::R820T);
+
+        let mut buf = [0u8; 8];
+        assert_eq!(transport.read_iq(&mut buf).unwrap(), 8); // block 1
+        assert_eq!(transport.read_iq(&mut buf).unwrap(), 8); // block 2
+        assert!(
+            matches!(transport.read_iq(&mut buf), Err(AudioError::UsbLost(_))),
+            "a mid-capture unplug must surface as the terminal UsbLost"
+        );
     }
 
     #[test]

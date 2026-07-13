@@ -160,9 +160,16 @@ pub(crate) fn run_capture<T: SdrTransport>(
 
     loop {
         let n = match transport.read_iq(&mut buf) {
-            Ok(0) => break,  // terminal: shutdown signalled (or a hard stop)
+            Ok(0) => break, // terminal: shutdown signalled (or a hard stop)
             Ok(n) => n,
-            Err(_) => break, // terminal read error
+            // Terminal read error. A local USB transport reports a mid-capture
+            // removal as `AudioError::UsbLost`; unlike `rtl_tcp` (which reconnects
+            // transparently inside `read_iq`), there is no recovery here, so the
+            // capture ends — the channel then unbinds and hotplug reports Departed.
+            Err(e) => {
+                tracing::warn!(error = %e, "sdr capture: terminal read error, ending capture");
+                break;
+            }
         };
 
         // The transport hands back whole IQ pairs (even byte count) and drops any
@@ -253,16 +260,32 @@ mod tests {
     struct FakeTransport {
         iq: Vec<u8>,
         pos: usize,
+        reads: usize,
+        /// After this many successful reads, the next one fails with the terminal
+        /// [`AudioError::UsbLost`] — modelling a dongle unplugged mid-capture.
+        error_after: Option<usize>,
+    }
+
+    impl FakeTransport {
+        fn new(iq: Vec<u8>) -> Self {
+            FakeTransport { iq, pos: 0, reads: 0, error_after: None }
+        }
     }
 
     impl SdrTransport for FakeTransport {
         fn read_iq(&mut self, buf: &mut [u8]) -> Result<usize, crate::audio::AudioError> {
+            if self.error_after == Some(self.reads) {
+                return Err(crate::audio::AudioError::UsbLost(
+                    "bulk in transfer: device disconnected".into(),
+                ));
+            }
             if self.pos >= self.iq.len() {
                 return Ok(0); // exhausted — terminal, ends the capture loop
             }
             let n = buf.len().min(self.iq.len() - self.pos);
             buf[..n].copy_from_slice(&self.iq[self.pos..self.pos + n]);
             self.pos += n;
+            self.reads += 1;
             Ok(n)
         }
 
@@ -319,7 +342,7 @@ mod tests {
         );
         let control = SdrControl::default();
         control.set_offset_hz(30_000.0); // channel-select the tone
-        let transport = FakeTransport { iq, pos: 0 };
+        let transport = FakeTransport::new(iq);
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
         // No telemetry sink: exercise the pure demod path (waterfall is optional).
@@ -332,5 +355,61 @@ mod tests {
             total += chunk.len();
         }
         assert!(total > 0, "pipeline delivered no audio through the fake transport");
+    }
+
+    #[test]
+    fn run_capture_exits_on_mid_capture_usb_removal() {
+        // A dongle unplugged mid-capture: the transport streams a few blocks, then
+        // `read_iq` returns the terminal `UsbLost`. `run_capture` must exit (not spin
+        // or reconnect like rtl_tcp), which drops `tx` and lets the channel unbind.
+        let iq = fm_iq_u8(DEFAULT_CAPTURE_RATE as f32, 30_000.0, 1_200.0, DEFAULT_DEVIATION_HZ, 48_000);
+        let mut transport = FakeTransport::new(iq);
+        transport.error_after = Some(3); // unplugged after 3 blocks
+
+        let control = SdrControl::default();
+        control.set_offset_hz(30_000.0);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
+
+        // Runs on this thread: if the terminal error is not honored, this never
+        // returns and the test hangs. Returning at all proves the capture exited.
+        run_capture(transport, control, None, ChannelId(0), DEFAULT_DEVIATION_HZ, 48_000, tx);
+
+        // The sender is dropped, so the consumer channel is now disconnected: after
+        // draining any delivered audio, the next recv reports the unbind.
+        while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
+        assert!(
+            matches!(rx.recv(), Err(std::sync::mpsc::RecvError)),
+            "capture thread must drop the sender so the channel unbinds"
+        );
+    }
+
+    #[test]
+    fn slow_consumer_drops_oldest_without_stalling_the_source() {
+        // The shared drop-oldest overrun policy must protect the USB source too: a
+        // consumer that never reads must not stall the capture. Drive a long stream
+        // through `run_capture` with a full, unread channel and assert it (a) reads
+        // the whole source to exhaustion (never blocked on delivery) and (b) counted
+        // the dropped chunks on the control cell.
+        //
+        // `RawMag` emits one chunk per read with no demod warm-up, so the arithmetic
+        // is exact: far more than the channel + backlog depth (~2·CHUNK_QUEUE_DEPTH)
+        // guarantees the drop-oldest path fires.
+        let reads = CHUNK_QUEUE_DEPTH * 8;
+        let iq = vec![200u8; WATERFALL_NFFT * 2 * reads];
+
+        let control = SdrControl::default();
+        control.set_demod_mode(DemodMode::RawMag);
+        assert_eq!(control.dropped_chunks(), 0);
+
+        let transport = FakeTransport::new(iq);
+        // Hold the receiver but never read it, so the channel stays full.
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
+        let capture_rate = control.capture_rate();
+        run_capture(transport, control.clone(), None, ChannelId(0), DEFAULT_DEVIATION_HZ, capture_rate, tx);
+
+        assert!(
+            control.dropped_chunks() > 0,
+            "a stalled consumer must increment dropped_chunks via the overrun path"
+        );
     }
 }
