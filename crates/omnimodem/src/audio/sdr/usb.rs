@@ -443,25 +443,35 @@ impl RtlUsbTransport {
         apply_writes(&self.usb, &usb_regs::sample_rate_writes(samp_rate)?)
     }
 
+    /// Run `body` with the RTL2832U's I2C repeater enabled, releasing it afterward
+    /// (best-effort) whatever the outcome. Every tuner register access must be
+    /// bracketed this way: librtlsdr wraps `set_i2c_repeater(1)…(0)` around all tuner
+    /// i2c, and a transfer issued with the repeater off silently never reaches the
+    /// R82xx.
+    fn with_repeater<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, AudioError>,
+    ) -> Result<T, AudioError> {
+        set_i2c_repeater(&self.usb, true)?;
+        let out = body(self);
+        let _ = set_i2c_repeater(&self.usb, false);
+        out
+    }
+
     /// Probe the I2C bus for a supported tuner and record its kind. Walks the R820T
-    /// then R828D addresses looking for the R82xx chip id, with the I2C repeater
-    /// enabled for the duration. A non-R82xx dongle yields
+    /// then R828D addresses looking for the R82xx chip id. A non-R82xx dongle yields
     /// [`AudioError::UnsupportedTuner`]. Transcribed from librtlsdr's tuner-detect.
     #[allow(dead_code)] // Called from open()/apply_hardware once P2-D wires the transport.
     pub(crate) fn probe_tuner(&mut self) -> Result<usb_regs::TunerKind, AudioError> {
-        set_i2c_repeater(&self.usb, true)?;
-        let probe = (|| {
+        let kind = self.with_repeater(|s| {
             for addr in [usb_regs::R820T_I2C_ADDR, usb_regs::R828D_I2C_ADDR] {
-                let id = i2c_read_reg(&self.usb, addr, usb_regs::R82XX_CHECK_ADDR)?;
+                let id = i2c_read_reg(&s.usb, addr, usb_regs::R82XX_CHECK_ADDR)?;
                 if let Some(kind) = usb_regs::tuner_kind_from_probe(addr, id) {
                     return Ok(kind);
                 }
             }
             Err(AudioError::UnsupportedTuner)
-        })();
-        // Best-effort release; the probe result is what matters.
-        let _ = set_i2c_repeater(&self.usb, false);
-        let kind = probe?;
+        })?;
         self.tuner = Some(kind);
         Ok(kind)
     }
@@ -469,38 +479,48 @@ impl RtlUsbTransport {
     /// Load the R82xx power-on register image ([`usb_regs::r82xx_init_array`]) over
     /// I2C and seed the register shadow from it. Requires [`probe_tuner`](Self::probe_tuner)
     /// to have identified the tuner. Transcribed from librtlsdr `r82xx_init`
-    /// (register-image write; IF-filter calibration is applied at first tune).
+    /// (register-image write only; the IF-filter calibration and sysfreq programming
+    /// of `r82xx_set_tv_standard` / `r82xx_sysfreq_sel` are not yet applied — the
+    /// fixed 3.57 MHz digital-TV IF still lets the mux + PLL tune correctly).
     #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
     pub(crate) fn init_tuner(&mut self) -> Result<(), AudioError> {
         let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
-        let arr = usb_regs::r82xx_init_array();
-        for (i, byte) in arr.iter().enumerate() {
-            let reg = (usb_regs::REG_SHADOW_START + i) as u8;
-            self.tuner_shadow[reg as usize] = *byte;
-            i2c_write_reg(&self.usb, tuner.i2c_addr(), reg, *byte)?;
-        }
-        Ok(())
+        self.with_repeater(|s| {
+            let arr = usb_regs::r82xx_init_array();
+            for (i, byte) in arr.iter().enumerate() {
+                let reg = (usb_regs::REG_SHADOW_START + i) as u8;
+                s.tuner_shadow[reg as usize] = *byte;
+                i2c_write_reg(&s.usb, tuner.i2c_addr(), reg, *byte)?;
+            }
+            Ok(())
+        })
     }
 
-    /// Tune the R82xx to RF frequency `rf_hz`: program the tracking-filter/mux band
-    /// and solve + load the PLL for LO = `rf_hz + IF`. Transcribed from librtlsdr
-    /// `r82xx_set_freq` → `r82xx_set_mux` + `r82xx_set_pll`.
+    /// Tune the R82xx to RF frequency `rf_hz`: program the tracking-filter/mux band,
+    /// solve + load the PLL for LO = `rf_hz + IF`, then (R828D only) switch the RF
+    /// input for the band. Transcribed from librtlsdr `r82xx_set_freq` →
+    /// `r82xx_set_mux` + `r82xx_set_pll` + the R828D Cable1/Air-In switch.
     #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
     pub(crate) fn set_tuner_freq(&mut self, rf_hz: u32) -> Result<(), AudioError> {
         let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
         let lo_hz = rf_hz + usb_regs::R82XX_IF_FREQ;
+        self.with_repeater(|s| {
+            let addr = tuner.i2c_addr();
 
-        // vco_fine_tune lives in R4[5:4]; it nudges the PLL divider selector.
-        let mut status = [0u8; 5];
-        r82xx_read(&self.usb, tuner.i2c_addr(), &mut status)?;
-        let vco_fine_tune = (status[4] & 0x30) >> 4;
+            // vco_fine_tune lives in R4[5:4] and nudges the PLL divider selector.
+            // librtlsdr reads it mid-`set_pll`; reading it up front is equivalent on a
+            // settled VCO (and on a first tune it reads the reset default = pivot).
+            let mut status = [0u8; 5];
+            r82xx_read(&s.usb, addr, &mut status)?;
+            let vco_fine_tune = (status[4] & 0x30) >> 4;
 
-        let mux = usb_regs::r82xx_mux_writes(lo_hz);
-        apply_tuner_ops(&self.usb, tuner.i2c_addr(), &mut self.tuner_shadow, &mux)?;
+            apply_tuner_ops(&s.usb, addr, &mut s.tuner_shadow, &usb_regs::r82xx_mux_writes(lo_hz))?;
 
-        let pll = usb_regs::r82xx_pll(lo_hz, tuner, vco_fine_tune)?;
-        let pll_ops = usb_regs::r82xx_pll_writes(&pll);
-        apply_tuner_ops(&self.usb, tuner.i2c_addr(), &mut self.tuner_shadow, &pll_ops)
+            let pll = usb_regs::r82xx_pll(lo_hz, tuner, vco_fine_tune)?;
+            apply_tuner_ops(&s.usb, addr, &mut s.tuner_shadow, &usb_regs::r82xx_pll_writes(&pll))?;
+
+            apply_tuner_ops(&s.usb, addr, &mut s.tuner_shadow, &usb_regs::r82xx_input_writes(tuner, rf_hz))
+        })
     }
 
     /// Switch RF gain to automatic (tuner AGC). Manual mode is entered by
@@ -514,8 +534,10 @@ impl RtlUsbTransport {
         if !auto {
             return Ok(());
         }
-        let ops = usb_regs::r82xx_gain_auto_writes();
-        apply_tuner_ops(&self.usb, tuner.i2c_addr(), &mut self.tuner_shadow, &ops)
+        self.with_repeater(|s| {
+            let ops = usb_regs::r82xx_gain_auto_writes();
+            apply_tuner_ops(&s.usb, tuner.i2c_addr(), &mut s.tuner_shadow, &ops)
+        })
     }
 
     /// Set a manual RF gain of `gain_tenths_db`, snapped to the R82xx gain table.
@@ -524,8 +546,10 @@ impl RtlUsbTransport {
     #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
     pub(crate) fn set_tuner_gain(&mut self, gain_tenths_db: i32) -> Result<(), AudioError> {
         let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
-        let ops = usb_regs::r82xx_gain_manual_writes(gain_tenths_db);
-        apply_tuner_ops(&self.usb, tuner.i2c_addr(), &mut self.tuner_shadow, &ops)
+        self.with_repeater(|s| {
+            let ops = usb_regs::r82xx_gain_manual_writes(gain_tenths_db);
+            apply_tuner_ops(&s.usb, tuner.i2c_addr(), &mut s.tuner_shadow, &ops)
+        })
     }
 }
 

@@ -236,8 +236,8 @@ pub(crate) fn tuner_kind_from_probe(i2c_addr: u8, chip_id: u8) -> Option<TunerKi
 
 /// The R82xx power-on register image, regs `0x05..=0x1f`, transcribed verbatim from
 /// librtlsdr `r82xx_init_array` (with `DEFAULT_IF_VGA_VAL = 11` folded into reg
-/// `0x0c` and `VER_NUM = 49` into reg `0x13`). Written in one I2C burst at init and
-/// used to seed the register shadow the masked writes read-modify-write against.
+/// `0x0c` and `VER_NUM = 49` into reg `0x13`). Written register by register at init
+/// and used to seed the register shadow the masked writes read-modify-write against.
 pub(crate) fn r82xx_init_array() -> [u8; NUM_REGS - REG_SHADOW_START] {
     [
         0x80, // 0x05
@@ -452,6 +452,25 @@ pub(crate) fn r82xx_pll_writes(pll: &R82xxPll) -> Vec<TunerOp> {
         // pll autotune = 8 kHz (settle)
         TunerOp::Mask { reg: 0x1a, val: 0x08, mask: 0x08 },
     ]
+}
+
+/// RF-input switch (Hz) for the R828D. Below this the tuner routes the 'Cable1'
+/// (VHF) input, above it the 'Air-In' (UHF) input. librtlsdr `r82xx_set_freq64`
+/// switches at 345 MHz (the noise floors cross there for equal LNA settings).
+const R828D_INPUT_SWITCH_HZ: u32 = 345_000_000;
+
+/// The R828D per-band RF-input switch write for RF `rf_hz`, transcribed from
+/// librtlsdr `r82xx_set_freq64` (non-extended path): route `R5[6:5]` to 'Cable1'
+/// below [`R828D_INPUT_SWITCH_HZ`], 'Air-In' above. The R820T has a single RF input,
+/// so this is empty for it. Applied after the PLL, at the tail of a tune.
+pub(crate) fn r82xx_input_writes(tuner: TunerKind, rf_hz: u32) -> Vec<TunerOp> {
+    match tuner {
+        TunerKind::R820T => Vec::new(),
+        TunerKind::R828D => {
+            let air_cable1_in = if rf_hz > R828D_INPUT_SWITCH_HZ { 0x00 } else { 0x60 };
+            vec![TunerOp::Mask { reg: 0x05, val: air_cable1_in, mask: 0x60 }]
+        }
+    }
 }
 
 /// Per-stage LNA gain increments (tenths of dB). librtlsdr `r82xx_lna_gain_steps`.
@@ -726,6 +745,26 @@ mod tests {
         // Above the last band start (650 MHz) clamps to the final entry.
         let hi = r82xx_mux_writes(900_000_000);
         assert_eq!(hi[1], TunerOp::Mask { reg: 0x1a, val: 0x40, mask: 0xc3 });
+    }
+
+    #[test]
+    fn r828d_input_switch_tracks_band_r820t_has_none() {
+        // R820T: single input → no switch write.
+        assert!(r82xx_input_writes(TunerKind::R820T, 144_390_000).is_empty());
+        // R828D below 345 MHz → Cable1 (0x60); above → Air-In (0x00). Mask R5[6:5].
+        assert_eq!(
+            r82xx_input_writes(TunerKind::R828D, 144_390_000),
+            vec![TunerOp::Mask { reg: 0x05, val: 0x60, mask: 0x60 }]
+        );
+        assert_eq!(
+            r82xx_input_writes(TunerKind::R828D, 400_000_000),
+            vec![TunerOp::Mask { reg: 0x05, val: 0x00, mask: 0x60 }]
+        );
+        // The 345 MHz boundary itself is Cable1 (strict `>`).
+        assert_eq!(
+            r82xx_input_writes(TunerKind::R828D, 345_000_000),
+            vec![TunerOp::Mask { reg: 0x05, val: 0x60, mask: 0x60 }]
+        );
     }
 
     #[test]
