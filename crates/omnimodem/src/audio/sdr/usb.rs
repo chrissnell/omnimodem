@@ -21,7 +21,7 @@ use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
 use crate::audio::{AudioChunk, CHUNK_QUEUE_DEPTH, MAX_SAMPLE_RATE};
 use crate::core::event::TelemetryEvent;
 use crate::ids::{ChannelId, DeviceId, RtlKey};
-use nusb::transfer::{Control, ControlType, Queue, Recipient, RequestBuffer};
+use nusb::transfer::{Control, ControlType, Queue, Recipient, RequestBuffer, TransferError};
 use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -226,11 +226,9 @@ impl UsbBulk for NusbBulk {
 /// Every other transfer failure stays a generic [`AudioError::Usb`]; both end the
 /// capture, but the removal is worth naming. Pure so the mapping is unit-tested
 /// without hardware.
-fn classify_bulk_error(err: nusb::transfer::TransferError) -> AudioError {
+fn classify_bulk_error(err: TransferError) -> AudioError {
     match err {
-        nusb::transfer::TransferError::Disconnected => {
-            AudioError::UsbLost(format!("bulk in transfer: {err}"))
-        }
+        TransferError::Disconnected => AudioError::UsbLost(format!("bulk in transfer: {err}")),
         _ => AudioError::Usb(format!("bulk in transfer: {err}")),
     }
 }
@@ -1645,7 +1643,6 @@ mod tests {
 
     #[test]
     fn classify_bulk_error_maps_disconnect_to_usb_lost() {
-        use nusb::transfer::TransferError;
         // A device unplugged mid-capture is the terminal `UsbLost`...
         assert!(matches!(
             classify_bulk_error(TransferError::Disconnected),

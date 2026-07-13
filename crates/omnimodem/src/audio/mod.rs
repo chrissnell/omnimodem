@@ -57,8 +57,9 @@ pub enum AudioError {
     /// The dongle was removed mid-capture (a bulk transfer reported the device
     /// disconnected). Unlike a dropped `rtl_tcp` link — which the transport
     /// reconnects transparently — a locally-attached dongle has no recovery: this
-    /// is a terminal stop that ends the capture and unbinds the channel, after
-    /// which hotplug reports the device `Departed`. Kept distinct from
+    /// is a terminal stop that ends the capture and unbinds the channel;
+    /// separately, the dongle stops appearing in enumeration, so hotplug reports
+    /// it `Departed`. Kept distinct from
     /// [`Usb`](AudioError::Usb) so a removal reads as such rather than a transient
     /// transfer fault.
     #[error("usb device removed mid-capture: {0}")]
