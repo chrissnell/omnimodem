@@ -36,7 +36,7 @@ const DEMOD_WRITE_FLAG: u16 = 0x10;
 /// Realtek RTL2832U register blocks, selected in the high byte of the control
 /// `wIndex`. Transcribed from librtlsdr's block enum; only some are used before
 /// the tuner and streaming stages land.
-#[allow(dead_code)] // Rom/Ir/Iic are addressed by later bring-up phases (P2-B..E).
+#[allow(dead_code)] // Rom/Ir are addressed by later bring-up phases (P2-E onward).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Block {
@@ -260,6 +260,116 @@ pub(crate) fn apply_writes(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// I2C bus / R82xx tuner register I/O
+// ---------------------------------------------------------------------------
+
+/// Write one register on an I2C device hung off the RTL2832U's I2C bus. The RTL2832U
+/// tunnels I2C through the `Iic` block: `wValue` carries the 7-bit device address and
+/// the two-byte data stage is `[reg, val]`. Transcribed from librtlsdr
+/// `rtlsdr_i2c_write` / `rtlsdr_write_array(IICB, ...)`.
+fn i2c_write_reg(usb: &impl UsbControl, i2c_addr: u8, reg: u8, val: u8) -> Result<(), AudioError> {
+    let setup = Setup {
+        request_type: CTRL_OUT,
+        request: 0,
+        value: u16::from(i2c_addr),
+        index: ((Block::Iic as u16) << 8) | 0x10,
+    };
+    usb.control_out(setup, &[reg, val])
+}
+
+/// Read one register from an I2C device: set the device's register pointer with a
+/// one-byte write, then read the single byte back. Used only for the tuner-presence
+/// probe. Transcribed from librtlsdr `rtlsdr_i2c_read_reg` (no bit reversal — that is
+/// applied only by the R82xx status read).
+fn i2c_read_reg(usb: &impl UsbControl, i2c_addr: u8, reg: u8) -> Result<u8, AudioError> {
+    let write = Setup {
+        request_type: CTRL_OUT,
+        request: 0,
+        value: u16::from(i2c_addr),
+        index: ((Block::Iic as u16) << 8) | 0x10,
+    };
+    usb.control_out(write, &[reg])?;
+
+    let read = Setup {
+        request_type: CTRL_IN,
+        request: 0,
+        value: u16::from(i2c_addr),
+        index: (Block::Iic as u16) << 8,
+    };
+    let mut data = [0u8; 1];
+    let n = usb.control_in(read, &mut data)?;
+    if n != 1 {
+        return Err(AudioError::Usb(format!(
+            "short i2c read at addr {i2c_addr:#04x} reg {reg:#04x}: got {n} bytes"
+        )));
+    }
+    Ok(data[0])
+}
+
+/// Reverse the bit order of a byte. The R82xx returns its status registers MSB-first
+/// per nibble, so [`r82xx_read`] un-reverses each byte. librtlsdr `r82xx_bitrev`.
+fn r82xx_bitrev(byte: u8) -> u8 {
+    const LUT: [u8; 16] = [
+        0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe, 0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf,
+    ];
+    (LUT[(byte & 0xf) as usize] << 4) | LUT[(byte >> 4) as usize]
+}
+
+/// Read `buf.len()` R82xx status registers starting at register 0 and bit-reverse
+/// each (the R82xx has no random-access read — a read always streams from reg 0).
+/// Transcribed from librtlsdr `r82xx_read`.
+fn r82xx_read(usb: &impl UsbControl, i2c_addr: u8, buf: &mut [u8]) -> Result<(), AudioError> {
+    let setup = Setup {
+        request_type: CTRL_IN,
+        request: 0,
+        value: u16::from(i2c_addr),
+        index: (Block::Iic as u16) << 8,
+    };
+    let n = usb.control_in(setup, buf)?;
+    if n != buf.len() {
+        return Err(AudioError::Usb(format!(
+            "short r82xx read at addr {:#04x}: got {n} of {} bytes",
+            i2c_addr,
+            buf.len()
+        )));
+    }
+    for b in buf.iter_mut() {
+        *b = r82xx_bitrev(*b);
+    }
+    Ok(())
+}
+
+/// Toggle the RTL2832U's I2C repeater, which gates control-transfer access to the
+/// tuner bus. Transcribed from librtlsdr `rtlsdr_set_i2c_repeater`.
+fn set_i2c_repeater(usb: &impl UsbControl, on: bool) -> Result<(), AudioError> {
+    demod_write_reg(usb, 1, 0x01, if on { 0x18 } else { 0x10 }, 1)
+}
+
+/// Apply an ordered [`usb_regs::TunerOp`] sequence to the tuner over I2C, keeping
+/// `shadow` (the driver's register-file mirror) in step so masked writes
+/// read-modify-write against the last programmed value. Transcribed from librtlsdr
+/// `r82xx_write_reg` / `r82xx_write_reg_mask` + the shadow in `r82xx_priv::regs`.
+fn apply_tuner_ops(
+    usb: &impl UsbControl,
+    i2c_addr: u8,
+    shadow: &mut [u8; usb_regs::NUM_REGS],
+    ops: &[usb_regs::TunerOp],
+) -> Result<(), AudioError> {
+    for op in ops {
+        let (reg, byte) = match *op {
+            usb_regs::TunerOp::Write { reg, val } => (reg, val),
+            usb_regs::TunerOp::Mask { reg, val, mask } => {
+                let cur = shadow[reg as usize];
+                (reg, (cur & !mask) | (val & mask))
+            }
+        };
+        shadow[reg as usize] = byte;
+        i2c_write_reg(usb, i2c_addr, reg, byte)?;
+    }
+    Ok(())
+}
+
 /// A locally-attached RTL-SDR dongle, opened and claimed for exclusive use.
 ///
 /// P2-A establishes the USB seam only: identity match, claim (with Linux
@@ -271,6 +381,11 @@ pub struct RtlUsbTransport {
     /// The claimed interface number, kept for endpoint addressing in P2-E streaming.
     #[allow(dead_code)]
     iface: u8,
+    /// The probed tuner, or `None` until [`probe_tuner`](Self::probe_tuner) runs.
+    tuner: Option<usb_regs::TunerKind>,
+    /// Mirror of the R82xx register file (indexed by absolute register), seeded by
+    /// [`init_tuner`](Self::init_tuner) so masked writes read-modify-write correctly.
+    tuner_shadow: [u8; usb_regs::NUM_REGS],
 }
 
 impl RtlUsbTransport {
@@ -292,7 +407,12 @@ impl RtlUsbTransport {
             .map_err(|e| AudioError::UsbClaim(id.clone(), format!("open device: {e}")))?;
         let iface = claim_interface(&dev, RTL_INTERFACE, &id)?;
 
-        Ok(Self { usb: NusbControl { iface }, iface: RTL_INTERFACE })
+        Ok(Self {
+            usb: NusbControl { iface },
+            iface: RTL_INTERFACE,
+            tuner: None,
+            tuner_shadow: [0u8; usb_regs::NUM_REGS],
+        })
     }
 
     /// Write an RTL2832U register (see [`write_reg`]).
@@ -321,6 +441,115 @@ impl RtlUsbTransport {
     #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
     pub(crate) fn set_sample_rate(&self, samp_rate: u32) -> Result<(), AudioError> {
         apply_writes(&self.usb, &usb_regs::sample_rate_writes(samp_rate)?)
+    }
+
+    /// Run `body` with the RTL2832U's I2C repeater enabled, releasing it afterward
+    /// (best-effort) whatever the outcome. Every tuner register access must be
+    /// bracketed this way: librtlsdr wraps `set_i2c_repeater(1)…(0)` around all tuner
+    /// i2c, and a transfer issued with the repeater off silently never reaches the
+    /// R82xx.
+    fn with_repeater<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, AudioError>,
+    ) -> Result<T, AudioError> {
+        set_i2c_repeater(&self.usb, true)?;
+        let out = body(self);
+        let _ = set_i2c_repeater(&self.usb, false);
+        out
+    }
+
+    /// Probe the I2C bus for a supported tuner and record its kind. Walks the R820T
+    /// then R828D addresses looking for the R82xx chip id. A non-R82xx dongle yields
+    /// [`AudioError::UnsupportedTuner`]. Transcribed from librtlsdr's tuner-detect.
+    #[allow(dead_code)] // Called from open()/apply_hardware once P2-D wires the transport.
+    pub(crate) fn probe_tuner(&mut self) -> Result<usb_regs::TunerKind, AudioError> {
+        let kind = self.with_repeater(|s| {
+            for addr in [usb_regs::R820T_I2C_ADDR, usb_regs::R828D_I2C_ADDR] {
+                let id = i2c_read_reg(&s.usb, addr, usb_regs::R82XX_CHECK_ADDR)?;
+                if let Some(kind) = usb_regs::tuner_kind_from_probe(addr, id) {
+                    return Ok(kind);
+                }
+            }
+            Err(AudioError::UnsupportedTuner)
+        })?;
+        self.tuner = Some(kind);
+        Ok(kind)
+    }
+
+    /// Load the R82xx power-on register image ([`usb_regs::r82xx_init_array`]) over
+    /// I2C and seed the register shadow from it. Requires [`probe_tuner`](Self::probe_tuner)
+    /// to have identified the tuner. Transcribed from librtlsdr `r82xx_init`
+    /// (register-image write only; the IF-filter calibration and sysfreq programming
+    /// of `r82xx_set_tv_standard` / `r82xx_sysfreq_sel` are not yet applied — the
+    /// fixed 3.57 MHz digital-TV IF still lets the mux + PLL tune correctly).
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn init_tuner(&mut self) -> Result<(), AudioError> {
+        let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
+        self.with_repeater(|s| {
+            let arr = usb_regs::r82xx_init_array();
+            for (i, byte) in arr.iter().enumerate() {
+                let reg = (usb_regs::REG_SHADOW_START + i) as u8;
+                s.tuner_shadow[reg as usize] = *byte;
+                i2c_write_reg(&s.usb, tuner.i2c_addr(), reg, *byte)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Tune the R82xx to RF frequency `rf_hz`: program the tracking-filter/mux band,
+    /// solve + load the PLL for LO = `rf_hz + IF`, then (R828D only) switch the RF
+    /// input for the band. Transcribed from librtlsdr `r82xx_set_freq` →
+    /// `r82xx_set_mux` + `r82xx_set_pll` + the R828D Cable1/Air-In switch.
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_tuner_freq(&mut self, rf_hz: u32) -> Result<(), AudioError> {
+        let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
+        let lo_hz = rf_hz + usb_regs::R82XX_IF_FREQ;
+        self.with_repeater(|s| {
+            let addr = tuner.i2c_addr();
+
+            // vco_fine_tune lives in R4[5:4] and nudges the PLL divider selector.
+            // librtlsdr reads it mid-`set_pll`; reading it up front is equivalent on a
+            // settled VCO (and on a first tune it reads the reset default = pivot).
+            let mut status = [0u8; 5];
+            r82xx_read(&s.usb, addr, &mut status)?;
+            let vco_fine_tune = (status[4] & 0x30) >> 4;
+
+            apply_tuner_ops(&s.usb, addr, &mut s.tuner_shadow, &usb_regs::r82xx_mux_writes(lo_hz))?;
+
+            let pll = usb_regs::r82xx_pll(lo_hz, tuner, vco_fine_tune)?;
+            apply_tuner_ops(&s.usb, addr, &mut s.tuner_shadow, &usb_regs::r82xx_pll_writes(&pll))?;
+
+            apply_tuner_ops(&s.usb, addr, &mut s.tuner_shadow, &usb_regs::r82xx_input_writes(tuner, rf_hz))
+        })
+    }
+
+    /// Switch RF gain to automatic (tuner AGC). Manual mode is entered by
+    /// [`set_tuner_gain`](Self::set_tuner_gain), which flips the AGC off and loads the
+    /// gain in one sequence. Transcribed from librtlsdr `r82xx_set_gain` (auto branch).
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_gain_mode(&mut self, auto: bool) -> Result<(), AudioError> {
+        let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
+        // Only the auto path is a standalone mode flip; manual gain always carries a
+        // level, so the manual AGC-off writes live in `set_tuner_gain`.
+        if !auto {
+            return Ok(());
+        }
+        self.with_repeater(|s| {
+            let ops = usb_regs::r82xx_gain_auto_writes();
+            apply_tuner_ops(&s.usb, tuner.i2c_addr(), &mut s.tuner_shadow, &ops)
+        })
+    }
+
+    /// Set a manual RF gain of `gain_tenths_db`, snapped to the R82xx gain table.
+    /// Implies manual gain mode. Transcribed from librtlsdr `r82xx_set_gain`
+    /// (manual branch).
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_tuner_gain(&mut self, gain_tenths_db: i32) -> Result<(), AudioError> {
+        let tuner = self.tuner.ok_or(AudioError::UnsupportedTuner)?;
+        self.with_repeater(|s| {
+            let ops = usb_regs::r82xx_gain_manual_writes(gain_tenths_db);
+            apply_tuner_ops(&s.usb, tuner.i2c_addr(), &mut s.tuner_shadow, &ops)
+        })
     }
 }
 
@@ -619,6 +848,109 @@ mod tests {
         assert!(is_rtl_dongle(0x1d19, 0x1104)); // MSI DigiVox Micro HD (rebrand)
         assert!(!is_rtl_dongle(0x0bda, 0x0000)); // Realtek VID, non-RTL product
         assert!(!is_rtl_dongle(0x1234, 0x5678)); // unrelated device
+    }
+
+    #[test]
+    fn i2c_write_reg_setup_and_payload() {
+        // librtlsdr rtlsdr_i2c_write(reg,val) → write_array(IICB, addr, [reg,val]).
+        let usb = FakeUsb::default();
+        i2c_write_reg(&usb, 0x34, 0x05, 0x90).unwrap();
+
+        let writes = usb.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        let (setup, data) = &writes[0];
+        assert_eq!(
+            *setup,
+            Setup {
+                request_type: 0x40,               // vendor | out | device
+                request: 0,
+                value: 0x34,                      // i2c address in wValue
+                index: ((Block::Iic as u16) << 8) | 0x10, // IICB + write flag
+            }
+        );
+        assert_eq!(data, &[0x05, 0x90]); // [reg, val]
+    }
+
+    #[test]
+    fn i2c_read_reg_writes_pointer_then_reads_one_byte() {
+        // The probe reads a single register with no bit reversal.
+        let usb = FakeUsb::default();
+        usb.in_queue.borrow_mut().push(vec![0x69]);
+        let val = i2c_read_reg(&usb, 0x34, 0x00).unwrap();
+        assert_eq!(val, 0x69);
+
+        // A one-byte register-pointer write precedes the read.
+        let writes = usb.writes.borrow();
+        assert_eq!(writes[0].1, vec![0x00]);
+        assert_eq!(
+            usb.last_in.borrow().unwrap(),
+            Setup { request_type: 0xC0, request: 0, value: 0x34, index: (Block::Iic as u16) << 8 }
+        );
+    }
+
+    #[test]
+    fn r82xx_read_bit_reverses_each_byte() {
+        let usb = FakeUsb::default();
+        // 0x01 reverses to 0x80, 0x96 reverses to 0x69.
+        usb.in_queue.borrow_mut().push(vec![0x01, 0x96]);
+        let mut buf = [0u8; 2];
+        r82xx_read(&usb, 0x34, &mut buf).unwrap();
+        assert_eq!(buf, [0x80, 0x69]);
+    }
+
+    #[test]
+    fn set_i2c_repeater_writes_demod_reg() {
+        let usb = FakeUsb::default();
+        set_i2c_repeater(&usb, true).unwrap();
+        let writes = usb.writes.borrow();
+        // demod_write_reg(1, 0x01, 0x18, 1): addr in high byte + demod flag, page 1.
+        assert_eq!(writes[0].0.value, (0x01 << 8) | 0x20);
+        assert_eq!(writes[0].0.index, 0x10 | 1);
+        assert_eq!(writes[0].1, vec![0x18]);
+    }
+
+    #[test]
+    fn apply_tuner_ops_read_modify_writes_against_shadow() {
+        let usb = FakeUsb::default();
+        let mut shadow = [0u8; usb_regs::NUM_REGS];
+        shadow[0x10] = 0x6c; // seed reg 0x10 as init_array would
+
+        apply_tuner_ops(
+            &usb,
+            0x34,
+            &mut shadow,
+            &[
+                usb_regs::TunerOp::Mask { reg: 0x10, val: 0x60, mask: 0xe0 }, // div_num=3
+                usb_regs::TunerOp::Write { reg: 0x14, val: 0x07 },
+            ],
+        )
+        .unwrap();
+
+        // Masked write keeps the low bits of 0x6c, replaces the top three: 0x6c → 0x6c.
+        // (0x6c & !0xe0) | (0x60 & 0xe0) = 0x0c | 0x60 = 0x6c.
+        assert_eq!(shadow[0x10], 0x6c);
+        assert_eq!(shadow[0x14], 0x07);
+
+        let writes = usb.writes.borrow();
+        assert_eq!(writes[0].1, vec![0x10, 0x6c]); // [reg, merged byte]
+        assert_eq!(writes[1].1, vec![0x14, 0x07]);
+    }
+
+    #[test]
+    fn probe_reads_r820t_then_r828d_addresses() {
+        // Drive the pure probe walk directly (RtlUsbTransport needs real hardware to
+        // build). First address holds no R82xx (0x00), second answers 0x69 → R828D.
+        let usb = FakeUsb::default();
+        for addr in [usb_regs::R820T_I2C_ADDR, usb_regs::R828D_I2C_ADDR] {
+            let want = if addr == usb_regs::R828D_I2C_ADDR { 0x69 } else { 0x00 };
+            usb.in_queue.borrow_mut().push(vec![want]);
+            let id = i2c_read_reg(&usb, addr, usb_regs::R82XX_CHECK_ADDR).unwrap();
+            if let Some(kind) = usb_regs::tuner_kind_from_probe(addr, id) {
+                assert_eq!(kind, usb_regs::TunerKind::R828D);
+                return;
+            }
+        }
+        panic!("probe should have matched R828D");
     }
 
     #[test]

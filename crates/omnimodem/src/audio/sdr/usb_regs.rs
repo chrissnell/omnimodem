@@ -160,6 +160,391 @@ pub(crate) fn sample_rate_writes(samp_rate: u32) -> Result<Vec<RegWrite>, AudioE
     ])
 }
 
+// ===========================================================================
+// R820T / R828D tuner (transcribed from librtlsdr `tuner_r82xx.c` + `librtlsdr.c`)
+// ===========================================================================
+
+/// I2C bus address of an R820T tuner. librtlsdr `R820T_I2C_ADDR`.
+pub(crate) const R820T_I2C_ADDR: u8 = 0x34;
+/// I2C bus address of an R828D tuner. librtlsdr `R828D_I2C_ADDR`.
+pub(crate) const R828D_I2C_ADDR: u8 = 0x74;
+/// Register read for the tuner-presence probe. librtlsdr `R82XX_CHECK_ADDR`.
+pub(crate) const R82XX_CHECK_ADDR: u8 = 0x00;
+/// The chip-id byte an R82xx returns at [`R82XX_CHECK_ADDR`]. librtlsdr
+/// `R82XX_CHECK_VAL`.
+const R82XX_CHECK_VAL: u8 = 0x69;
+/// R82xx intermediate frequency (Hz): the tuner mixes RF down to this IF, so the
+/// programmed LO sits `R82XX_IF_FREQ` above the requested RF. librtlsdr
+/// `R82XX_IF_FREQ`.
+pub(crate) const R82XX_IF_FREQ: u32 = 3_570_000;
+/// First register the R82xx register shadow covers. librtlsdr `REG_SHADOW_START`.
+pub(crate) const REG_SHADOW_START: usize = 5;
+/// R82xx register-file size. librtlsdr `NUM_REGS`.
+pub(crate) const NUM_REGS: usize = 32;
+
+/// The two R82xx tuner variants omnimodem drives natively. Any other tuner chip is
+/// rejected at probe with [`AudioError::UnsupportedTuner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TunerKind {
+    R820T,
+    R828D,
+}
+
+impl TunerKind {
+    /// The tuner's I2C bus address.
+    pub(crate) fn i2c_addr(self) -> u8 {
+        match self {
+            TunerKind::R820T => R820T_I2C_ADDR,
+            TunerKind::R828D => R828D_I2C_ADDR,
+        }
+    }
+
+    /// `rtl_tcp` / `rtlsdr.h` tuner-type code, so [`TunerCaps`](super::TunerCaps)
+    /// reuse the same per-tuner tables the rtl_tcp path publishes.
+    pub(crate) fn type_code(self) -> u32 {
+        match self {
+            TunerKind::R820T => 5,
+            TunerKind::R828D => 6,
+        }
+    }
+
+    /// `vco_power_ref`: the R828D's VCO runs at half the R820T's reference, which
+    /// changes both the div-num fine-tune pivot and the `nint` ceiling. librtlsdr
+    /// `r82xx_set_pll` (`vco_power_ref = 1` for `CHIP_R828D`, else `2`).
+    fn vco_power_ref(self) -> u8 {
+        match self {
+            TunerKind::R820T => 2,
+            TunerKind::R828D => 1,
+        }
+    }
+}
+
+/// Map an i2c presence probe — the chip-id byte read at a candidate tuner address —
+/// to a [`TunerKind`]. `None` when the byte is not the R82xx chip id (the address
+/// held a different chip, or nothing answered). librtlsdr's tuner-detect walks
+/// `R820T_I2C_ADDR` then `R828D_I2C_ADDR`, matching `R82XX_CHECK_VAL` at each.
+pub(crate) fn tuner_kind_from_probe(i2c_addr: u8, chip_id: u8) -> Option<TunerKind> {
+    if chip_id != R82XX_CHECK_VAL {
+        return None;
+    }
+    match i2c_addr {
+        R820T_I2C_ADDR => Some(TunerKind::R820T),
+        R828D_I2C_ADDR => Some(TunerKind::R828D),
+        _ => None,
+    }
+}
+
+/// The R82xx power-on register image, regs `0x05..=0x1f`, transcribed verbatim from
+/// librtlsdr `r82xx_init_array` (with `DEFAULT_IF_VGA_VAL = 11` folded into reg
+/// `0x0c` and `VER_NUM = 49` into reg `0x13`). Written register by register at init
+/// and used to seed the register shadow the masked writes read-modify-write against.
+pub(crate) fn r82xx_init_array() -> [u8; NUM_REGS - REG_SHADOW_START] {
+    [
+        0x80, // 0x05
+        0x13, // 0x06
+        0x70, // 0x07
+        0xc0, // 0x08
+        0x40, // 0x09
+        0xdb, // 0x0a
+        0x6b, // 0x0b
+        0xeb, // 0x0c  (0xe0 | DEFAULT_IF_VGA_VAL=11)
+        0x53, // 0x0d
+        0x75, // 0x0e
+        0x68, // 0x0f
+        0x6c, // 0x10
+        0xbb, // 0x11
+        0x80, // 0x12
+        0x31, // 0x13  (VER_NUM=49 & 0x3f)
+        0x0f, // 0x14
+        0x00, // 0x15
+        0xc0, // 0x16
+        0x30, // 0x17
+        0x48, // 0x18
+        0xec, // 0x19
+        0x60, // 0x1a
+        0x00, // 0x1b
+        0x24, // 0x1c
+        0xdd, // 0x1d
+        0x0e, // 0x1e
+        0x40, // 0x1f
+    ]
+}
+
+/// One R82xx tuner register write. The R82xx is programmed over I2C register by
+/// register, and most writes are read-modify-write against the driver's register
+/// shadow, so the op records whether it replaces the whole byte or only a masked
+/// field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TunerOp {
+    /// Replace the whole register (`r82xx_write_reg`).
+    Write { reg: u8, val: u8 },
+    /// Replace only the `mask` bits with `val & mask` (`r82xx_write_reg_mask`).
+    Mask { reg: u8, val: u8, mask: u8 },
+}
+
+/// One RF band's mux/tracking-filter programming. librtlsdr `struct
+/// r82xx_freq_range`; only the fields that vary with the fixed
+/// `XTAL_HIGH_CAP_0P` xtal setting omnimodem uses are kept.
+struct FreqRange {
+    /// Band start (MHz).
+    freq_mhz: u32,
+    /// Open-drain (`R23[3]`).
+    open_d: u8,
+    /// RF mux / poly-mux (`R26`).
+    rf_mux_ploy: u8,
+    /// Tracking-filter band (`R27`).
+    tf_c: u8,
+}
+
+/// librtlsdr `freq_ranges` (`tuner_r82xx.c`) — the tracking-filter/mux band table.
+/// The last entry covers everything above its start frequency.
+const FREQ_RANGES: &[FreqRange] = &[
+    FreqRange { freq_mhz: 0, open_d: 0x08, rf_mux_ploy: 0x02, tf_c: 0xdf },
+    FreqRange { freq_mhz: 50, open_d: 0x08, rf_mux_ploy: 0x02, tf_c: 0xbe },
+    FreqRange { freq_mhz: 55, open_d: 0x08, rf_mux_ploy: 0x02, tf_c: 0x8b },
+    FreqRange { freq_mhz: 60, open_d: 0x08, rf_mux_ploy: 0x02, tf_c: 0x7b },
+    FreqRange { freq_mhz: 65, open_d: 0x08, rf_mux_ploy: 0x02, tf_c: 0x69 },
+    FreqRange { freq_mhz: 70, open_d: 0x08, rf_mux_ploy: 0x02, tf_c: 0x58 },
+    FreqRange { freq_mhz: 75, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x44 },
+    FreqRange { freq_mhz: 80, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x44 },
+    FreqRange { freq_mhz: 90, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x34 },
+    FreqRange { freq_mhz: 100, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x34 },
+    FreqRange { freq_mhz: 110, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x24 },
+    FreqRange { freq_mhz: 120, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x24 },
+    FreqRange { freq_mhz: 140, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x14 },
+    FreqRange { freq_mhz: 180, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x13 },
+    FreqRange { freq_mhz: 220, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x13 },
+    FreqRange { freq_mhz: 250, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x11 },
+    FreqRange { freq_mhz: 280, open_d: 0x00, rf_mux_ploy: 0x02, tf_c: 0x00 },
+    FreqRange { freq_mhz: 310, open_d: 0x00, rf_mux_ploy: 0x41, tf_c: 0x00 },
+    FreqRange { freq_mhz: 450, open_d: 0x00, rf_mux_ploy: 0x41, tf_c: 0x00 },
+    FreqRange { freq_mhz: 588, open_d: 0x00, rf_mux_ploy: 0x40, tf_c: 0x00 },
+    FreqRange { freq_mhz: 650, open_d: 0x00, rf_mux_ploy: 0x40, tf_c: 0x00 },
+];
+
+/// The mux / tracking-filter writes for LO `lo_hz`, transcribed from librtlsdr
+/// `r82xx_set_mux`. The xtal-cap write is the `XTAL_HIGH_CAP_0P` branch omnimodem
+/// pins at init, which resolves to `0x00` for every band.
+pub(crate) fn r82xx_mux_writes(lo_hz: u32) -> Vec<TunerOp> {
+    let freq_mhz = lo_hz / 1_000_000;
+    let mut range = &FREQ_RANGES[0];
+    for r in FREQ_RANGES {
+        if freq_mhz < r.freq_mhz {
+            break;
+        }
+        range = r;
+    }
+    vec![
+        TunerOp::Mask { reg: 0x17, val: range.open_d, mask: 0x08 },
+        TunerOp::Mask { reg: 0x1a, val: range.rf_mux_ploy, mask: 0xc3 },
+        TunerOp::Write { reg: 0x1b, val: range.tf_c },
+        // XTAL CAP & Drive — XTAL_HIGH_CAP_0P: xtal_cap0p (0x00) | 0x00.
+        TunerOp::Mask { reg: 0x10, val: 0x00, mask: 0x0b },
+    ]
+}
+
+/// The solved R82xx PLL parameters for one LO frequency. librtlsdr `r82xx_set_pll`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct R82xxPll {
+    /// Mixer divider (2..=64) whose product with the LO lands in the VCO window.
+    pub mix_div: u8,
+    /// `R16[7:5]` divider selector (log2(mix_div)-1, fine-tune-adjusted).
+    pub div_num: u8,
+    /// Integer part of `vco / (2·ref)`.
+    pub nint: u8,
+    /// Fractional part, in 1/65536ths (the sigma-delta value).
+    pub sdm: u16,
+    /// `R20[5:0]` low nibble (`nint` sub-index).
+    pub ni: u8,
+    /// `R20[7:6]` (`nint` remainder).
+    pub si: u8,
+}
+
+/// Solve the R82xx PLL for LO `lo_hz`, transcribed from librtlsdr `r82xx_set_pll`
+/// (the default `vco_algo == 0` path). `vco_fine_tune` is `(R4[5:4])` read back from
+/// the tuner; it nudges `div_num` by ±1 versus the chip's `vco_power_ref`. Returns
+/// [`AudioError::TunerFreqRange`] when no divider lands the VCO in range or `nint`
+/// overflows the PLL.
+pub(crate) fn r82xx_pll(
+    lo_hz: u32,
+    tuner: TunerKind,
+    vco_fine_tune: u8,
+) -> Result<R82xxPll, AudioError> {
+    const VCO_MIN_KHZ: u32 = 1_770_000;
+    const VCO_MAX_KHZ: u32 = VCO_MIN_KHZ * 2;
+    let pll_ref = RTL_XTAL_FREQ;
+    let freq_khz = (lo_hz + 500) / 1000;
+
+    // Pick the mixer divider that lands freq·mix_div inside the VCO window, and the
+    // R16 selector (div_num) that halves down to it.
+    let mut mix_div: u32 = 2;
+    let mut div_num: i32 = 0;
+    let mut found = false;
+    while mix_div <= 64 {
+        if freq_khz * mix_div >= VCO_MIN_KHZ && freq_khz * mix_div < VCO_MAX_KHZ {
+            let mut div_buf = mix_div;
+            while div_buf > 2 {
+                div_buf >>= 1;
+                div_num += 1;
+            }
+            found = true;
+            break;
+        }
+        mix_div <<= 1;
+    }
+    if !found {
+        return Err(AudioError::TunerFreqRange(lo_hz));
+    }
+
+    let vco_power_ref = tuner.vco_power_ref();
+    if vco_fine_tune > vco_power_ref {
+        div_num -= 1;
+    } else if vco_fine_tune < vco_power_ref {
+        div_num += 1;
+    }
+
+    // vco_div = round(65536 · vco / (2·ref)); nint + sdm/65536 = vco / (2·ref).
+    let vco_freq = u64::from(lo_hz) * u64::from(mix_div);
+    let vco_div = (u64::from(pll_ref) + 65536 * vco_freq) / (2 * u64::from(pll_ref));
+    let nint = (vco_div / 65536) as u32;
+    let sdm = (vco_div % 65536) as u16;
+
+    if nint > u32::from(128 / vco_power_ref) - 1 {
+        return Err(AudioError::TunerFreqRange(lo_hz));
+    }
+
+    let ni = ((nint - 13) / 4) as u8;
+    let si = (nint - 4 * u32::from(ni) - 13) as u8;
+
+    Ok(R82xxPll {
+        mix_div: mix_div as u8,
+        div_num: (div_num as u8) & 0x07,
+        nint: nint as u8,
+        sdm,
+        ni,
+        si,
+    })
+}
+
+/// The register writes that program a solved [`R82xxPll`], transcribed from
+/// librtlsdr `r82xx_set_pll`. `vco_fine_tune` is folded into `pll.div_num` already;
+/// dither stays enabled (the default). The interleaved lock-status reads and the
+/// VCO-current retry are runtime concerns and live in the transport, not here.
+pub(crate) fn r82xx_pll_writes(pll: &R82xxPll) -> Vec<TunerOp> {
+    // pw_sdm: power down the sigma-delta only when the fraction is exactly zero.
+    let pw_sdm = if pll.sdm == 0 { 0x08 } else { 0x00 };
+    vec![
+        // refdiv2 off
+        TunerOp::Mask { reg: 0x10, val: 0x00, mask: 0x10 },
+        // pll autotune = 128 kHz (fastest) while acquiring
+        TunerOp::Mask { reg: 0x1a, val: 0x00, mask: 0x0c },
+        // VCO current = min (default 0x80)
+        TunerOp::Mask { reg: 0x12, val: 0x80, mask: 0xe0 },
+        // divider selector
+        TunerOp::Mask { reg: 0x10, val: pll.div_num << 5, mask: 0xe0 },
+        // nint: ni in [5:0], si in [7:6]
+        TunerOp::Write { reg: 0x14, val: pll.ni + (pll.si << 6) },
+        // pw_sdm (dither bit 0x10 left clear = dither enabled)
+        TunerOp::Mask { reg: 0x12, val: pw_sdm, mask: 0x18 },
+        // sdm high then low byte
+        TunerOp::Write { reg: 0x16, val: (pll.sdm >> 8) as u8 },
+        TunerOp::Write { reg: 0x15, val: (pll.sdm & 0xff) as u8 },
+        // pll autotune = 8 kHz (settle)
+        TunerOp::Mask { reg: 0x1a, val: 0x08, mask: 0x08 },
+    ]
+}
+
+/// RF-input switch (Hz) for the R828D. Below this the tuner routes the 'Cable1'
+/// (VHF) input, above it the 'Air-In' (UHF) input. librtlsdr `r82xx_set_freq64`
+/// switches at 345 MHz (the noise floors cross there for equal LNA settings).
+const R828D_INPUT_SWITCH_HZ: u32 = 345_000_000;
+
+/// The R828D per-band RF-input switch write for RF `rf_hz`, transcribed from
+/// librtlsdr `r82xx_set_freq64` (non-extended path): route `R5[6:5]` to 'Cable1'
+/// below [`R828D_INPUT_SWITCH_HZ`], 'Air-In' above. The R820T has a single RF input,
+/// so this is empty for it. Applied after the PLL, at the tail of a tune.
+pub(crate) fn r82xx_input_writes(tuner: TunerKind, rf_hz: u32) -> Vec<TunerOp> {
+    match tuner {
+        TunerKind::R820T => Vec::new(),
+        TunerKind::R828D => {
+            let air_cable1_in = if rf_hz > R828D_INPUT_SWITCH_HZ { 0x00 } else { 0x60 };
+            vec![TunerOp::Mask { reg: 0x05, val: air_cable1_in, mask: 0x60 }]
+        }
+    }
+}
+
+/// Per-stage LNA gain increments (tenths of dB). librtlsdr `r82xx_lna_gain_steps`.
+const R82XX_LNA_GAIN_STEPS: [i32; 16] =
+    [0, 9, 13, 40, 38, 13, 31, 22, 26, 31, 26, 14, 19, 5, 35, 13];
+/// Per-stage mixer gain increments (tenths of dB). librtlsdr `r82xx_mixer_gain_steps`.
+const R82XX_MIXER_GAIN_STEPS: [i32; 16] =
+    [0, 5, 10, 10, 19, 9, 10, 25, 17, 10, 8, 16, 13, 6, 3, -8];
+
+/// The LNA and mixer register indices realising `gain_tenths_db` of manual RF gain,
+/// transcribed from librtlsdr `r82xx_get_rf_gain_index`: walk the LNA and mixer
+/// step tables alternately, accumulating until the target is met. The reachable sums
+/// are exactly the R82xx gain table [`tuner_gains_db`](super::tuner_gains_db)
+/// exposes, so the gRPC snap and this index search agree.
+pub(crate) fn r82xx_gain_indices(gain_tenths_db: i32) -> (u8, u8) {
+    let mut total = 0i32;
+    let mut lna_index = 0usize;
+    let mut mix_index = 0usize;
+    for _ in 0..15 {
+        if total >= gain_tenths_db {
+            break;
+        }
+        lna_index += 1;
+        total += R82XX_LNA_GAIN_STEPS[lna_index];
+        if total >= gain_tenths_db {
+            break;
+        }
+        mix_index += 1;
+        total += R82XX_MIXER_GAIN_STEPS[mix_index];
+    }
+    (lna_index as u8, mix_index as u8)
+}
+
+/// The register writes that select manual RF gain, transcribed from librtlsdr
+/// `r82xx_set_gain` (manual branch): switch LNA and mixer AGC off, then load the
+/// solved LNA/mixer indices. VGA is left at the init-array default. `gain_tenths_db`
+/// is snapped to the R82xx table before the index search so the tuner lands on a
+/// table value.
+pub(crate) fn r82xx_gain_manual_writes(gain_tenths_db: i32) -> Vec<TunerOp> {
+    let snapped = snap_gain_tenths(gain_tenths_db);
+    let (lna, mix) = r82xx_gain_indices(snapped);
+    vec![
+        // LNA auto off (manual)
+        TunerOp::Mask { reg: 0x05, val: 0x10, mask: 0x10 },
+        // Mixer auto off (manual)
+        TunerOp::Mask { reg: 0x07, val: 0x00, mask: 0x10 },
+        // set LNA gain index
+        TunerOp::Mask { reg: 0x05, val: lna, mask: 0x0f },
+        // set mixer gain index
+        TunerOp::Mask { reg: 0x07, val: mix, mask: 0x0f },
+    ]
+}
+
+/// The register writes that hand RF gain back to the tuner AGC, transcribed from
+/// librtlsdr `r82xx_set_gain` (automatic branch): LNA and mixer AGC on.
+pub(crate) fn r82xx_gain_auto_writes() -> Vec<TunerOp> {
+    vec![
+        // LNA auto on (AGC)
+        TunerOp::Mask { reg: 0x05, val: 0x00, mask: 0x10 },
+        // Mixer auto on (AGC)
+        TunerOp::Mask { reg: 0x07, val: 0x10, mask: 0x10 },
+    ]
+}
+
+/// Snap a tenths-of-dB gain request to the nearest R82xx table entry, reusing the
+/// shared [`snap_gain`](super::snap_gain) / [`tuner_gains_db`](super::tuner_gains_db)
+/// used by the gRPC gain setter, so the native path and the rtl_tcp path snap
+/// identically. R820T and R828D share one table (type code 5).
+fn snap_gain_tenths(gain_tenths_db: i32) -> i32 {
+    let table = super::tuner_gains_db(TunerKind::R820T.type_code());
+    let snapped_db = super::snap_gain(&table, gain_tenths_db as f32 / 10.0);
+    (snapped_db * 10.0).round() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +669,121 @@ mod tests {
         assert!(resamp_ratio(300_000).is_ok());
         assert!(resamp_ratio(900_001).is_ok());
         assert!(resamp_ratio(3_200_000).is_ok());
+    }
+
+    #[test]
+    fn tuner_probe_id_maps_addr_and_chip_id() {
+        // The R82xx chip id (0x69) at each known address selects the variant.
+        assert_eq!(tuner_kind_from_probe(0x34, 0x69), Some(TunerKind::R820T));
+        assert_eq!(tuner_kind_from_probe(0x74, 0x69), Some(TunerKind::R828D));
+        // Wrong chip id → no match (a different chip answered, or nothing did).
+        assert_eq!(tuner_kind_from_probe(0x34, 0x00), None);
+        assert_eq!(tuner_kind_from_probe(0x74, 0x68), None);
+        // Right id, unknown address → no match.
+        assert_eq!(tuner_kind_from_probe(0x12, 0x69), None);
+    }
+
+    #[test]
+    fn init_array_is_the_reference_image() {
+        let arr = r82xx_init_array();
+        assert_eq!(arr.len(), 27); // regs 0x05..=0x1f
+        assert_eq!(arr[0], 0x80); // reg 0x05
+        assert_eq!(arr[0x0c - 0x05], 0xeb); // reg 0x0c = 0xe0 | DEFAULT_IF_VGA_VAL(11)
+        assert_eq!(arr[0x13 - 0x05], 0x31); // reg 0x13 = VER_NUM(49) & 0x3f
+        assert_eq!(arr[0x1f - 0x05], 0x40); // reg 0x1f
+    }
+
+    #[test]
+    fn pll_divider_math_at_144_39_mhz() {
+        // RF 144.39 MHz → LO = RF + IF(3.57 MHz) = 147.96 MHz. With vco_fine_tune at
+        // the R820T's vco_power_ref (2), div_num takes no ±1 adjustment. Values
+        // hand-derived from librtlsdr r82xx_set_pll (default vco_algo path):
+        //   mix_div=16, div_num=3, vco=2367.36 MHz, nint=41, sdm=6554, ni=7, si=0.
+        let lo = 144_390_000 + R82XX_IF_FREQ;
+        let pll = r82xx_pll(lo, TunerKind::R820T, 2).unwrap();
+        assert_eq!(
+            pll,
+            R82xxPll { mix_div: 16, div_num: 3, nint: 41, sdm: 6554, ni: 7, si: 0 }
+        );
+
+        // The emitted register writes carry those values.
+        let ops = r82xx_pll_writes(&pll);
+        assert!(ops.contains(&TunerOp::Mask { reg: 0x10, val: 3 << 5, mask: 0xe0 }));
+        assert!(ops.contains(&TunerOp::Write { reg: 0x14, val: 7 })); // ni + (si<<6)
+        assert!(ops.contains(&TunerOp::Write { reg: 0x16, val: 0x19 })); // 6554 >> 8
+        assert!(ops.contains(&TunerOp::Write { reg: 0x15, val: 0x9a })); // 6554 & 0xff
+        // sdm != 0 → sigma-delta stays powered (pw_sdm bit clear).
+        assert!(ops.contains(&TunerOp::Mask { reg: 0x12, val: 0x00, mask: 0x18 }));
+    }
+
+    #[test]
+    fn pll_fine_tune_nudges_div_num() {
+        let lo = 144_390_000 + R82XX_IF_FREQ;
+        // fine_tune below the pivot bumps div_num up, above bumps it down.
+        assert_eq!(r82xx_pll(lo, TunerKind::R820T, 0).unwrap().div_num, 4);
+        assert_eq!(r82xx_pll(lo, TunerKind::R820T, 3).unwrap().div_num, 2);
+    }
+
+    #[test]
+    fn pll_rejects_unreachable_lo() {
+        // Far below the lowest divider's VCO window → no solution.
+        assert!(matches!(
+            r82xx_pll(1_000_000, TunerKind::R820T, 2),
+            Err(AudioError::TunerFreqRange(_))
+        ));
+    }
+
+    #[test]
+    fn mux_band_selection_tracks_lo() {
+        // 147.96 MHz → the 140 MHz band (open_d high, tf_c 0x14).
+        let ops = r82xx_mux_writes(147_960_000);
+        assert_eq!(ops[0], TunerOp::Mask { reg: 0x17, val: 0x00, mask: 0x08 });
+        assert_eq!(ops[1], TunerOp::Mask { reg: 0x1a, val: 0x02, mask: 0xc3 });
+        assert_eq!(ops[2], TunerOp::Write { reg: 0x1b, val: 0x14 });
+        assert_eq!(ops[3], TunerOp::Mask { reg: 0x10, val: 0x00, mask: 0x0b });
+
+        // Above the last band start (650 MHz) clamps to the final entry.
+        let hi = r82xx_mux_writes(900_000_000);
+        assert_eq!(hi[1], TunerOp::Mask { reg: 0x1a, val: 0x40, mask: 0xc3 });
+    }
+
+    #[test]
+    fn r828d_input_switch_tracks_band_r820t_has_none() {
+        // R820T: single input → no switch write.
+        assert!(r82xx_input_writes(TunerKind::R820T, 144_390_000).is_empty());
+        // R828D below 345 MHz → Cable1 (0x60); above → Air-In (0x00). Mask R5[6:5].
+        assert_eq!(
+            r82xx_input_writes(TunerKind::R828D, 144_390_000),
+            vec![TunerOp::Mask { reg: 0x05, val: 0x60, mask: 0x60 }]
+        );
+        assert_eq!(
+            r82xx_input_writes(TunerKind::R828D, 400_000_000),
+            vec![TunerOp::Mask { reg: 0x05, val: 0x00, mask: 0x60 }]
+        );
+        // The 345 MHz boundary itself is Cable1 (strict `>`).
+        assert_eq!(
+            r82xx_input_writes(TunerKind::R828D, 345_000_000),
+            vec![TunerOp::Mask { reg: 0x05, val: 0x60, mask: 0x60 }]
+        );
+    }
+
+    #[test]
+    fn gain_indices_snap_to_the_r82xx_table() {
+        // 19.7 dB (197 tenths) is a table entry → lna=6, mixer=5 (hand-traced from
+        // the alternating LNA/mixer accumulation).
+        assert_eq!(r82xx_gain_indices(197), (6, 5));
+        // Zero gain → both indices at the bottom.
+        assert_eq!(r82xx_gain_indices(0), (0, 0));
+
+        // Manual writes snap an off-table request (200 → 197) to the nearest entry
+        // and load its indices; auto writes just re-enable the AGC.
+        let manual = r82xx_gain_manual_writes(200);
+        assert!(manual.contains(&TunerOp::Mask { reg: 0x05, val: 6, mask: 0x0f }));
+        assert!(manual.contains(&TunerOp::Mask { reg: 0x07, val: 5, mask: 0x0f }));
+        assert!(manual.contains(&TunerOp::Mask { reg: 0x05, val: 0x10, mask: 0x10 }));
+
+        let auto = r82xx_gain_auto_writes();
+        assert_eq!(auto[0], TunerOp::Mask { reg: 0x05, val: 0x00, mask: 0x10 });
+        assert_eq!(auto[1], TunerOp::Mask { reg: 0x07, val: 0x10, mask: 0x10 });
     }
 }
