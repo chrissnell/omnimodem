@@ -129,13 +129,22 @@ impl RtlCmd {
 }
 
 /// Send the dongle its hardware parameters from the current control snapshot:
-/// sample rate, ppm, direct-sampling, bias-tee, gain mode/level, then center
-/// frequency (order mirrors `rtl_tcp` clients). Used both at connect and on every
-/// runtime control change, so a re-established or re-tuned link always matches
-/// `SdrControl` — the single source of truth that survives a dropped connection.
-fn send_hardware(sock: &mut TcpStream, control: &SdrControl) -> Result<(), AudioError> {
+/// (optionally) sample rate, then ppm, direct-sampling, bias-tee, gain mode/level,
+/// and center frequency (order mirrors `rtl_tcp` clients). Used both at connect and
+/// on every runtime control change, so a re-established or re-tuned link always
+/// matches `SdrControl` — the single source of truth that survives a dropped
+/// connection. `send_rate` gates the `SET_SAMPLE_RATE` (0x02) command: it is sent at
+/// connect and only when the rate actually changed, never on an unrelated tune/gain
+/// change, because reprogramming the resampler mid-stream needlessly glitches audio.
+fn send_hardware(
+    sock: &mut TcpStream,
+    control: &SdrControl,
+    send_rate: bool,
+) -> Result<(), AudioError> {
     let io = |e: std::io::Error| AudioError::Io(e.to_string());
-    sock.write_all(&RtlCmd::SampleRate(control.capture_rate()).encode()).map_err(io)?;
+    if send_rate {
+        sock.write_all(&RtlCmd::SampleRate(control.capture_rate()).encode()).map_err(io)?;
+    }
     sock.write_all(&RtlCmd::FreqCorrection(control.ppm()).encode()).map_err(io)?;
     sock.write_all(&RtlCmd::DirectSampling(control.direct_sampling()).encode()).map_err(io)?;
     sock.write_all(&RtlCmd::BiasTee(control.bias_tee()).encode()).map_err(io)?;
@@ -169,7 +178,9 @@ fn connect_and_handshake(
     sock.set_read_timeout(None).map_err(|e| AudioError::Io(e.to_string()))?;
     let hdr = parse_header(&header)?;
     let caps = caps_from_header(&hdr);
-    send_hardware(&mut sock, control)?;
+    // A fresh connection always (re)programs the sample rate, matching the
+    // pre-refactor `send_initial_commands`.
+    send_hardware(&mut sock, control, true)?;
     let cmd_sock = sock.try_clone().map_err(|e| AudioError::Io(e.to_string()))?;
     Ok((sock, cmd_sock, caps))
 }
@@ -209,6 +220,21 @@ fn backoff_wait(idx: &mut usize, stop: &AtomicBool) {
     *idx = (*idx + 1).min(RECONNECT_BACKOFF.len() - 1);
 }
 
+/// Merge a carried odd byte (a split IQ pair left over from the previous read)
+/// with a freshly read chunk into a whole-pair byte buffer, returning the paired
+/// bytes and any new leftover byte to carry into the next read. The transport owns
+/// this so a hidden reconnect can drop a stale carry (a fresh stream is re-aligned
+/// from byte 0) and the pipeline only ever sees whole IQ pairs.
+fn merge_iq_bytes(carry: Option<u8>, chunk: &[u8]) -> (Vec<u8>, Option<u8>) {
+    let mut bytes = Vec::with_capacity(chunk.len() + 1);
+    if let Some(c) = carry {
+        bytes.push(c);
+    }
+    bytes.extend_from_slice(chunk);
+    let next = if bytes.len() % 2 == 1 { bytes.pop() } else { None };
+    (bytes, next)
+}
+
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
@@ -237,6 +263,16 @@ struct RtlTcpTransport {
     backoff: usize,
     /// When the current connection was established, for the backoff reset.
     connected_at: Instant,
+    /// Odd IQ byte held back from the last read to pair with the next one. Reset to
+    /// `None` on every (re)connect so a fresh, byte-0-aligned stream never inherits a
+    /// stale half-pair (which would swap I/Q for the whole new connection).
+    carry: Option<u8>,
+    /// Reusable socket read buffer, sized to the caller's `buf` on first read.
+    scratch: Vec<u8>,
+    /// Last sample rate commanded to the dongle. `apply_hardware` re-sends
+    /// `SET_SAMPLE_RATE` only when this changes, so a routine tune/gain change does
+    /// not needlessly reprogram the resampler.
+    last_rate: Option<u32>,
 }
 
 impl RtlTcpTransport {
@@ -245,6 +281,8 @@ impl RtlTcpTransport {
     fn connect(addr: String, control: SdrControl) -> Result<Self, AudioError> {
         let (sock, cmd_sock, caps) = connect_and_handshake(&addr, &control)?;
         let shutdown_slot = Arc::new(Mutex::new(sock.try_clone().ok()));
+        // The handshake already programmed the sample rate.
+        let last_rate = Some(control.capture_rate());
         Ok(RtlTcpTransport {
             addr,
             sock,
@@ -255,6 +293,9 @@ impl RtlTcpTransport {
             stop: Arc::new(AtomicBool::new(false)),
             backoff: 0,
             connected_at: Instant::now(),
+            carry: None,
+            scratch: Vec::new(),
+            last_rate,
         })
     }
 
@@ -279,7 +320,14 @@ impl RtlTcpTransport {
                     *self.shutdown_slot.lock().unwrap() = sock.try_clone().ok();
                     self.sock = sock;
                     self.cmd_sock = cmd_sock;
+                    // Republish caps (matches the pre-refactor per-connect publish)
+                    // and reset the stream-boundary state for the fresh connection:
+                    // the handshake re-programmed the rate, and the new stream is
+                    // aligned from byte 0 so any half-pair carry must be dropped.
+                    self.control.set_caps(caps.clone());
                     self.caps = caps;
+                    self.last_rate = Some(self.control.capture_rate());
+                    self.carry = None;
                     self.connected_at = Instant::now();
                     return true;
                 }
@@ -293,13 +341,28 @@ impl RtlTcpTransport {
 
 impl SdrTransport for RtlTcpTransport {
     fn read_iq(&mut self, buf: &mut [u8]) -> Result<usize, AudioError> {
+        if self.scratch.len() != buf.len() {
+            self.scratch.resize(buf.len(), 0);
+        }
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(0);
             }
-            match self.sock.read(buf) {
-                Ok(0) => {}   // server closed — reconnect
-                Ok(n) => return Ok(n),
+            match self.sock.read(&mut self.scratch[..buf.len()]) {
+                Ok(0) => {} // server closed — reconnect
+                Ok(n) => {
+                    // Hand the pipeline only whole IQ pairs, carrying a split pair
+                    // across this read boundary. A single leftover byte (empty even
+                    // result) is not a terminal stop, so read more instead of
+                    // returning 0.
+                    let (bytes, carry) = merge_iq_bytes(self.carry.take(), &self.scratch[..n]);
+                    self.carry = carry;
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    return Ok(bytes.len());
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => {} // read error — reconnect
             }
@@ -316,7 +379,15 @@ impl SdrTransport for RtlTcpTransport {
     }
 
     fn apply_hardware(&mut self, control: &SdrControl) -> Result<(), AudioError> {
-        send_hardware(&mut self.cmd_sock, control)
+        // Only reprogram the sample rate when it actually changed (the resampler is
+        // disruptive to reprogram); a routine tune/gain/squelch change must not.
+        let rate = control.capture_rate();
+        let send_rate = self.last_rate != Some(rate);
+        send_hardware(&mut self.cmd_sock, control, send_rate)?;
+        if send_rate {
+            self.last_rate = Some(rate);
+        }
+        Ok(())
     }
 
     fn caps(&self) -> TunerCaps {
@@ -981,6 +1052,115 @@ mod tests {
 
         stop.store(true, Ordering::Relaxed);
         drop(cap);
+    }
+
+    #[test]
+    fn merge_iq_bytes_carries_split_pair_across_reads() {
+        // Even chunk, no carry: nothing left over.
+        let (b, c) = merge_iq_bytes(None, &[10, 20, 30, 40]);
+        assert_eq!(b, vec![10, 20, 30, 40]);
+        assert_eq!(c, None);
+
+        // Odd chunk: the trailing byte is held back for the next read.
+        let (b, c) = merge_iq_bytes(None, &[10, 20, 30]);
+        assert_eq!(b, vec![10, 20]);
+        assert_eq!(c, Some(30));
+
+        // The carried byte is prepended and re-paired on the next read; a new
+        // odd length carries again.
+        let (b, c) = merge_iq_bytes(Some(30), &[40, 50]);
+        assert_eq!(b, vec![30, 40]);
+        assert_eq!(c, Some(50));
+
+        // Carry + odd chunk that makes an even total: fully consumed.
+        let (b, c) = merge_iq_bytes(Some(1), &[2, 3, 4]);
+        assert_eq!(b, vec![1, 2, 3, 4]);
+        assert_eq!(c, None);
+    }
+
+    #[test]
+    fn read_iq_drops_half_pair_across_reconnect() {
+        // Regression: a link drop while an odd byte is carried must NOT shift the
+        // fresh stream. The transport drops the stale half-pair so I/Q stays aligned
+        // from byte 0 of the new connection; a retained carry would swap I/Q for the
+        // whole reconnected stream (spectrum mirrored, FM discriminator inverted).
+        let iq0 = vec![1u8, 2, 3]; // odd → byte 3 is carried at the drop
+        let iq1 = vec![10u8, 20, 30, 40, 50, 60, 70, 80];
+        let (port, _cmds2, stop) = spawn_reconnecting_server(iq0, iq1);
+        let mut transport =
+            RtlTcpTransport::connect(format!("127.0.0.1:{port}"), SdrControl::default()).unwrap();
+
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8];
+        for _ in 0..20 {
+            match transport.read_iq(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+            if got.len() >= 4 {
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        // iq0 delivered [1,2] (3 carried, then dropped at reconnect); iq1 arrives
+        // aligned as [10,20,…]. A leaked carry would have produced [1,2,3,10,…].
+        assert!(got.len() >= 4, "transport delivered too few bytes: {got:?}");
+        assert_eq!(&got[..4], &[1, 2, 10, 20], "half-pair carry leaked across reconnect");
+    }
+
+    #[test]
+    fn control_change_does_not_resend_sample_rate() {
+        // Regression: a non-rate change (bias-tee) must reprogram only that field —
+        // never re-send SET_SAMPLE_RATE (0x02), which would reset the resampler and
+        // glitch audio on every routine tune/gain toggle.
+        let (port, cmds, stop) = spawn_recording_server();
+        let backend = RtlTcpBackend::new("127.0.0.1", port);
+        let control = backend.control();
+        let cap = backend.open_capture(48_000).unwrap();
+
+        let count_rate =
+            || cmds.lock().unwrap().chunks_exact(5).filter(|f| f[0] == 0x02).count();
+        let saw_bias_on = || {
+            cmds.lock().unwrap().chunks_exact(5).any(|f| {
+                f[0] == 0x0e && u32::from_be_bytes([f[1], f[2], f[3], f[4]]) == 1
+            })
+        };
+
+        // Exactly one connect-time SampleRate, then audio flowing.
+        let mut initial = false;
+        for _ in 0..200 {
+            if count_rate() >= 1 {
+                initial = true;
+                break;
+            }
+            let _ = cap.rx.recv_timeout(Duration::from_millis(10));
+        }
+        assert!(initial, "connect-time SampleRate not observed");
+        assert!(
+            cap.rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "no audio before the control change"
+        );
+        let rate_frames_before = count_rate();
+
+        // A pure bias-tee change must not touch the sample rate.
+        control.set_bias_tee(true);
+        let mut bias_ok = false;
+        for _ in 0..300 {
+            if saw_bias_on() {
+                bias_ok = true;
+                break;
+            }
+            let _ = cap.rx.recv_timeout(Duration::from_millis(10));
+        }
+        let rate_frames_after = count_rate();
+        stop.store(true, Ordering::Relaxed);
+        drop(cap);
+        assert!(bias_ok, "BiasTee(on) not applied");
+        assert_eq!(
+            rate_frames_after, rate_frames_before,
+            "a non-rate control change re-sent SampleRate ({rate_frames_before} -> {rate_frames_after})"
+        );
     }
 
     #[test]

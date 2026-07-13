@@ -72,24 +72,11 @@ fn deliver_audio(
         if total == 1 || total.is_multiple_of(OVERRUN_LOG_EVERY) {
             tracing::warn!(
                 dropped = total,
-                "rtl_tcp capture overrun: consumer lagging, dropped oldest queued audio"
+                "sdr capture overrun: consumer lagging, dropped oldest queued audio"
             );
         }
     }
     Delivery::Live
-}
-
-/// Merge a carried odd byte (a split IQ pair left over from the previous read)
-/// with a freshly read chunk into a whole-pair byte buffer, returning the paired
-/// bytes and any new leftover byte to carry into the next read.
-pub(crate) fn merge_iq_bytes(carry: Option<u8>, chunk: &[u8]) -> (Vec<u8>, Option<u8>) {
-    let mut bytes = Vec::with_capacity(chunk.len() + 1);
-    if let Some(c) = carry {
-        bytes.push(c);
-    }
-    bytes.extend_from_slice(chunk);
-    let next = if bytes.len() % 2 == 1 { bytes.pop() } else { None };
-    (bytes, next)
 }
 
 /// Emit one RF-referenced waterfall line per complete STFT frame of the raw IQ.
@@ -170,7 +157,6 @@ pub(crate) fn run_capture<T: SdrTransport>(
         )
     });
     let mut seen_gen = control.generation();
-    let mut carry: Option<u8> = None;
 
     loop {
         let n = match transport.read_iq(&mut buf) {
@@ -179,12 +165,9 @@ pub(crate) fn run_capture<T: SdrTransport>(
             Err(_) => break, // terminal read error
         };
 
-        // Reassemble a whole-pair byte stream, carrying a split IQ pair across this
-        // read boundary.
-        let (bytes, next_carry) = merge_iq_bytes(carry.take(), &buf[..n]);
-        carry = next_carry;
-
-        let iq = u8_iq_to_cplx(&bytes);
+        // The transport hands back whole IQ pairs (even byte count) and drops any
+        // half-pair across a reconnect, so no boundary carry is reassembled here.
+        let iq = u8_iq_to_cplx(&buf[..n]);
         if iq.is_empty() {
             continue;
         }
@@ -353,29 +336,5 @@ mod tests {
             }
         }
         assert!(total > 0, "pipeline delivered no audio through the fake transport");
-    }
-
-    #[test]
-    fn merge_iq_bytes_carries_split_pair_across_reads() {
-        // Even chunk, no carry: nothing left over.
-        let (b, c) = merge_iq_bytes(None, &[10, 20, 30, 40]);
-        assert_eq!(b, vec![10, 20, 30, 40]);
-        assert_eq!(c, None);
-
-        // Odd chunk: the trailing byte is held back for the next read.
-        let (b, c) = merge_iq_bytes(None, &[10, 20, 30]);
-        assert_eq!(b, vec![10, 20]);
-        assert_eq!(c, Some(30));
-
-        // The carried byte is prepended and re-paired on the next read; a new
-        // odd length carries again.
-        let (b, c) = merge_iq_bytes(Some(30), &[40, 50]);
-        assert_eq!(b, vec![30, 40]);
-        assert_eq!(c, Some(50));
-
-        // Carry + odd chunk that makes an even total: fully consumed.
-        let (b, c) = merge_iq_bytes(Some(1), &[2, 3, 4]);
-        assert_eq!(b, vec![1, 2, 3, 4]);
-        assert_eq!(c, None);
     }
 }
