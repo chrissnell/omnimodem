@@ -45,4 +45,13 @@ pub enum AudioError {
     Io(String),
     #[error("backend unsupported on this platform")]
     Unsupported,
+    /// A matched USB dongle could not be claimed for exclusive use — the kernel
+    /// DVB driver is still bound, another process holds it, or the udev rules do
+    /// not grant access. Kept distinct so a later phase can classify it into
+    /// `needs_setup` and have the UI prompt the fix.
+    #[error("cannot claim USB interface for {0}: {1}")]
+    UsbClaim(String, String),
+    /// A USB control/bulk transfer failed after the device was claimed.
+    #[error("usb transfer error: {0}")]
+    Usb(String),
 }

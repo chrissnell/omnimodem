@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod pipeline;
 pub mod rtl_tcp;
+pub mod usb;
 
 // The public rtl_tcp surface stays reachable at `audio::sdr::*`, so callers (and
 // the existing integration tests via the `audio::rtlsdr` alias) need no path
