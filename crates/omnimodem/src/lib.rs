@@ -150,6 +150,7 @@ pub async fn serve_uds_phase2_for_test(
         label: "loopback".into(),
         has_capture: true,
         has_playback: true,
+        needs_setup: false,
     };
     let enumerator = Box::new(FakeEnumerator::new(vec![loopback]));
     let factory: core::AudioBackendFactory =

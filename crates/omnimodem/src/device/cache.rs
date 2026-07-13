@@ -57,6 +57,7 @@ mod tests {
             label: tag.into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         }
     }
 
