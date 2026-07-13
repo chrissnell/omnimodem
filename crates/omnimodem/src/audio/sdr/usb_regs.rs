@@ -160,6 +160,65 @@ pub(crate) fn sample_rate_writes(samp_rate: u32) -> Result<Vec<RegWrite>, AudioE
     ])
 }
 
+/// The signed IF offset the RTL2832U resampler applies for a `ppm` frequency
+/// correction: `offs = -ppm · 2^24 / 1e6`, truncated to the demod's 16-bit field.
+/// librtlsdr `rtlsdr_set_sample_freq_correction`.
+pub(crate) fn ppm_offset(ppm: i32) -> i16 {
+    ((-i64::from(ppm) * (1 << 24)) / 1_000_000) as i16
+}
+
+/// The demod register writes applying a `ppm` frequency correction, transcribed from
+/// librtlsdr `rtlsdr_set_sample_freq_correction`: the low byte of the signed
+/// [`ppm_offset`] into demod page-1 reg `0x3f`, its high six bits into `0x3e`.
+pub(crate) fn freq_correction_writes(ppm: i32) -> Vec<RegWrite> {
+    let offs = i32::from(ppm_offset(ppm)); // sign-extend, matching C's int promotion
+    vec![
+        RegWrite::Demod { page: 1, addr: 0x3f, val: (offs & 0xff) as u16, len: 1 },
+        RegWrite::Demod { page: 1, addr: 0x3e, val: ((offs >> 8) & 0x3f) as u16, len: 1 },
+    ]
+}
+
+/// The demod register writes setting the digital-downconversion IF to `freq` Hz,
+/// transcribed from librtlsdr `rtlsdr_set_if_freq`: `if_freq = -(freq · 2^22 / xtal)`
+/// spread across demod page-1 regs `0x19`/`0x1a`/`0x1b` (top six bits, mid byte, low
+/// byte). Used by [`direct_sampling_writes`] to restore the R82xx 3.57 MHz IF.
+pub(crate) fn if_freq_writes(freq: u32) -> Vec<RegWrite> {
+    let if_freq = -((u64::from(freq) * (1 << 22) / u64::from(RTL_XTAL_FREQ)) as i32);
+    vec![
+        RegWrite::Demod { page: 1, addr: 0x19, val: ((if_freq >> 16) & 0x3f) as u16, len: 1 },
+        RegWrite::Demod { page: 1, addr: 0x1a, val: ((if_freq >> 8) & 0xff) as u16, len: 1 },
+        RegWrite::Demod { page: 1, addr: 0x1b, val: (if_freq & 0xff) as u16, len: 1 },
+    ]
+}
+
+/// The demod register writes selecting a direct-sampling `mode`, transcribed from
+/// librtlsdr `rtlsdr_set_direct_sampling`. Non-zero bypasses the tuner and samples an
+/// RTL2832U ADC input directly (`mode > 1` selects the Q branch, else the I branch);
+/// `0` restores normal tuned operation. Only R820T/R828D reach the `0` branch — the
+/// probe rejects other tuners — so it always restores the R82xx 3.57 MHz IF and
+/// spectrum inversion. The tuner standby/re-init librtlsdr toggles around this is
+/// skipped: the tuner is harmless while its output is bypassed.
+pub(crate) fn direct_sampling_writes(mode: u32) -> Vec<RegWrite> {
+    use RegWrite::Demod as D;
+    if mode != 0 {
+        vec![
+            // disable Zero-IF mode
+            D { page: 1, addr: 0xb1, val: 0x1a, len: 1 },
+            // disable spectrum inversion
+            D { page: 1, addr: 0x15, val: 0x00, len: 1 },
+            // only enable the In-phase ADC input
+            D { page: 0, addr: 0x08, val: 0x4d, len: 1 },
+            // swap I/Q ADC to select between the two inputs (Q branch for mode > 1)
+            D { page: 0, addr: 0x06, val: if mode > 1 { 0x90 } else { 0x80 }, len: 1 },
+        ]
+    } else {
+        let mut ops = if_freq_writes(R82XX_IF_FREQ);
+        // enable spectrum inversion (R82xx tuned path)
+        ops.push(D { page: 1, addr: 0x15, val: 0x01, len: 1 });
+        ops
+    }
+}
+
 // ===========================================================================
 // R820T / R828D tuner (transcribed from librtlsdr `tuner_r82xx.c` + `librtlsdr.c`)
 // ===========================================================================
@@ -669,6 +728,80 @@ mod tests {
         assert!(resamp_ratio(300_000).is_ok());
         assert!(resamp_ratio(900_001).is_ok());
         assert!(resamp_ratio(3_200_000).is_ok());
+    }
+
+    #[test]
+    fn ppm_offset_matches_reference_conversion() {
+        // offs = -ppm * 2^24 / 1e6, truncated toward zero (librtlsdr int16_t).
+        assert_eq!(ppm_offset(0), 0);
+        assert_eq!(ppm_offset(60), -1006); // -60 * 16777216 / 1e6
+        assert_eq!(ppm_offset(-30), 503); // +30 * 16777216 / 1e6
+    }
+
+    #[test]
+    fn freq_correction_writes_split_offset_across_demod_regs() {
+        use RegWrite::Demod as D;
+        // ppm 60 → offs -1006 (0xFC12 in 16-bit): low byte 0x12, high six bits 0x3c.
+        assert_eq!(
+            freq_correction_writes(60),
+            vec![
+                D { page: 1, addr: 0x3f, val: 0x12, len: 1 },
+                D { page: 1, addr: 0x3e, val: 0x3c, len: 1 },
+            ]
+        );
+        // ppm -30 → offs +503 (0x01F7): low byte 0xf7, high six bits 0x01.
+        assert_eq!(
+            freq_correction_writes(-30),
+            vec![
+                D { page: 1, addr: 0x3f, val: 0xf7, len: 1 },
+                D { page: 1, addr: 0x3e, val: 0x01, len: 1 },
+            ]
+        );
+        // ppm 0 → both registers cleared.
+        assert_eq!(
+            freq_correction_writes(0),
+            vec![
+                D { page: 1, addr: 0x3f, val: 0x00, len: 1 },
+                D { page: 1, addr: 0x3e, val: 0x00, len: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn if_freq_writes_program_the_r82xx_if() {
+        use RegWrite::Demod as D;
+        // 3.57 MHz IF → if_freq = -519918 (0xFFF81112): 0x38, 0x11, 0x12.
+        assert_eq!(
+            if_freq_writes(R82XX_IF_FREQ),
+            vec![
+                D { page: 1, addr: 0x19, val: 0x38, len: 1 },
+                D { page: 1, addr: 0x1a, val: 0x11, len: 1 },
+                D { page: 1, addr: 0x1b, val: 0x12, len: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_sampling_writes_select_branch_and_restore() {
+        use RegWrite::Demod as D;
+        // I-branch (mode 1): reg 0x06 = 0x80.
+        let i_branch = direct_sampling_writes(1);
+        assert_eq!(i_branch[0], D { page: 1, addr: 0xb1, val: 0x1a, len: 1 });
+        assert_eq!(i_branch[1], D { page: 1, addr: 0x15, val: 0x00, len: 1 });
+        assert_eq!(i_branch[2], D { page: 0, addr: 0x08, val: 0x4d, len: 1 });
+        assert_eq!(i_branch[3], D { page: 0, addr: 0x06, val: 0x80, len: 1 });
+        // Q-branch (mode 2): only reg 0x06 differs (0x90).
+        assert_eq!(direct_sampling_writes(2)[3], D { page: 0, addr: 0x06, val: 0x90, len: 1 });
+        // Off (mode 0): restore the R82xx 3.57 MHz IF, then re-enable spectrum inversion.
+        assert_eq!(
+            direct_sampling_writes(0),
+            vec![
+                D { page: 1, addr: 0x19, val: 0x38, len: 1 },
+                D { page: 1, addr: 0x1a, val: 0x11, len: 1 },
+                D { page: 1, addr: 0x1b, val: 0x12, len: 1 },
+                D { page: 1, addr: 0x15, val: 0x01, len: 1 },
+            ]
+        );
     }
 
     #[test]

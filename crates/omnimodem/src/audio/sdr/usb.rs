@@ -12,7 +12,10 @@
 //! assembly — are transcribed from librtlsdr (`rtlsdr_read_reg` / `rtlsdr_write_reg`),
 //! the byte-level source of truth.
 
-use super::{usb_regs, AudioError};
+use super::{
+    bias_tee_supported, direct_sampling_supported, supported_sample_rates, tuner_freq_range,
+    tuner_gains_db, tuner_name, usb_regs, AudioError, SdrControl, TunerCaps,
+};
 use crate::ids::{DeviceId, RtlKey};
 use nusb::transfer::{Control, ControlType, Recipient};
 use std::time::Duration;
@@ -32,6 +35,16 @@ const RTL_INTERFACE: u8 = 0;
 const DEMOD_ADDR_FLAG: u16 = 0x20;
 /// Write-page flag OR'd into `wIndex` for a demod write. librtlsdr `0x10 | page`.
 const DEMOD_WRITE_FLAG: u16 = 0x10;
+
+/// System-block GPIO output register. librtlsdr `GPO`.
+const GPO: u16 = 0x3001;
+/// System-block GPIO output-enable register. librtlsdr `GPOE`.
+const GPOE: u16 = 0x3003;
+/// System-block GPIO direction register (a clear bit selects output). librtlsdr `GPD`.
+const GPD: u16 = 0x3004;
+/// The GPIO pin the bias-tee power switch hangs off. librtlsdr defaults
+/// `rtlsdr_set_bias_tee` to GPIO 0 (the RTL-SDR Blog V3 wiring).
+const BIAS_TEE_GPIO: u8 = 0;
 
 /// Realtek RTL2832U register blocks, selected in the high byte of the control
 /// `wIndex`. Transcribed from librtlsdr's block enum; only some are used before
@@ -260,6 +273,25 @@ pub(crate) fn apply_writes(
     Ok(())
 }
 
+/// Switch the bias-tee (inline LNA/antenna power over coax) on or off by driving the
+/// [`BIAS_TEE_GPIO`] pin. Configures the pin as an output (clear its direction bit,
+/// set its output-enable bit) then read-modify-writes the output level. Every step is
+/// a read-modify-write against the current register so unrelated GPIO bits are
+/// preserved. Transcribed from librtlsdr `rtlsdr_set_bias_tee_gpio` →
+/// `rtlsdr_set_gpio_output` + `rtlsdr_set_gpio_bit`.
+pub(crate) fn set_bias_tee(usb: &impl UsbControl, on: bool) -> Result<(), AudioError> {
+    let bit = 1u16 << BIAS_TEE_GPIO;
+    // Direction: clear the bit (0 = output) and enable the output driver.
+    let gpd = read_reg(usb, Block::Sys, GPD, 1)?;
+    write_reg(usb, Block::Sys, GPD, gpd & !bit, 1)?;
+    let gpoe = read_reg(usb, Block::Sys, GPOE, 1)?;
+    write_reg(usb, Block::Sys, GPOE, gpoe | bit, 1)?;
+    // Level: drive the pin high to power the bias-tee, low to remove it.
+    let gpo = read_reg(usb, Block::Sys, GPO, 1)?;
+    let gpo = if on { gpo | bit } else { gpo & !bit };
+    write_reg(usb, Block::Sys, GPO, gpo, 1)
+}
+
 // ---------------------------------------------------------------------------
 // I2C bus / R82xx tuner register I/O
 // ---------------------------------------------------------------------------
@@ -386,6 +418,10 @@ pub struct RtlUsbTransport {
     /// Mirror of the R82xx register file (indexed by absolute register), seeded by
     /// [`init_tuner`](Self::init_tuner) so masked writes read-modify-write correctly.
     tuner_shadow: [u8; usb_regs::NUM_REGS],
+    /// Last sample rate programmed into the resampler. [`apply_hardware`](Self::apply_hardware)
+    /// reprograms the rate only when this changes, mirroring `RtlTcpTransport` (the
+    /// resampler reset is disruptive to re-issue on a routine tune/gain change).
+    last_rate: Option<u32>,
 }
 
 impl RtlUsbTransport {
@@ -412,6 +448,7 @@ impl RtlUsbTransport {
             iface: RTL_INTERFACE,
             tuner: None,
             tuner_shadow: [0u8; usb_regs::NUM_REGS],
+            last_rate: None,
         })
     }
 
@@ -550,6 +587,134 @@ impl RtlUsbTransport {
             let ops = usb_regs::r82xx_gain_manual_writes(gain_tenths_db);
             apply_tuner_ops(&s.usb, tuner.i2c_addr(), &mut s.tuner_shadow, &ops)
         })
+    }
+
+    /// Apply a `ppm` frequency correction to the RTL2832U resampler
+    /// ([`usb_regs::freq_correction_writes`]). This programs only the demod IF-offset
+    /// registers; the tuner PLL runs off the nominal crystal, so a large correction is
+    /// approximate — matching the `rtl_tcp` opcode path, which likewise carries ppm as
+    /// a standalone command.
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_freq_correction(&self, ppm: i32) -> Result<(), AudioError> {
+        apply_writes(&self.usb, &usb_regs::freq_correction_writes(ppm))
+    }
+
+    /// Switch the bias-tee on or off (see [`set_bias_tee`]).
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_bias_tee(&self, on: bool) -> Result<(), AudioError> {
+        set_bias_tee(&self.usb, on)
+    }
+
+    /// Select a direct-sampling `mode` (0 = off, 1 = I-branch, 2 = Q-branch), applying
+    /// the demod datapath writes from [`usb_regs::direct_sampling_writes`]. Mode 0
+    /// restores the R82xx tuned path (3.57 MHz IF + spectrum inversion).
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_direct_sampling(&self, mode: u32) -> Result<(), AudioError> {
+        apply_writes(&self.usb, &usb_regs::direct_sampling_writes(mode))
+    }
+
+    /// One-time device bring-up: RTL2832U baseband init, tuner probe, and R82xx tuner
+    /// init. Idempotent once the tuner is known, so [`apply_hardware`](Self::apply_hardware)
+    /// can call it on every invocation and pay the cost only on the first. Runs lazily
+    /// (rather than in [`open`](Self::open)) so the seam stays free of hardware state
+    /// until the pipeline first commands the dongle.
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    fn bring_up(&mut self) -> Result<(), AudioError> {
+        if self.tuner.is_some() {
+            return Ok(());
+        }
+        self.init_baseband()?;
+        self.probe_tuner()?;
+        self.init_tuner()
+    }
+
+    /// Apply the current hardware parameters from `control` onto the dongle, in the
+    /// exact order [`RtlTcpTransport`](super::rtl_tcp::RtlTcpTransport) sends them:
+    /// sample rate (only when it changed), ppm, direct-sampling, bias-tee, gain
+    /// mode/level, then center frequency. Brings the device up on the first call. See
+    /// [`plan_apply_hardware`] for the pure ordering the mock-seam test asserts.
+    #[allow(dead_code)] // Wired into the SdrTransport impl in P2-E.
+    pub(crate) fn apply_hardware(&mut self, control: &SdrControl) -> Result<(), AudioError> {
+        self.bring_up()?;
+        let rate = control.capture_rate();
+        let send_rate = self.last_rate != Some(rate);
+        for op in plan_apply_hardware(control, send_rate) {
+            match op {
+                HwCall::SampleRate(r) => self.set_sample_rate(r)?,
+                HwCall::FreqCorrection(ppm) => self.set_freq_correction(ppm)?,
+                HwCall::DirectSampling(mode) => self.set_direct_sampling(mode)?,
+                HwCall::BiasTee(on) => self.set_bias_tee(on)?,
+                HwCall::GainMode { auto } => self.set_gain_mode(auto)?,
+                HwCall::TunerGain(tenths) => self.set_tuner_gain(tenths)?,
+                HwCall::CenterFreq(hz) => self.set_tuner_freq(hz)?,
+            }
+        }
+        if send_rate {
+            self.last_rate = Some(rate);
+        }
+        Ok(())
+    }
+
+    /// The capabilities of the probed tuner, derived from the same per-tuner tables the
+    /// `rtl_tcp` path publishes so `GetSdrCaps` answers identically. Requires
+    /// [`bring_up`](Self::bring_up) (via [`apply_hardware`](Self::apply_hardware)) to
+    /// have probed the tuner first.
+    #[allow(dead_code)] // Wired into the SdrTransport impl in P2-E.
+    pub(crate) fn caps(&self) -> TunerCaps {
+        caps_for_tuner(self.tuner.expect("tuner probed by bring_up before caps()"))
+    }
+}
+
+/// One hardware parameter operation [`RtlUsbTransport::apply_hardware`] performs, in
+/// the order it performs them. Modelling the plan as data keeps the ordering (and the
+/// gain-mode / rate-gating branches) unit-testable against a mock with no USB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HwCall {
+    SampleRate(u32),
+    FreqCorrection(i32),
+    DirectSampling(u32),
+    BiasTee(bool),
+    GainMode { auto: bool },
+    TunerGain(i32),
+    CenterFreq(u32),
+}
+
+/// The ordered hardware operations for a control snapshot, mirroring
+/// `RtlTcpTransport::send_hardware` exactly: sample rate first (gated on `send_rate`
+/// so a routine tune does not reprogram the resampler), then ppm, direct-sampling,
+/// bias-tee, gain mode, an explicit manual gain level, and finally the center
+/// frequency. Pure, so the `apply_hardware` ordering is asserted with no hardware.
+fn plan_apply_hardware(control: &SdrControl, send_rate: bool) -> Vec<HwCall> {
+    let mut ops = Vec::new();
+    if send_rate {
+        ops.push(HwCall::SampleRate(control.capture_rate()));
+    }
+    ops.push(HwCall::FreqCorrection(control.ppm()));
+    ops.push(HwCall::DirectSampling(control.direct_sampling()));
+    ops.push(HwCall::BiasTee(control.bias_tee()));
+    ops.push(HwCall::GainMode { auto: control.gain_auto() });
+    if !control.gain_auto() {
+        let tenths = (control.gain_db() * 10.0).round() as i32;
+        ops.push(HwCall::TunerGain(tenths));
+    }
+    ops.push(HwCall::CenterFreq(control.center_hz() as u32));
+    ops
+}
+
+/// The [`TunerCaps`] for a probed [`TunerKind`](usb_regs::TunerKind), built from the
+/// shared per-tuner tables keyed by the tuner's `rtl_tcp` type code so the native USB
+/// path and the `rtl_tcp` path publish identical capabilities.
+fn caps_for_tuner(tuner: usb_regs::TunerKind) -> TunerCaps {
+    let t = tuner.type_code();
+    let (freq_min_hz, freq_max_hz) = tuner_freq_range(t);
+    TunerCaps {
+        tuner: tuner_name(t).to_string(),
+        freq_min_hz,
+        freq_max_hz,
+        sample_rates: supported_sample_rates(),
+        gains_db: tuner_gains_db(t),
+        bias_tee_supported: bias_tee_supported(t),
+        direct_sampling_supported: direct_sampling_supported(t),
     }
 }
 
@@ -959,5 +1124,97 @@ mod tests {
         assert_eq!(parse_sysfs_port_chain("2-1", 2).as_deref(), Some("1"));
         assert_eq!(parse_sysfs_port_chain("1-4.2", 2), None); // bus mismatch
         assert_eq!(parse_sysfs_port_chain("usb1", 1), None); // root hub, no port chain
+    }
+
+    #[test]
+    fn set_bias_tee_read_modify_writes_the_gpio() {
+        // Configure GPIO0 as an output, then drive it high. Canned reads: GPD=0xff,
+        // GPOE=0x00, GPO=0x00 (bit 0 clear, other bits arbitrary).
+        let usb = FakeUsb::default();
+        usb.in_queue.borrow_mut().push(vec![0xff]); // GPD
+        usb.in_queue.borrow_mut().push(vec![0x00]); // GPOE
+        usb.in_queue.borrow_mut().push(vec![0x00]); // GPO
+        set_bias_tee(&usb, true).unwrap();
+
+        let writes = usb.writes.borrow();
+        assert_eq!(writes.len(), 3);
+        // GPD: clear bit 0 (0xff → 0xfe), addressed as a SYSB block write.
+        assert_eq!(writes[0].0.value, GPD);
+        assert_eq!(writes[0].0.index, ((Block::Sys as u16) << 8) | 0x10);
+        assert_eq!(writes[0].1, vec![0xfe]);
+        // GPOE: set bit 0 (0x00 → 0x01).
+        assert_eq!(writes[1].0.value, GPOE);
+        assert_eq!(writes[1].1, vec![0x01]);
+        // GPO: drive high (0x00 → 0x01).
+        assert_eq!(writes[2].0.value, GPO);
+        assert_eq!(writes[2].1, vec![0x01]);
+    }
+
+    #[test]
+    fn set_bias_tee_off_clears_only_the_pin() {
+        // GPO already has other bits set; turning the bias-tee off must clear only bit 0.
+        let usb = FakeUsb::default();
+        usb.in_queue.borrow_mut().push(vec![0x00]); // GPD
+        usb.in_queue.borrow_mut().push(vec![0x00]); // GPOE
+        usb.in_queue.borrow_mut().push(vec![0x05]); // GPO: bits 0 and 2 set
+        set_bias_tee(&usb, false).unwrap();
+
+        let writes = usb.writes.borrow();
+        // GPO write clears bit 0 (0x05 → 0x04), preserving bit 2.
+        assert_eq!(writes[2].0.value, GPO);
+        assert_eq!(writes[2].1, vec![0x04]);
+    }
+
+    #[test]
+    fn apply_hardware_plan_matches_rtl_tcp_order() {
+        let c = SdrControl::default();
+        c.set_capture_rate(2_400_000);
+        c.set_ppm(-5);
+        c.set_direct_sampling(2);
+        c.set_bias_tee(true);
+        c.set_gain(true, 0.0); // automatic AGC
+        c.set_center_hz(144_390_000.0);
+
+        // Auto gain with the rate to (re)send: rate first, no TunerGain, then center.
+        assert_eq!(
+            plan_apply_hardware(&c, true),
+            vec![
+                HwCall::SampleRate(2_400_000),
+                HwCall::FreqCorrection(-5),
+                HwCall::DirectSampling(2),
+                HwCall::BiasTee(true),
+                HwCall::GainMode { auto: true },
+                HwCall::CenterFreq(144_390_000),
+            ]
+        );
+
+        // Manual gain with the rate unchanged: SampleRate is omitted and a TunerGain
+        // (tenths) follows the manual GainMode, mirroring rtl_tcp exactly.
+        c.set_gain(false, 20.7);
+        assert_eq!(
+            plan_apply_hardware(&c, false),
+            vec![
+                HwCall::FreqCorrection(-5),
+                HwCall::DirectSampling(2),
+                HwCall::BiasTee(true),
+                HwCall::GainMode { auto: false },
+                HwCall::TunerGain(207),
+                HwCall::CenterFreq(144_390_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn caps_for_tuner_matches_the_shared_tables() {
+        let caps = caps_for_tuner(usb_regs::TunerKind::R820T);
+        assert_eq!(caps.tuner, "R820T");
+        assert_eq!(caps.gains_db.len(), 29); // the canonical R82xx gain table
+        assert!(caps.bias_tee_supported); // R820-class: bias-tee capable
+        assert!(caps.direct_sampling_supported); // universal ADC feature
+        assert!(caps.sample_rates.contains(&240_000)); // the 240 kHz default
+        assert!(caps.freq_min_hz < caps.freq_max_hz);
+
+        // R828D reuses the same table set, reporting under its own tuner name.
+        assert_eq!(caps_for_tuner(usb_regs::TunerKind::R828D).tuner, "R828D");
     }
 }
