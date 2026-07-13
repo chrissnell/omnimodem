@@ -12,7 +12,7 @@
 //! assembly — are transcribed from librtlsdr (`rtlsdr_read_reg` / `rtlsdr_write_reg`),
 //! the byte-level source of truth.
 
-use super::AudioError;
+use super::{usb_regs, AudioError};
 use crate::ids::{DeviceId, RtlKey};
 use nusb::transfer::{Control, ControlType, Recipient};
 use std::time::Duration;
@@ -27,6 +27,11 @@ const CTRL_OUT: u8 = 0x40;
 const CTRL_TIMEOUT: Duration = Duration::from_millis(300);
 /// The RTL2832U exposes its vendor functions on interface 0.
 const RTL_INTERFACE: u8 = 0;
+/// Demod-register flag OR'd into the low byte of `wValue` (the address rides the
+/// high byte). librtlsdr `rtlsdr_demod_write_reg`.
+const DEMOD_ADDR_FLAG: u16 = 0x20;
+/// Write-page flag OR'd into `wIndex` for a demod write. librtlsdr `0x10 | page`.
+const DEMOD_WRITE_FLAG: u16 = 0x10;
 
 /// Realtek RTL2832U register blocks, selected in the high byte of the control
 /// `wIndex`. Transcribed from librtlsdr's block enum; only some are used before
@@ -172,6 +177,89 @@ pub(crate) fn read_reg(
     Ok(((data[1] as u16) << 8) | data[0] as u16)
 }
 
+/// Write a demodulator register on `page`. The demod core uses a distinct encoding
+/// from the block registers: the address rides the high byte of `wValue` (with the
+/// `0x20` demod flag in the low byte), `page` sits in `wIndex` with the `0x10` write
+/// flag, and a 2-byte value is big-endian. Every demod write is followed by a dummy
+/// demod read that latches it — a hardware quirk replicated verbatim from librtlsdr
+/// (`rtlsdr_demod_write_reg`); its result is discarded and a failed latch read never
+/// fails the write.
+pub(crate) fn demod_write_reg(
+    usb: &impl UsbControl,
+    page: u8,
+    addr: u16,
+    val: u16,
+    len: u8,
+) -> Result<(), AudioError> {
+    debug_assert!(len == 1 || len == 2, "register width must be 1 or 2 bytes, got {len}");
+    let mut data = [0u8; 2];
+    if len == 1 {
+        data[0] = (val & 0xff) as u8;
+    } else {
+        data[0] = (val >> 8) as u8;
+    }
+    data[1] = (val & 0xff) as u8;
+
+    let setup = Setup {
+        request_type: CTRL_OUT,
+        request: 0,
+        value: (addr << 8) | DEMOD_ADDR_FLAG,
+        index: DEMOD_WRITE_FLAG | page as u16,
+    };
+    usb.control_out(setup, &data[..len as usize])?;
+
+    // Latch read (librtlsdr reads demod page 0x0a / addr 0x01 after every write).
+    let _ = demod_read_reg(usb, 0x0a, 0x01, 1);
+    Ok(())
+}
+
+/// Read a demodulator register on `page`. Same address encoding as
+/// [`demod_write_reg`], but `wIndex` carries only the page (no write flag) and the
+/// value is assembled little-endian. Transcribed from librtlsdr
+/// `rtlsdr_demod_read_reg`.
+pub(crate) fn demod_read_reg(
+    usb: &impl UsbControl,
+    page: u8,
+    addr: u16,
+    len: u8,
+) -> Result<u16, AudioError> {
+    debug_assert!(len == 1 || len == 2, "register width must be 1 or 2 bytes, got {len}");
+    let mut data = [0u8; 2];
+    let setup = Setup {
+        request_type: CTRL_IN,
+        request: 0,
+        value: (addr << 8) | DEMOD_ADDR_FLAG,
+        index: page as u16,
+    };
+    let n = usb.control_in(setup, &mut data[..len as usize])?;
+    if n != len as usize {
+        return Err(AudioError::Usb(format!(
+            "short demod read at page {page} addr {:#06x}: got {n} of {len} bytes",
+            addr
+        )));
+    }
+    Ok(((data[1] as u16) << 8) | data[0] as u16)
+}
+
+/// Issue an ordered [`usb_regs::RegWrite`] sequence, dispatching each entry to the
+/// block ([`write_reg`]) or demod ([`demod_write_reg`]) control-transfer path.
+pub(crate) fn apply_writes(
+    usb: &impl UsbControl,
+    ops: &[usb_regs::RegWrite],
+) -> Result<(), AudioError> {
+    for op in ops {
+        match *op {
+            usb_regs::RegWrite::Block { block, addr, val, len } => {
+                write_reg(usb, block, addr, val, len)?;
+            }
+            usb_regs::RegWrite::Demod { page, addr, val, len } => {
+                demod_write_reg(usb, page, addr, val, len)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A locally-attached RTL-SDR dongle, opened and claimed for exclusive use.
 ///
 /// P2-A establishes the USB seam only: identity match, claim (with Linux
@@ -217,6 +305,22 @@ impl RtlUsbTransport {
     #[allow(dead_code)] // Consumed by tuner probe/init in P2-B/P2-C.
     pub(crate) fn read_reg(&self, block: Block, addr: u16, len: u8) -> Result<u16, AudioError> {
         read_reg(&self.usb, block, addr, len)
+    }
+
+    /// Run the RTL2832U baseband bring-up ([`usb_regs::baseband_init`]) over the
+    /// claimed control endpoint: USB block init, demod power-on/reset, FIR filter,
+    /// and the SDR-mode/AGC/Zero-IF datapath configuration.
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn init_baseband(&self) -> Result<(), AudioError> {
+        apply_writes(&self.usb, &usb_regs::baseband_init())
+    }
+
+    /// Program the RTL2832U resampler for `samp_rate`
+    /// ([`usb_regs::sample_rate_writes`]), rejecting rates outside the resampler's
+    /// usable window.
+    #[allow(dead_code)] // Called from apply_hardware once it lands in P2-D.
+    pub(crate) fn set_sample_rate(&self, samp_rate: u32) -> Result<(), AudioError> {
+        apply_writes(&self.usb, &usb_regs::sample_rate_writes(samp_rate)?)
     }
 }
 
@@ -348,7 +452,10 @@ mod tests {
         }
         fn control_in(&self, setup: Setup, buf: &mut [u8]) -> Result<usize, AudioError> {
             *self.last_in.borrow_mut() = Some(setup);
-            let canned = self.in_queue.borrow_mut().remove(0);
+            // Unscripted reads (the demod-write latch reads) return no data; every
+            // explicitly-tested read pushes its own canned payload.
+            let mut queue = self.in_queue.borrow_mut();
+            let canned = if queue.is_empty() { Vec::new() } else { queue.remove(0) };
             let n = canned.len().min(buf.len());
             buf[..n].copy_from_slice(&canned[..n]);
             Ok(n)
@@ -421,6 +528,89 @@ mod tests {
         usb.in_queue.borrow_mut().push(vec![]); // device returned nothing
         let err = read_reg(&usb, Block::Sys, 0x0005, 2).unwrap_err();
         assert!(matches!(err, AudioError::Usb(_)));
+    }
+
+    #[test]
+    fn demod_write_reg_setup_and_latch_read() {
+        // librtlsdr's first baseband demod write: demod_write_reg(dev, 1, 0x01, 0x14, 1).
+        let usb = FakeUsb::default();
+        usb.in_queue.borrow_mut().push(vec![0x00]); // canned latch-read payload
+        demod_write_reg(&usb, 1, 0x01, 0x14, 1).unwrap();
+
+        let writes = usb.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        let (setup, data) = &writes[0];
+        assert_eq!(
+            *setup,
+            Setup {
+                request_type: 0x40,             // vendor | out | device
+                request: 0,
+                value: (0x01 << 8) | 0x20,      // addr in high byte + demod flag
+                index: 0x10 | 1,                // write flag + page 1
+            }
+        );
+        assert_eq!(data, &[0x14]); // 1-byte value → low byte only
+
+        // Every demod write is latched by a dummy read of demod page 0x0a / addr 0x01.
+        assert_eq!(
+            usb.last_in.borrow().unwrap(),
+            Setup {
+                request_type: 0xC0,             // vendor | in | device
+                request: 0,
+                value: (0x01 << 8) | 0x20,
+                index: 0x0a,                    // page only, no write flag
+            }
+        );
+    }
+
+    #[test]
+    fn demod_write_reg_two_byte_is_big_endian() {
+        let usb = FakeUsb::default();
+        demod_write_reg(&usb, 1, 0x9f, 0x0300, 2).unwrap();
+        let writes = usb.writes.borrow();
+        let (setup, data) = &writes[0];
+        assert_eq!(setup.value, (0x9f << 8) | 0x20);
+        assert_eq!(setup.index, 0x10 | 1);
+        assert_eq!(data, &[0x03, 0x00]); // high byte first on the wire
+    }
+
+    #[test]
+    fn init_baseband_emits_full_sequence_over_usb() {
+        let usb = FakeUsb::default();
+        apply_writes(&usb, &usb_regs::baseband_init()).unwrap();
+
+        let writes = usb.writes.borrow();
+        // Every op produces exactly one OUT transfer (latch reads are IN transfers).
+        assert_eq!(writes.len(), usb_regs::baseband_init().len());
+        // First OUT: USB_SYSCTL block write, block encoding.
+        assert_eq!(
+            writes[0].0,
+            Setup { request_type: 0x40, request: 0, value: 0x2000, index: (1 << 8) | 0x10 }
+        );
+        assert_eq!(writes[0].1, vec![0x09]);
+        // Sixth OUT (index 5): first demod write (soft reset), demod encoding.
+        assert_eq!(
+            writes[5].0,
+            Setup { request_type: 0x40, request: 0, value: (0x01 << 8) | 0x20, index: 0x10 | 1 }
+        );
+        assert_eq!(writes[5].1, vec![0x14]);
+    }
+
+    #[test]
+    fn set_sample_rate_emits_ratio_writes_over_usb() {
+        let usb = FakeUsb::default();
+        apply_writes(&usb, &usb_regs::sample_rate_writes(2_400_000).unwrap()).unwrap();
+
+        let writes = usb.writes.borrow();
+        assert_eq!(writes.len(), 4);
+        // ratio 0x0300_0000 → high half 0x0300 into 0x9f, low half 0x0000 into 0xa1.
+        assert_eq!(writes[0].0.value, (0x9f << 8) | 0x20);
+        assert_eq!(writes[0].1, vec![0x03, 0x00]);
+        assert_eq!(writes[1].0.value, (0xa1 << 8) | 0x20);
+        assert_eq!(writes[1].1, vec![0x00, 0x00]);
+        // Then the demod soft reset (assert / release).
+        assert_eq!(writes[2].1, vec![0x14]);
+        assert_eq!(writes[3].1, vec![0x10]);
     }
 
     #[test]

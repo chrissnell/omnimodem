@@ -54,4 +54,8 @@ pub enum AudioError {
     /// A USB control/bulk transfer failed after the device was claimed.
     #[error("usb transfer error: {0}")]
     Usb(String),
+    /// A requested sample rate lies outside the RTL2832U resampler's usable
+    /// window (librtlsdr rejects it before touching the hardware).
+    #[error("unsupported RTL sample rate: {0} Hz")]
+    UnsupportedSampleRate(u32),
 }
