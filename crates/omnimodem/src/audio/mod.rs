@@ -6,8 +6,13 @@ pub mod backend;
 pub mod file;
 pub mod fanout;
 pub mod resample;
-pub mod rtlsdr;
+pub mod sdr;
 pub mod stdin;
+
+/// Back-compat path for the SDR backend, which moved from a single `rtlsdr.rs`
+/// into the `sdr` module (transport seam + shared DSP pipeline). Kept so existing
+/// callers and the `rtl_tcp` integration tests reach it unchanged.
+pub use self::sdr as rtlsdr;
 
 #[cfg(not(test))]
 pub mod cpal_backend;

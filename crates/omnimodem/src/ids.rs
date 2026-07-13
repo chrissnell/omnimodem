@@ -15,8 +15,9 @@ pub struct TransmitId(pub u64);
 /// vendor/product/serial triple is the most durable; an ALSA stable card *name*
 /// is next; USB port topology is the fallback for two identical adapters that
 /// `by-id` cannot disambiguate; `Serial` wraps a `/dev/serial/by-id/<symlink>`
-/// (already stable). `Placeholder` is retained for the file/stdin/loopback
-/// backends and Phase-1 fixtures that have no physical identity.
+/// (already stable). `RtlTcp` and `Rtl` name a remote and a local (USB) RTL-SDR
+/// respectively. `Placeholder` is retained for the file/stdin/loopback backends
+/// and Phase-1 fixtures that have no physical identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DeviceId {
     /// USB device by vendor/product + serial. `serial` is empty when the
@@ -33,8 +34,30 @@ pub enum DeviceId {
     /// device; RF parameters are set separately via the SDR control path. A user
     /// can bind an ad-hoc `rtltcp:host:port` without pre-registration.
     RtlTcp { host: String, port: u16 },
+    /// A natively-attached (local USB) RTL-SDR dongle, keyed by its most durable
+    /// available identity (see [`RtlKey`]). Distinct from `RtlTcp`, which is a
+    /// remote endpoint.
+    Rtl { key: RtlKey },
     /// Non-physical backend (file/stdin/loopback) or a Phase-1 fixture.
     Placeholder { tag: String },
+}
+
+/// Identity of a locally-attached RTL-SDR dongle.
+///
+/// Cheap dongles frequently ship with a blank or duplicated serial (e.g.
+/// `00000001`), so the serial alone is not a safe key. Discovery prefers the
+/// serial form when it is unique among attached dongles and otherwise falls
+/// back to USB bus topology — the same disambiguation [`DeviceId::Topology`]
+/// performs for sound cards. Both forms live under the `rtl:` scheme so parsing
+/// stays unambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RtlKey {
+    /// A unique USB serial string → `rtl:serial:<s>`. Stable across ports and
+    /// reboots.
+    Serial(String),
+    /// USB bus topology: bus + port chain → `rtl:topo:<bus>-<ports>`. Keeps
+    /// "the dongle in this physical port" stable even with a junk serial.
+    Topo { bus: u8, ports: String },
 }
 
 impl DeviceId {
@@ -54,6 +77,10 @@ impl DeviceId {
             DeviceId::Topology { bus, ports } => format!("topo:{bus}-{ports}"),
             DeviceId::Serial { by_id } => format!("serial:{by_id}"),
             DeviceId::RtlTcp { host, port } => format!("rtltcp:{host}:{port}"),
+            DeviceId::Rtl { key } => match key {
+                RtlKey::Serial(s) => format!("rtl:serial:{s}"),
+                RtlKey::Topo { bus, ports } => format!("rtl:topo:{bus}-{ports}"),
+            },
             DeviceId::Placeholder { tag } => format!("virtual:{tag}"),
         }
     }
@@ -83,6 +110,21 @@ impl DeviceId {
                 let (host, port) = body.rsplit_once(':')?;
                 Some(DeviceId::RtlTcp { host: host.to_string(), port: port.parse().ok()? })
             }
+            "rtl" => {
+                // rtl:serial:<s>  or  rtl:topo:<bus>-<ports>. Split only the
+                // sub-scheme off so a serial may itself contain ':'.
+                let (sub, rest) = body.split_once(':')?;
+                match sub {
+                    "serial" => Some(DeviceId::Rtl { key: RtlKey::Serial(rest.to_string()) }),
+                    "topo" => {
+                        let (bus, ports) = rest.split_once('-')?;
+                        Some(DeviceId::Rtl {
+                            key: RtlKey::Topo { bus: bus.parse().ok()?, ports: ports.to_string() },
+                        })
+                    }
+                    _ => None,
+                }
+            }
             "virtual" => Some(DeviceId::Placeholder { tag: body.to_string() }),
             _ => None,
         }
@@ -106,7 +148,35 @@ mod device_id_tests {
         roundtrip(DeviceId::Topology { bus: 1, ports: "1.4.2".into() });
         roundtrip(DeviceId::Serial { by_id: "usb-FTDI_FT232R_AB0CDEFG-if00-port0".into() });
         roundtrip(DeviceId::RtlTcp { host: "192.168.1.50".into(), port: 1234 });
+        roundtrip(DeviceId::Rtl { key: RtlKey::Serial("00000001".into()) });
+        roundtrip(DeviceId::Rtl { key: RtlKey::Topo { bus: 1, ports: "4.2".into() } });
         roundtrip(DeviceId::placeholder());
+    }
+
+    #[test]
+    fn rtl_canonical_and_parse() {
+        let ser = DeviceId::Rtl { key: RtlKey::Serial("A1B2C3".into()) };
+        assert_eq!(ser.to_canonical_string(), "rtl:serial:A1B2C3");
+        assert_eq!(DeviceId::parse("rtl:serial:A1B2C3"), Some(ser));
+
+        let topo = DeviceId::Rtl { key: RtlKey::Topo { bus: 2, ports: "1.4.2".into() } };
+        assert_eq!(topo.to_canonical_string(), "rtl:topo:2-1.4.2");
+        assert_eq!(DeviceId::parse("rtl:topo:2-1.4.2"), Some(topo));
+
+        // A serial may itself contain ':' and still round-trips.
+        roundtrip(DeviceId::Rtl { key: RtlKey::Serial("a:b:c".into()) });
+    }
+
+    #[test]
+    fn rtl_rejects_malformed_keys() {
+        // Unknown sub-scheme.
+        assert_eq!(DeviceId::parse("rtl:bogus:x"), None);
+        // Missing sub-scheme separator.
+        assert_eq!(DeviceId::parse("rtl:serial"), None);
+        // Topology without a bus/ports separator.
+        assert_eq!(DeviceId::parse("rtl:topo:noports"), None);
+        // Non-numeric bus.
+        assert_eq!(DeviceId::parse("rtl:topo:x-1.2"), None);
     }
 
     #[test]
