@@ -40,6 +40,7 @@ pub fn device_descriptor_to_proto(d: &DeviceDescriptor) -> proto::DeviceInfo {
         label: d.label.clone(),
         has_capture: d.has_capture,
         has_playback: d.has_playback,
+        needs_setup: d.needs_setup,
     }
 }
 
@@ -352,6 +353,23 @@ mod tests {
             method: method as i32,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn needs_setup_reaches_the_wire_descriptor() {
+        use crate::device::enumerate::DeviceDescriptor;
+        use crate::ids::{DeviceId, RtlKey};
+        // An unclaimable dongle (Linux DVB driver still bound, or Windows without
+        // WinUSB) must carry needs_setup out over ListDevices so a client can
+        // prompt the operator rather than the device silently failing to open.
+        let d = DeviceDescriptor {
+            id: DeviceId::Rtl { key: RtlKey::Topo { bus: 1, ports: "4".into() } },
+            label: "RTL2838UHIDIR".into(),
+            has_capture: true,
+            has_playback: false,
+            needs_setup: true,
+        };
+        assert!(device_descriptor_to_proto(&d).needs_setup);
     }
 
     #[test]

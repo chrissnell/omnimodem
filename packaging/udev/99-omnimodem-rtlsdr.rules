@@ -1,0 +1,100 @@
+# omnimodem — udev rules for locally-attached RTL2832U SDR dongles.
+#
+# Grants the logged-in desktop user read/write access to any recognized RTL-SDR
+# dongle so omnimodem can claim the USB interface directly (pure-Rust nusb, no
+# C driver). Without this, only root can open the device on most distros.
+#
+# Install:
+#   sudo cp packaging/udev/99-omnimodem-rtlsdr.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   # then re-plug the dongle.
+#
+# TAG+="uaccess" hands access to the active seat's user via systemd-logind ACLs;
+# MODE="0660" is the fallback for systems without uaccess. The id list mirrors
+# RTL_USB_IDS in crates/omnimodem/src/device/enumerate.rs — keep them in sync.
+#
+# NOTE: these rules only govern *permissions*. If the kernel DVB-T driver
+# (dvb_usb_rtl28xxu) grabs the dongle first, blacklist it — see docs/running.md.
+
+# Generic RTL2832U
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2832", MODE="0660", TAG+="uaccess"
+# Generic RTL2832U OEM (most common blog-v3 dongles)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", MODE="0660", TAG+="uaccess"
+# DigitalNow Quad DVB-T PCI-E card
+SUBSYSTEM=="usb", ATTR{idVendor}=="0413", ATTR{idProduct}=="6680", MODE="0660", TAG+="uaccess"
+# Leadtek WinFast DTV Dongle mini D
+SUBSYSTEM=="usb", ATTR{idVendor}=="0413", ATTR{idProduct}=="6f0f", MODE="0660", TAG+="uaccess"
+# Genius TVGo DVB-T03 USB dongle (Ver. B)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0458", ATTR{idProduct}=="707f", MODE="0660", TAG+="uaccess"
+# Terratec Cinergy T Stick Black (rev 1)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00a9", MODE="0660", TAG+="uaccess"
+# Terratec NOXON DAB/DAB+ USB dongle (rev 1)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00b3", MODE="0660", TAG+="uaccess"
+# Terratec Deutschlandradio DAB Stick
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00b4", MODE="0660", TAG+="uaccess"
+# Terratec NOXON DAB Stick - Radio Energy
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00b5", MODE="0660", TAG+="uaccess"
+# Terratec Media Broadcast DAB Stick
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00b7", MODE="0660", TAG+="uaccess"
+# Terratec BitStar
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00b8", MODE="0660", TAG+="uaccess"
+# Terratec Cinergy T Stick RC (Rev.3)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00b9", MODE="0660", TAG+="uaccess"
+# Terratec T Stick PLUS
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00c0", MODE="0660", TAG+="uaccess"
+# Terratec Cinergy T Stick RC (Rev.3)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00d3", MODE="0660", TAG+="uaccess"
+# Terratec T Stick PLUS
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00d7", MODE="0660", TAG+="uaccess"
+# Terratec NOXON DAB/DAB+ USB dongle (rev 2)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0ccd", ATTR{idProduct}=="00e0", MODE="0660", TAG+="uaccess"
+# PixelView PV-DT235U(RN)
+SUBSYSTEM=="usb", ATTR{idVendor}=="1554", ATTR{idProduct}=="5020", MODE="0660", TAG+="uaccess"
+# Astrometa DVB-T/DVB-T2
+SUBSYSTEM=="usb", ATTR{idVendor}=="15f4", ATTR{idProduct}=="0131", MODE="0660", TAG+="uaccess"
+# HanfTek DAB+FM+DVB-T
+SUBSYSTEM=="usb", ATTR{idVendor}=="15f4", ATTR{idProduct}=="0133", MODE="0660", TAG+="uaccess"
+# Compro Videomate U620F
+SUBSYSTEM=="usb", ATTR{idVendor}=="185b", ATTR{idProduct}=="0620", MODE="0660", TAG+="uaccess"
+# Compro Videomate U650F
+SUBSYSTEM=="usb", ATTR{idVendor}=="185b", ATTR{idProduct}=="0650", MODE="0660", TAG+="uaccess"
+# Compro Videomate U680F
+SUBSYSTEM=="usb", ATTR{idVendor}=="185b", ATTR{idProduct}=="0680", MODE="0660", TAG+="uaccess"
+# GIGABYTE GT-U7300
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d393", MODE="0660", TAG+="uaccess"
+# DIKOM USB-DVBT HD
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d394", MODE="0660", TAG+="uaccess"
+# Peak 102569AGPK
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d395", MODE="0660", TAG+="uaccess"
+# KWorld KW-UB450-T USB DVB-T Pico TV
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d397", MODE="0660", TAG+="uaccess"
+# Zaapa ZT-MINDVBZP
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d398", MODE="0660", TAG+="uaccess"
+# SVEON STV20 DVB-T USB & FM
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d39d", MODE="0660", TAG+="uaccess"
+# Twintech UT-40
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d3a4", MODE="0660", TAG+="uaccess"
+# ASUS U3100MINI_PLUS_V2
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d3a8", MODE="0660", TAG+="uaccess"
+# SVEON STV27 DVB-T USB & FM
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d3af", MODE="0660", TAG+="uaccess"
+# SVEON STV21 DVB-T USB & FM
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b80", ATTR{idProduct}=="d3b0", MODE="0660", TAG+="uaccess"
+# Dexatek DK DVB-T Dongle (Logilink VG0002A)
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d19", ATTR{idProduct}=="1101", MODE="0660", TAG+="uaccess"
+# Dexatek DK DVB-T Dongle (MSI DigiVox mini II V3.0)
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d19", ATTR{idProduct}=="1102", MODE="0660", TAG+="uaccess"
+# Dexatek Technology Ltd. DK 5217 DVB-T Dongle
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d19", ATTR{idProduct}=="1103", MODE="0660", TAG+="uaccess"
+# MSI DigiVox Micro HD
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d19", ATTR{idProduct}=="1104", MODE="0660", TAG+="uaccess"
+# Sweex DVB-T USB
+SUBSYSTEM=="usb", ATTR{idVendor}=="1f4d", ATTR{idProduct}=="a803", MODE="0660", TAG+="uaccess"
+# GTek T803
+SUBSYSTEM=="usb", ATTR{idVendor}=="1f4d", ATTR{idProduct}=="b803", MODE="0660", TAG+="uaccess"
+# Lifeview LV5TDeluxe
+SUBSYSTEM=="usb", ATTR{idVendor}=="1f4d", ATTR{idProduct}=="c803", MODE="0660", TAG+="uaccess"
+# MyGica TD312
+SUBSYSTEM=="usb", ATTR{idVendor}=="1f4d", ATTR{idProduct}=="d286", MODE="0660", TAG+="uaccess"
+# PROlectrix DV107669
+SUBSYSTEM=="usb", ATTR{idVendor}=="1f4d", ATTR{idProduct}=="d803", MODE="0660", TAG+="uaccess"

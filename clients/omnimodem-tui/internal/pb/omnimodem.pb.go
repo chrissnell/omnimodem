@@ -3133,11 +3133,16 @@ func (*ListDevicesRequest) Descriptor() ([]byte, []int) {
 }
 
 type DeviceInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeviceId      string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // canonical DeviceId string (see ids.rs)
-	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`                       // operator-facing name
-	HasCapture    bool                   `protobuf:"varint,3,opt,name=has_capture,json=hasCapture,proto3" json:"has_capture,omitempty"`
-	HasPlayback   bool                   `protobuf:"varint,4,opt,name=has_playback,json=hasPlayback,proto3" json:"has_playback,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId    string                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // canonical DeviceId string (see ids.rs)
+	Label       string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`                       // operator-facing name
+	HasCapture  bool                   `protobuf:"varint,3,opt,name=has_capture,json=hasCapture,proto3" json:"has_capture,omitempty"`
+	HasPlayback bool                   `protobuf:"varint,4,opt,name=has_playback,json=hasPlayback,proto3" json:"has_playback,omitempty"`
+	// Present but not yet usable until an OS-level setup step runs: on Linux the
+	// DVB kernel driver is still bound; on Windows no WinUSB driver is bound (run
+	// Zadig). Surfaced so a client can prompt the operator instead of the device
+	// silently failing to open. false for ordinary cpal / rtl_tcp devices.
+	NeedsSetup    bool `protobuf:"varint,5,opt,name=needs_setup,json=needsSetup,proto3" json:"needs_setup,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3196,6 +3201,13 @@ func (x *DeviceInfo) GetHasCapture() bool {
 func (x *DeviceInfo) GetHasPlayback() bool {
 	if x != nil {
 		return x.HasPlayback
+	}
+	return false
+}
+
+func (x *DeviceInfo) GetNeedsSetup() bool {
+	if x != nil {
+		return x.NeedsSetup
 	}
 	return false
 }
@@ -5346,14 +5358,16 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\x06Status\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x1b\n" +
 	"\ttx_frames\x18\x02 \x01(\x04R\btxFrames\"\x14\n" +
-	"\x12ListDevicesRequest\"\x83\x01\n" +
+	"\x12ListDevicesRequest\"\xa4\x01\n" +
 	"\n" +
 	"DeviceInfo\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label\x12\x1f\n" +
 	"\vhas_capture\x18\x03 \x01(\bR\n" +
 	"hasCapture\x12!\n" +
-	"\fhas_playback\x18\x04 \x01(\bR\vhasPlayback\"I\n" +
+	"\fhas_playback\x18\x04 \x01(\bR\vhasPlayback\x12\x1f\n" +
+	"\vneeds_setup\x18\x05 \x01(\bR\n" +
+	"needsSetup\"I\n" +
 	"\x13ListDevicesResponse\x122\n" +
 	"\adevices\x18\x01 \x03(\v2\x18.omnimodem.v1.DeviceInfoR\adevices\"\xcf\x01\n" +
 	"\x15ConfigureAudioRequest\x12\x18\n" +
