@@ -452,6 +452,11 @@ message DeviceInfo {
   string label = 2;       // operator-facing name
   bool has_capture = 3;
   bool has_playback = 4;
+  // Present but not yet usable until an OS-level setup step runs: on Linux the
+  // DVB kernel driver is still bound; on Windows no WinUSB driver is bound (run
+  // Zadig). Surfaced so a client can prompt the operator instead of the device
+  // silently failing to open. false for ordinary cpal / rtl_tcp devices.
+  bool needs_setup = 5;
 }
 
 message ListDevicesResponse {

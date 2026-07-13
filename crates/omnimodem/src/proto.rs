@@ -38,6 +38,7 @@ mod tests {
             label: "C-Media".into(),
             has_capture: true,
             has_playback: true,
+            needs_setup: false,
         };
         let _ = Event { kind: Some(event::Kind::PttState(PttState { channel: 0, keyed: true })) };
         assert_eq!(PttMethod::SerialRts as i32, 3);

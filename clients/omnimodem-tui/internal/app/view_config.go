@@ -14,9 +14,12 @@ import (
 )
 
 // devEntry is one enumerated audio device: its id, display label, and I/O caps.
+// needsSetup marks a device present but not yet usable until an OS-level setup
+// step runs (Linux DVB driver bound, Windows without WinUSB — run Zadig).
 type devEntry struct {
 	id, label         string
 	capture, playback bool
+	needsSetup        bool
 }
 
 // pickerKind is which pop-up chooser is open over the Configure form. All three
@@ -290,6 +293,7 @@ func (v *configView) setDevices(devs []*pb.DeviceInfo) {
 		v.devs = append(v.devs, devEntry{
 			id: d.GetDeviceId(), label: d.GetLabel(),
 			capture: d.GetHasCapture(), playback: d.GetHasPlayback(),
+			needsSetup: d.GetNeedsSetup(),
 		})
 	}
 }
@@ -426,8 +430,17 @@ func (v *configView) pickerColumns(w int) []ui.Column {
 	case pickMode:
 		return []ui.Column{{Title: "MODE", Width: clampInt(w-6, 22, 28)}}
 	default: // device
+		// The I/O cell is normally width 5 ("RX·TX"), but a needs-setup device
+		// widens it with a "⚠ setup" badge; size the column to the widest cell
+		// actually present so the badge isn't truncated away. `avail` tracks the
+		// column so DEVICE/ID give back exactly the width the badge takes.
 		ioW := 5
-		avail := clampInt(w-14, 24, 56)
+		for _, d := range v.capabilityDevices() {
+			if cw := lipgloss.Width(ioFlags(d)); cw > ioW {
+				ioW = cw
+			}
+		}
+		avail := clampInt(w-9-ioW, 24, 56)
 		nameW := clampInt(avail*3/5, 12, 40)
 		idW := clampInt(avail-nameW, 10, 30)
 		return []ui.Column{{Title: "DEVICE", Width: nameW}, {Title: "ID", Width: idW}, {Title: "I/O", Width: ioW}}
@@ -1024,18 +1037,25 @@ func pickWindow(idx, n, max int) (int, int) {
 	return start, start + max
 }
 
-// ioFlags is the compact capability badge shown in the device table.
+// ioFlags is the compact capability badge shown in the device table. A device
+// that still needs an OS-level setup step is flagged so the operator knows why
+// binding it will fail until they run the fix (see docs/running.md).
 func ioFlags(d devEntry) string {
+	var cap string
 	switch {
 	case d.capture && d.playback:
-		return "RX·TX"
+		cap = "RX·TX"
 	case d.capture:
-		return "RX"
+		cap = "RX"
 	case d.playback:
-		return "TX"
+		cap = "TX"
 	default:
-		return "—"
+		cap = "—"
 	}
+	if d.needsSetup {
+		return cap + " ⚠ setup"
+	}
+	return cap
 }
 
 // focusBetween reports whether the focused field lies in [lo, hi] — i.e. the card

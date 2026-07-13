@@ -143,6 +143,26 @@ func TestConfigDevicePickerModalOpensAndCloses(t *testing.T) {
 	}
 }
 
+// A device that still needs an OS-level setup step (Linux DVB driver bound,
+// Windows without WinUSB) is flagged in the picker's I/O column. The badge must
+// survive the table's fixed-width cell truncation — the whole point is telling
+// the operator what to fix — so the I/O column must widen to fit "⚠ setup".
+func TestConfigDevicePickerShowsFullNeedsSetupBadge(t *testing.T) {
+	m := New(&client.Fake{}, "x")
+	v := newConfigView(m)
+	v.setDevices([]*pb.DeviceInfo{
+		{DeviceId: "rtl:topo:1:4", Label: "RTL2838UHIDIR", HasCapture: true, NeedsSetup: true},
+	})
+	v.focus = fRx
+	v.openPicker(pickDevice)
+
+	out := v.Render(80, 24)
+	// The full word must appear, not just a truncated "⚠…" glyph.
+	if !strings.Contains(out, "setup") {
+		t.Fatalf("needs-setup device must render its full 'setup' badge, not a truncated glyph:\n%s", out)
+	}
+}
+
 // Esc inside the open picker cancels the pick (closes the modal) without
 // leaving the Configure screen.
 func TestConfigDevicePickerEscCancels(t *testing.T) {

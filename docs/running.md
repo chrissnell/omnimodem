@@ -86,6 +86,68 @@ For the full RTL-SDR setup — starting `rtl_tcp`, binding, tuning, the waterfal
 demod modes, gain/squelch/ppm, and the reconnect/overrun behavior — see the operator's
 guide [`sdr-rtl-tcp.md`](sdr-rtl-tcp.md).
 
+## Native (local USB) RTL-SDR dongles
+
+A dongle plugged straight into this machine is discovered automatically — no
+`rtl_tcp`, no config entry — and shows up in `ListDevices` as an `rtl:` device.
+The daemon claims the USB interface directly (pure-Rust `nusb`, no `librtlsdr`).
+Each OS needs a one-time permission or driver step; when it hasn't been done the
+device still appears in `ListDevices` with **`needs_setup`** set, so the TUI can
+tell you *what* to fix instead of the dongle silently failing to open.
+
+### Linux — udev rule + DVB driver blacklist
+
+Two independent things can keep the daemon from opening the dongle:
+
+1. **Permissions.** By default only root can open a raw USB device. Install the
+   bundled udev rule to grant your desktop user access:
+
+   ```sh
+   sudo cp packaging/udev/99-omnimodem-rtlsdr.rules /etc/udev/rules.d/
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   # then unplug and re-plug the dongle
+   ```
+
+   The rule tags every recognized RTL2832U id (mirroring `RTL_USB_IDS` in
+   `crates/omnimodem/src/device/enumerate.rs`) with `uaccess`, handing access to
+   the logged-in seat's user, with `MODE="0660"` as a fallback.
+
+2. **The kernel DVB-T driver.** On most distros `dvb_usb_rtl28xxu` binds the
+   dongle at plug-in and treats it as a TV tuner. omnimodem detaches it at claim
+   time, but the clean fix is to blacklist it so it never grabs the device:
+
+   ```sh
+   # /etc/modprobe.d/blacklist-omnimodem-rtlsdr.conf
+   blacklist dvb_usb_rtl28xxu
+   ```
+
+   Then unload it for the current session (`sudo rmmod dvb_usb_rtl28xxu`) or
+   reboot. If the daemon logs a claim/`needs_setup` error on Linux, this driver
+   is almost always the cause.
+
+### Windows — Zadig (WinUSB) driver
+
+Windows will not let the daemon claim the dongle until a generic **WinUSB** (or
+libusb) driver is bound to it. Until then the device is listed with
+`needs_setup` set. One-time fix with [Zadig](https://zadig.akeo.ie/):
+
+1. Plug in the dongle and run Zadig as Administrator.
+2. **Options → List All Devices**, then pick the RTL-SDR interface (a
+   `Bulk-In, Interface (Interface 0)` on a `0bda`-family dongle).
+3. Select the **WinUSB** driver in the target box and click *Replace Driver*.
+4. Re-run `ListDevices` — `needs_setup` clears and the dongle is bindable.
+
+Zadig replaces the driver per physical port; move the dongle to a different USB
+port and you may need to repeat it for that port.
+
+### macOS
+
+No per-device setup is required. macOS has no in-kernel DVB driver competing for
+the dongle, so the daemon claims interface 0 directly on plug-in and the device
+is immediately bindable — `needs_setup` stays `false`. If a claim ever fails,
+make sure no other SDR application (SDR++, CubicSDR, GQRX via SoapySDR) already
+holds the device.
+
 ## Test
 
 ```sh
