@@ -60,6 +60,12 @@ pub fn production_core(
             if let ids::DeviceId::RtlTcp { host, port } = &desc.id {
                 return Box::new(audio::sdr::RtlTcpBackend::new(host.clone(), *port));
             }
+            // A locally-attached RTL-SDR dongle, driven natively over USB. Bound by
+            // its `rtl:` identity (discovered by the nusb scan), not cpal
+            // enumeration; the core injects the SDR context before open_capture.
+            if let ids::DeviceId::Rtl { key } = &desc.id {
+                return Box::new(audio::sdr::usb::RtlUsbBackend::new(key.clone()));
+            }
             for (id, backend) in audio::cpal_backend::enumerate_default_host() {
                 if id == desc.id {
                     return Box::new(backend);

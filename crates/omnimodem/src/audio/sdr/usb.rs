@@ -13,12 +13,23 @@
 //! the byte-level source of truth.
 
 use super::{
-    bias_tee_supported, direct_sampling_supported, supported_sample_rates, tuner_freq_range,
-    tuner_gains_db, tuner_name, usb_regs, AudioError, SdrControl, TunerCaps,
+    bias_tee_supported, direct_sampling_supported, pipeline, supported_sample_rates,
+    tuner_freq_range, tuner_gains_db, tuner_name, usb_regs, AudioError, DemodMode, SdrControl,
+    SdrTransport, TunerCaps, ADSB_CAPTURE_RATE, DEFAULT_CAPTURE_RATE, DEFAULT_DEVIATION_HZ,
 };
-use crate::ids::{DeviceId, RtlKey};
-use nusb::transfer::{Control, ControlType, Recipient};
+use crate::audio::backend::{AudioBackend, CaptureHandle, PlaybackHandle};
+use crate::audio::{AudioChunk, CHUNK_QUEUE_DEPTH, MAX_SAMPLE_RATE};
+use crate::core::event::TelemetryEvent;
+use crate::ids::{ChannelId, DeviceId, RtlKey};
+use nusb::transfer::{Control, ControlType, Queue, Recipient, RequestBuffer};
+use std::future::Future;
+use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 /// `bmRequestType` for an RTL2832U register **read** (`LIBUSB_ENDPOINT_IN |
 /// LIBUSB_REQUEST_TYPE_VENDOR`, recipient device). librtlsdr `CTRL_IN`.
@@ -93,11 +104,18 @@ pub(crate) trait UsbControl {
     fn control_in(&self, setup: Setup, buf: &mut [u8]) -> Result<usize, AudioError>;
 }
 
+/// The RTL2832U streams sampled IQ on bulk-IN endpoint 0x81. librtlsdr `0x81`.
+const BULK_ENDPOINT: u8 = 0x81;
+/// Outstanding bulk-IN transfers kept submitted so the dongle never stalls waiting
+/// for the host to hand back a buffer. librtlsdr's async reader defaults to 15; a
+/// smaller depth is plenty at omnimodem's modest rates and keeps latency low.
+const BULK_TRANSFERS: usize = 8;
+
 /// `UsbControl` over a claimed `nusb::Interface`. The RTL2832U's register requests
 /// are all vendor / device-recipient, so the direction alone distinguishes them;
 /// nusb derives `bmRequestType` from the typed fields (matching [`CTRL_IN`] /
 /// [`CTRL_OUT`], asserted in debug builds).
-struct NusbControl {
+pub(crate) struct NusbControl {
     iface: nusb::Interface,
 }
 
@@ -129,6 +147,102 @@ impl UsbControl for NusbControl {
         self.iface
             .control_in_blocking(control, buf, CTRL_TIMEOUT)
             .map_err(|e| AudioError::Usb(format!("control in (index {:#06x}): {e}", setup.index)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk IQ streaming seam
+// ---------------------------------------------------------------------------
+
+/// The bulk-IN IQ source [`RtlUsbTransport::read_iq`] is written against, so the
+/// streaming read (and the endpoint reset before it) is exercised with a fake and
+/// no hardware. [`NusbBulk`] is the real implementation over the claimed interface's
+/// bulk endpoint 0x81.
+pub(crate) trait UsbBulk: Send {
+    /// Fill `buf` with the next block of raw interleaved u8 IQ from the bulk-IN
+    /// endpoint, blocking until data arrives. Returns the byte count, `Ok(0)` once
+    /// a stop has been signalled via [`shutdown_handle`](UsbBulk::shutdown_handle),
+    /// or an error on a terminal transfer failure.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, AudioError>;
+
+    /// A closure that ends the stream so a parked [`read`](UsbBulk::read) returns
+    /// `Ok(0)` on its next completion.
+    fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send>;
+}
+
+/// `UsbBulk` over a claimed `nusb::Interface`: keeps a small pool of bulk-IN
+/// transfers submitted on endpoint 0x81 and hands the pipeline each completed
+/// buffer. The queue is built lazily on the first read so the (blocking) capture
+/// thread owns it, and a shared stop flag ends the stream promptly (the dongle
+/// streams continuously, so the next completion observes the flag within a block).
+/// Mid-capture removal / hard-stall recovery is refined in P3-A.
+pub(crate) struct NusbBulk {
+    iface: nusb::Interface,
+    queue: Option<Queue<RequestBuffer>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl NusbBulk {
+    fn new(iface: nusb::Interface) -> Self {
+        NusbBulk { iface, queue: None, stop: Arc::new(AtomicBool::new(false)) }
+    }
+}
+
+impl UsbBulk for NusbBulk {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, AudioError> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
+        let queue = self
+            .queue
+            .get_or_insert_with(|| self.iface.bulk_in_queue(BULK_ENDPOINT));
+        // Keep the transfer pool full so the dongle never stalls between reads.
+        while queue.pending() < BULK_TRANSFERS {
+            queue.submit(RequestBuffer::new(buf.len()));
+        }
+        let completion = block_on(queue.next_complete());
+        if self.stop.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
+        completion
+            .status
+            .map_err(|e| AudioError::Usb(format!("bulk in transfer: {e}")))?;
+        let n = completion.data.len().min(buf.len());
+        buf[..n].copy_from_slice(&completion.data[..n]);
+        // Reuse the completed buffer for a fresh transfer, keeping the pool primed.
+        queue.submit(RequestBuffer::reuse(completion.data, buf.len()));
+        Ok(n)
+    }
+
+    fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send> {
+        let stop = self.stop.clone();
+        Box::new(move || stop.store(true, Ordering::Relaxed))
+    }
+}
+
+/// Drive a `nusb` transfer future to completion on the calling thread by parking
+/// until the transfer's waker unparks us. The capture thread is dedicated to this
+/// one source, so a thread-parking executor is enough — it avoids pulling a full
+/// async runtime onto the blocking [`SdrTransport::read_iq`] path.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = pin!(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => return v,
+            Poll::Pending => std::thread::park(),
+        }
     }
 }
 
@@ -403,27 +517,33 @@ fn apply_tuner_ops(
 }
 
 /// A locally-attached RTL-SDR dongle, opened, claimed, and brought up for exclusive
-/// use. [`open`](Self::open) claims interface 0 (detaching the Linux kernel driver)
-/// and runs the full bring-up (baseband init, tuner probe/init), so a returned
-/// transport can be tuned and its [`caps`](Self::caps) read immediately. Bulk IQ
-/// streaming and the [`SdrTransport`](super::SdrTransport) impl arrive in P2-E.
-pub struct RtlUsbTransport {
-    usb: NusbControl,
-    /// The claimed interface number, kept for endpoint addressing in P2-E streaming.
-    #[allow(dead_code)]
-    iface: u8,
+/// use. [`open`](RtlUsbTransport::open) claims interface 0 (detaching the Linux
+/// kernel driver) and runs the full bring-up (baseband init, tuner probe/init), so a
+/// returned transport can be tuned, streamed, and its caps read immediately.
+///
+/// Generic over the register ([`UsbControl`]) and bulk-IQ ([`UsbBulk`]) seams so the
+/// streaming [`SdrTransport`] impl is exercised end-to-end with fakes and no
+/// hardware; production uses the [`NusbControl`] / [`NusbBulk`] defaults over one
+/// claimed interface.
+pub(crate) struct RtlUsbTransport<C = NusbControl, B = NusbBulk> {
+    usb: C,
+    /// Bulk-IN IQ source, driven by [`read_iq`](SdrTransport::read_iq).
+    bulk: B,
     /// The probed tuner, or `None` until [`probe_tuner`](Self::probe_tuner) runs.
     tuner: Option<usb_regs::TunerKind>,
     /// Mirror of the R82xx register file (indexed by absolute register), seeded by
     /// [`init_tuner`](Self::init_tuner) so masked writes read-modify-write correctly.
     tuner_shadow: [u8; usb_regs::NUM_REGS],
-    /// Last sample rate programmed into the resampler. [`apply_hardware`](Self::apply_hardware)
-    /// reprograms the rate only when this changes, mirroring `RtlTcpTransport` (the
-    /// resampler reset is disruptive to re-issue on a routine tune/gain change).
+    /// Last sample rate programmed into the resampler. `apply_hardware` reprograms
+    /// the rate only when this changes, mirroring `RtlTcpTransport` (the resampler
+    /// reset is disruptive to re-issue on a routine tune/gain change).
     last_rate: Option<u32>,
+    /// Whether the bulk-IN FIFO has been reset (`rtlsdr_reset_buffer`) for this
+    /// capture. Done once, lazily, on the first [`read_iq`](SdrTransport::read_iq).
+    reset_done: bool,
 }
 
-impl RtlUsbTransport {
+impl RtlUsbTransport<NusbControl, NusbBulk> {
     /// List USB devices, match `key` to a present RTL dongle, open it, claim
     /// interface 0, and bring the device up (baseband + tuner probe/init). On Linux the
     /// kernel DVB driver (`dvb_usb_rtl28xxu`) is detached as part of the claim;
@@ -432,9 +552,9 @@ impl RtlUsbTransport {
     /// `needs_setup`; a device with an unsupported tuner fails at bring-up.
     ///
     /// Bring-up runs here (not lazily) so a returned transport is fully initialized and
-    /// its [`caps`](Self::caps) are available immediately — matching `RtlTcpTransport`,
-    /// which handshakes and publishes caps in its constructor.
-    pub fn open(key: &RtlKey) -> Result<Self, AudioError> {
+    /// its caps are available immediately — matching `RtlTcpTransport`, which
+    /// handshakes and publishes caps in its constructor.
+    pub(crate) fn open(key: &RtlKey) -> Result<Self, AudioError> {
         let id = DeviceId::Rtl { key: key.clone() }.to_canonical_string();
 
         let info = nusb::list_devices()
@@ -446,18 +566,24 @@ impl RtlUsbTransport {
             .open()
             .map_err(|e| AudioError::UsbClaim(id.clone(), format!("open device: {e}")))?;
         let iface = claim_interface(&dev, RTL_INTERFACE, &id)?;
+        // The register and bulk seams share one claimed interface (nusb's `Interface`
+        // is a cheap clonable handle to it).
+        let bulk = NusbBulk::new(iface.clone());
 
         let mut transport = Self {
             usb: NusbControl { iface },
-            iface: RTL_INTERFACE,
+            bulk,
             tuner: None,
             tuner_shadow: [0u8; usb_regs::NUM_REGS],
             last_rate: None,
+            reset_done: false,
         };
         transport.bring_up()?;
         Ok(transport)
     }
+}
 
+impl<C: UsbControl, B> RtlUsbTransport<C, B> {
     /// Write an RTL2832U register (see [`write_reg`]).
     #[allow(dead_code)] // Consumed by baseband/tuner init in P2-B/P2-C.
     pub(crate) fn write_reg(&self, block: Block, addr: u16, val: u16, len: u8) -> Result<(), AudioError> {
@@ -620,10 +746,9 @@ impl RtlUsbTransport {
     }
 
     /// One-time device bring-up: RTL2832U baseband init, tuner probe, and R82xx tuner
-    /// init. Run by [`open`](Self::open) so a fresh transport is fully initialized;
-    /// idempotent once the tuner is known, so [`apply_hardware`](Self::apply_hardware)
-    /// can guard on it defensively and pay the cost only on a not-yet-brought-up
-    /// transport.
+    /// init. Run by `open` so a fresh transport is fully initialized; idempotent once
+    /// the tuner is known, so `apply_hardware` can guard on it defensively and pay the
+    /// cost only on a not-yet-brought-up transport.
     fn bring_up(&mut self) -> Result<(), AudioError> {
         if self.tuner.is_some() {
             return Ok(());
@@ -633,13 +758,27 @@ impl RtlUsbTransport {
         self.init_tuner()
     }
 
+}
+
+impl<C: UsbControl + Send, B: UsbBulk> SdrTransport for RtlUsbTransport<C, B> {
+    /// Reset the bulk-IN FIFO once (lazily, on the first read for this capture), then
+    /// hand the pipeline the next block of raw u8 IQ from the bulk endpoint. The reset
+    /// is a control transfer on the register seam; the read is a bulk transfer on the
+    /// IQ seam. Returns `Ok(0)` once the stream has been stopped.
+    fn read_iq(&mut self, buf: &mut [u8]) -> Result<usize, AudioError> {
+        if !self.reset_done {
+            apply_writes(&self.usb, &usb_regs::reset_buffer_writes())?;
+            self.reset_done = true;
+        }
+        self.bulk.read(buf)
+    }
+
     /// Apply the current hardware parameters from `control` onto the dongle, in the
     /// exact order [`RtlTcpTransport`](super::rtl_tcp::RtlTcpTransport) sends them:
     /// sample rate (only when it changed), ppm, direct-sampling, bias-tee, gain
     /// mode/level, then center frequency. Brings the device up on the first call. See
     /// [`plan_apply_hardware`] for the pure ordering the mock-seam test asserts.
-    #[allow(dead_code)] // Wired into the SdrTransport impl in P2-E.
-    pub(crate) fn apply_hardware(&mut self, control: &SdrControl) -> Result<(), AudioError> {
+    fn apply_hardware(&mut self, control: &SdrControl) -> Result<(), AudioError> {
         self.bring_up()?;
         let rate = control.capture_rate();
         let send_rate = self.last_rate != Some(rate);
@@ -662,15 +801,20 @@ impl RtlUsbTransport {
 
     /// The capabilities of the probed tuner, derived from the same per-tuner tables the
     /// `rtl_tcp` path publishes so `GetSdrCaps` answers identically. The tuner is always
-    /// probed by [`open`](Self::open), so this is infallible on any transport a caller
-    /// can hold.
-    #[allow(dead_code)] // Wired into the SdrTransport impl in P2-E.
-    pub(crate) fn caps(&self) -> TunerCaps {
+    /// probed by [`open`](RtlUsbTransport::open), so this is infallible on any transport
+    /// a caller can hold.
+    fn caps(&self) -> TunerCaps {
         caps_for_tuner(self.tuner.expect("tuner probed by open()"))
+    }
+
+    /// End the bulk stream so the capture thread's next [`read_iq`](Self::read_iq)
+    /// returns `Ok(0)` (delegated to the bulk seam's stop flag).
+    fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send> {
+        self.bulk.shutdown_handle()
     }
 }
 
-/// One hardware parameter operation [`RtlUsbTransport::apply_hardware`] performs, in
+/// One hardware parameter operation [`RtlUsbTransport`]'s `apply_hardware` performs, in
 /// the order it performs them. Modelling the plan as data keeps the ordering (and the
 /// gain-mode / rate-gating branches) unit-testable against a mock with no USB.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -720,6 +864,153 @@ fn caps_for_tuner(tuner: usb_regs::TunerKind) -> TunerCaps {
         gains_db: tuner_gains_db(t),
         bias_tee_supported: bias_tee_supported(t),
         direct_sampling_supported: direct_sampling_supported(t),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+/// Opens the [`SdrTransport`] a capture will drive. Production opens the real USB
+/// dongle (and applies the current hardware params); tests inject a fake so the
+/// backend + shared pipeline run end-to-end with no hardware. The concrete transport
+/// type is erased to a trait object because it differs between the two.
+type TransportOpener =
+    Box<dyn Fn(&SdrControl) -> Result<Box<dyn SdrTransport>, AudioError> + Send>;
+
+/// A locally-attached RTL-SDR dongle bound as an audio capture device — the native
+/// USB analogue of [`RtlTcpBackend`](super::rtl_tcp::RtlTcpBackend). RX-only:
+/// dongles cannot transmit, so `open_playback` reports `Unsupported`. Each
+/// `open_capture` opens a fresh [`RtlUsbTransport`] and spawns the shared
+/// [`run_capture`](pipeline::run_capture) on it, so the entire IQ→audio DSP chain and
+/// the runtime tune/gain/squelch control surface are reused verbatim from `rtl_tcp`.
+pub struct RtlUsbBackend {
+    key: RtlKey,
+    capture_rate: u32,
+    deviation_hz: f32,
+    control: SdrControl,
+    telemetry: Option<broadcast::Sender<TelemetryEvent>>,
+    channel: ChannelId,
+    open_transport: TransportOpener,
+}
+
+impl RtlUsbBackend {
+    /// Construct a backend bound to the dongle identified by `key`, with default
+    /// capture rate/deviation and a fresh control cell. The core replaces the control
+    /// and wires the telemetry sink + channel via
+    /// [`AudioBackend::attach_sdr_context`] before `open_capture`.
+    pub fn new(key: RtlKey) -> Self {
+        let open_key = key.clone();
+        let open_transport: TransportOpener = Box::new(move |control| {
+            // Open + bring the dongle up, then command the current hardware params so
+            // the tuner/rate/gain match `control` before streaming, mirroring
+            // `RtlTcpTransport::connect`'s handshake.
+            let mut transport = RtlUsbTransport::open(&open_key)?;
+            transport.apply_hardware(control)?;
+            Ok(Box::new(transport) as Box<dyn SdrTransport>)
+        });
+        RtlUsbBackend {
+            key,
+            capture_rate: DEFAULT_CAPTURE_RATE,
+            deviation_hz: DEFAULT_DEVIATION_HZ,
+            control: SdrControl::default(),
+            telemetry: None,
+            channel: ChannelId(0),
+            open_transport,
+        }
+    }
+
+    /// The shared control cell (so the core can store a clone for gRPC to mutate).
+    pub fn control(&self) -> SdrControl {
+        self.control.clone()
+    }
+
+    /// Override the dongle capture (sample) rate. Kept a multiple of the audio
+    /// channel rate so the complex decimator has an integer ratio.
+    pub fn with_capture_rate(mut self, rate: u32) -> Self {
+        self.capture_rate = rate;
+        self
+    }
+
+    /// Construct a backend whose transport comes from `opener` instead of a real
+    /// dongle, so the backend + pipeline are driven by a fake USB source in tests.
+    #[cfg(test)]
+    fn with_transport_opener(key: RtlKey, opener: TransportOpener) -> Self {
+        RtlUsbBackend {
+            key,
+            capture_rate: DEFAULT_CAPTURE_RATE,
+            deviation_hz: DEFAULT_DEVIATION_HZ,
+            control: SdrControl::default(),
+            telemetry: None,
+            channel: ChannelId(0),
+            open_transport: opener,
+        }
+    }
+}
+
+impl AudioBackend for RtlUsbBackend {
+    fn open_capture(&self, requested_rate: u32) -> Result<CaptureHandle, AudioError> {
+        // ADS-B binds the channel to the wideband `RawMag` path (full 2.4 Msps
+        // magnitude envelope); every other mode decimates to the capped audio rate.
+        // Mirrors `RtlTcpBackend::open_capture` exactly.
+        let raw_mag = self.control.demod_mode() == DemodMode::RawMag;
+        let seed_rate = if raw_mag { ADSB_CAPTURE_RATE } else { self.capture_rate };
+        let channel_rate =
+            if raw_mag { seed_rate } else { requested_rate.min(MAX_SAMPLE_RATE) };
+
+        // Seed the shared capture rate; the control cell is authoritative thereafter,
+        // so `ConfigureSdr` can change the rate on a running (audio) capture.
+        self.control.set_capture_rate(seed_rate);
+
+        // Open synchronously so a missing/unclaimable dongle fails fast and the tuner
+        // caps publish before we return. The transport hides every later USB detail
+        // from the pipeline.
+        let transport = (self.open_transport)(&self.control)?;
+        self.control.set_caps(transport.caps());
+        let shutdown = transport.shutdown_handle();
+
+        let (tx, rx) = sync_channel::<AudioChunk>(CHUNK_QUEUE_DEPTH);
+        let control = self.control.clone();
+        let telemetry = self.telemetry.clone();
+        let channel = self.channel;
+        let deviation_hz = self.deviation_hz;
+
+        std::thread::Builder::new()
+            .name("omni-rtl-usb-capture".into())
+            .spawn(move || {
+                pipeline::run_capture(
+                    transport,
+                    control,
+                    telemetry,
+                    channel,
+                    deviation_hz,
+                    channel_rate,
+                    tx,
+                );
+            })
+            .map_err(|e| AudioError::Io(e.to_string()))?;
+
+        Ok(CaptureHandle::new(rx, channel_rate, shutdown))
+    }
+
+    fn open_playback(&self, _requested_rate: u32) -> Result<PlaybackHandle, AudioError> {
+        // RTL dongles are receive-only.
+        Err(AudioError::Unsupported)
+    }
+
+    fn device_id(&self) -> DeviceId {
+        DeviceId::Rtl { key: self.key.clone() }
+    }
+
+    fn attach_sdr_context(
+        &mut self,
+        channel: ChannelId,
+        telemetry: broadcast::Sender<TelemetryEvent>,
+        control: SdrControl,
+    ) {
+        self.channel = channel;
+        self.telemetry = Some(telemetry);
+        self.control = control;
     }
 }
 
@@ -828,6 +1119,23 @@ const KNOWN_RTL: &[(u16, u16)] = &[
 /// Whether a `(vid, pid)` is a known RTL2832U dongle.
 fn is_rtl_dongle(vid: u16, pid: u16) -> bool {
     KNOWN_RTL.contains(&(vid, pid))
+}
+
+#[cfg(test)]
+impl<C, B> RtlUsbTransport<C, B> {
+    /// Build a transport directly from fake seams with the tuner already identified,
+    /// so a test drives streaming / `apply_hardware` without the hardware-only
+    /// [`open`](RtlUsbTransport::open) bring-up.
+    fn from_fake(usb: C, bulk: B, tuner: usb_regs::TunerKind) -> Self {
+        Self {
+            usb,
+            bulk,
+            tuner: Some(tuner),
+            tuner_shadow: [0u8; usb_regs::NUM_REGS],
+            last_rate: None,
+            reset_done: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1221,5 +1529,196 @@ mod tests {
 
         // R828D reuses the same table set, reporting under its own tuner name.
         assert_eq!(caps_for_tuner(usb_regs::TunerKind::R828D).tuner, "R828D");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bulk streaming + backend
+    // -----------------------------------------------------------------------
+
+    /// A scripted [`UsbBulk`]: hands `read` a fixed IQ slice in `buf`-sized blocks,
+    /// then reports the terminal `Ok(0)`. A [`shutdown_handle`](UsbBulk::shutdown_handle)
+    /// ends it early, mirroring how the real stop flag unblocks the nusb queue.
+    struct FakeBulk {
+        iq: Vec<u8>,
+        pos: usize,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl FakeBulk {
+        fn new(iq: Vec<u8>) -> Self {
+            FakeBulk { iq, pos: 0, stop: Arc::new(AtomicBool::new(false)) }
+        }
+    }
+
+    impl UsbBulk for FakeBulk {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, AudioError> {
+            if self.stop.load(Ordering::Relaxed) || self.pos >= self.iq.len() {
+                return Ok(0);
+            }
+            let n = buf.len().min(self.iq.len() - self.pos);
+            buf[..n].copy_from_slice(&self.iq[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+
+        fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send> {
+            let stop = self.stop.clone();
+            Box::new(move || stop.store(true, Ordering::Relaxed))
+        }
+    }
+
+    #[test]
+    fn read_iq_resets_the_endpoint_once_then_streams() {
+        // The first read must reset the bulk-IN FIFO (rtlsdr_reset_buffer) via the
+        // control seam, then hand back the bulk bytes; later reads must not re-reset.
+        let usb = FakeUsb::default();
+        let bulk = FakeBulk::new(vec![1, 2, 3, 4, 5, 6]);
+        let mut transport = RtlUsbTransport::from_fake(usb, bulk, usb_regs::TunerKind::R820T);
+
+        let mut buf = [0u8; 4];
+        let n = transport.read_iq(&mut buf).unwrap();
+        assert_eq!(&buf[..n], &[1, 2, 3, 4]);
+
+        // Exactly the two USB_EPA_CTL writes (0x1002 stop/reset, then 0x0000 enable).
+        {
+            let writes = transport.usb.writes.borrow();
+            assert_eq!(writes.len(), 2, "reset should emit exactly two control writes");
+            assert_eq!(writes[0].0.value, 0x2148); // USB_EPA_CTL
+            assert_eq!(writes[0].0.index, ((Block::Usb as u16) << 8) | 0x10);
+            assert_eq!(writes[0].1, vec![0x10, 0x02]);
+            assert_eq!(writes[1].1, vec![0x00, 0x00]);
+        }
+
+        // A second read streams the remainder without re-issuing the reset.
+        let n = transport.read_iq(&mut buf).unwrap();
+        assert_eq!(&buf[..n], &[5, 6]);
+        assert_eq!(transport.usb.writes.borrow().len(), 2, "reset must run only once");
+
+        // Exhausted → terminal.
+        assert_eq!(transport.read_iq(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn shutdown_handle_ends_the_stream() {
+        // The transport's shutdown handle (delegated to the bulk seam) makes the next
+        // read return the terminal Ok(0), so the capture thread stops promptly.
+        let bulk = FakeBulk::new(vec![9; 64]);
+        let mut transport =
+            RtlUsbTransport::from_fake(FakeUsb::default(), bulk, usb_regs::TunerKind::R820T);
+        let stop = transport.shutdown_handle();
+        stop();
+        let mut buf = [0u8; 8];
+        assert_eq!(transport.read_iq(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn backend_is_receive_only_with_the_rtl_identity() {
+        let key = RtlKey::Serial("00000001".into());
+        let backend = RtlUsbBackend::new(key.clone());
+        assert!(matches!(backend.open_playback(48_000), Err(AudioError::Unsupported)));
+        assert_eq!(backend.device_id(), DeviceId::Rtl { key });
+    }
+
+    /// Linearly upsample 48 kHz audio to the 240 kHz capture rate (integer 5:1).
+    fn upsample(audio: &[f32], factor: usize) -> Vec<f32> {
+        if audio.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(audio.len() * factor);
+        for i in 0..audio.len() * factor {
+            let t = i as f32 / factor as f32;
+            let base = t.floor() as usize;
+            let frac = t - base as f32;
+            let a = audio[base];
+            let b = *audio.get(base + 1).unwrap_or(&a);
+            out.push(a * (1.0 - frac) + b * frac);
+        }
+        out
+    }
+
+    /// FM-modulate `audio` (at `rate`) onto a carrier at `offset_hz`, `dev_hz` peak
+    /// deviation, quantized to interleaved unsigned-8-bit IQ as the dongle streams.
+    fn fm_modulate_u8(audio: &[f32], rate: f32, offset_hz: f32, dev_hz: f32) -> Vec<u8> {
+        let mut phase = 0.0f32;
+        let mut out = Vec::with_capacity(audio.len() * 2);
+        for &a in audio {
+            let inst = offset_hz + dev_hz * a;
+            phase += std::f32::consts::TAU * inst / rate;
+            let i = ((phase.cos() * 0.9 * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8;
+            let q = ((phase.sin() * 0.9 * 127.5) + 127.5).round().clamp(0.0, 255.0) as u8;
+            out.push(i);
+            out.push(q);
+        }
+        out
+    }
+
+    #[test]
+    fn fake_usb_stream_decodes_aprs_frame() {
+        // P2-E CLOSING GATE / milestone: a fake USB dongle streams an FM-modulated
+        // AFSK1200 APRS burst as raw u8 IQ; the `RtlUsbBackend` drives the shared
+        // capture pipeline over it, demodulates to audio, and the AFSK1200 ensemble
+        // recovers the exact AX.25 frame — end to end, no hardware and no rtl_tcp.
+        use omnimodem_dsp::framing::ax25::{Address, Ax25Frame};
+        use omnimodem_dsp::mode::{Demodulator, Modulator};
+        use omnimodem_dsp::modes::afsk1200::{Afsk1200Demod, Afsk1200Mod};
+        use omnimodem_dsp::types::{Frame, FramePayload};
+        use std::sync::mpsc::RecvTimeoutError;
+
+        const CHANNEL_RATE: u32 = 48_000;
+        const OFFSET_HZ: f32 = 30_000.0; // signal sits +30 kHz above the dongle center
+
+        let expected = Ax25Frame {
+            dest: Address::new("APRS", 0),
+            source: Address::new("K1ABC", 7),
+            digipeaters: vec![],
+            info: b"!4903.50N/07201.75W-RTL-SDR over native USB".to_vec(),
+        };
+
+        // Build the AFSK1200 audio for the frame, upsample 5:1, FM-modulate into IQ.
+        let mut modulator = Afsk1200Mod::new();
+        let audio = modulator.modulate(&Frame::packet(expected.encode())).unwrap();
+        let up = upsample(&audio, (DEFAULT_CAPTURE_RATE / CHANNEL_RATE) as usize);
+        let iq = fm_modulate_u8(&up, DEFAULT_CAPTURE_RATE as f32, OFFSET_HZ, DEFAULT_DEVIATION_HZ);
+
+        // A backend whose transport is the fake USB dongle streaming that IQ.
+        let opener: TransportOpener = Box::new(move |_control| {
+            let transport = RtlUsbTransport::from_fake(
+                FakeUsb::default(),
+                FakeBulk::new(iq.clone()),
+                usb_regs::TunerKind::R820T,
+            );
+            Ok(Box::new(transport) as Box<dyn SdrTransport>)
+        });
+        let backend =
+            RtlUsbBackend::with_transport_opener(RtlKey::Serial("00000001".into()), opener);
+        backend.control().set_offset_hz(OFFSET_HZ); // channel-select the +30 kHz signal
+
+        let cap = backend.open_capture(CHANNEL_RATE).unwrap();
+        assert_eq!(cap.sample_rate, CHANNEL_RATE);
+
+        // Drain the burst; the fake stream terminates, so collect until it goes quiet.
+        let mut samples: Vec<f32> = Vec::new();
+        loop {
+            match cap.rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(chunk) => samples.extend(chunk.iter().map(|&s| s as f32 / 32768.0)),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(!samples.is_empty(), "no demodulated audio off the USB stream");
+
+        // The AFSK1200 ensemble must recover the exact AX.25 frame with a good FCS.
+        let mut demod = Afsk1200Demod::ensemble(9);
+        let frames = demod.feed(&samples);
+        let decoded = frames
+            .iter()
+            .find(|f| matches!(&f.payload, FramePayload::Packet(b) if *b == expected.encode()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no matching AX.25 frame decoded off the USB stream (got {} frame(s))",
+                    frames.len()
+                )
+            });
+        assert!(decoded.meta.crc_ok, "decoded frame failed FCS");
     }
 }

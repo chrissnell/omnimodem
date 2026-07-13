@@ -480,6 +480,26 @@ pub(crate) trait SdrTransport: Send {
     fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send>;
 }
 
+/// Lets a runtime-selected transport (chosen only at `open_capture`, so its
+/// concrete type is erased to a trait object) drive the generic
+/// [`run_capture`](pipeline::run_capture) unchanged. The USB backend picks its
+/// transport — the real dongle in production, a fake in tests — behind a
+/// `Box<dyn SdrTransport>`, which this forwards verbatim.
+impl SdrTransport for Box<dyn SdrTransport> {
+    fn read_iq(&mut self, buf: &mut [u8]) -> Result<usize, AudioError> {
+        (**self).read_iq(buf)
+    }
+    fn apply_hardware(&mut self, control: &SdrControl) -> Result<(), AudioError> {
+        (**self).apply_hardware(control)
+    }
+    fn caps(&self) -> TunerCaps {
+        (**self).caps()
+    }
+    fn shutdown_handle(&self) -> Box<dyn FnOnce() + Send> {
+        (**self).shutdown_handle()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
