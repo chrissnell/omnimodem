@@ -244,7 +244,6 @@ mod tests {
         supported_sample_rates, tuner_freq_range, tuner_gains_db, TunerCaps, DEFAULT_CAPTURE_RATE,
         DEFAULT_DEVIATION_HZ,
     };
-    use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
     /// A scripted, non-`rtl_tcp` [`SdrTransport`]: hands `run_capture` a fixed IQ
@@ -327,13 +326,10 @@ mod tests {
         run_capture(transport, control, None, ChannelId(0), DEFAULT_DEVIATION_HZ, 48_000, tx);
 
         // The transport is exhausted, so `run_capture` returns; drain the delivered
-        // audio (the sender is already dropped, so this is a clean disconnect).
+        // audio (the sender is already dropped, so recv ends on disconnect).
         let mut total = 0usize;
-        loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(chunk) => total += chunk.len(),
-                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
-            }
+        while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+            total += chunk.len();
         }
         assert!(total > 0, "pipeline delivered no audio through the fake transport");
     }
