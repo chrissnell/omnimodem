@@ -54,6 +54,15 @@ pub enum AudioError {
     /// A USB control/bulk transfer failed after the device was claimed.
     #[error("usb transfer error: {0}")]
     Usb(String),
+    /// The dongle was removed mid-capture (a bulk transfer reported the device
+    /// disconnected). Unlike a dropped `rtl_tcp` link — which the transport
+    /// reconnects transparently — a locally-attached dongle has no recovery: this
+    /// is a terminal stop that ends the capture and unbinds the channel, after
+    /// which hotplug reports the device `Departed`. Kept distinct from
+    /// [`Usb`](AudioError::Usb) so a removal reads as such rather than a transient
+    /// transfer fault.
+    #[error("usb device removed mid-capture: {0}")]
+    UsbLost(String),
     /// A requested sample rate lies outside the RTL2832U resampler's usable
     /// window (librtlsdr rejects it before touching the hardware).
     #[error("unsupported RTL sample rate: {0} Hz")]
