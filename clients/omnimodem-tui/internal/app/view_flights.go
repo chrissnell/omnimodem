@@ -43,6 +43,7 @@ var flightsCols = []ui.Column{
 	{Title: "GS kt", Width: 6},
 	{Title: "ALT ft", Width: 7},
 	{Title: "V/S", Width: 3},
+	{Title: "PKTS", Width: 5},
 	{Title: "SEEN", Width: 6},
 }
 
@@ -72,6 +73,7 @@ func (v *flightsView) rowsFlagged(now time.Time) ([][]string, []bool) {
 			fmtMeasure(a.hasGS, a.gsKt),
 			fmtInt(a.hasAlt, int64(a.altFt)),
 			vertArrow(a.hasVR, a.vrFpm),
+			fmt.Sprintf("%d", a.messages),
 			fmtAge(now.Sub(a.lastHeard)),
 		})
 		flagged = append(flagged, lowConfidence(a))

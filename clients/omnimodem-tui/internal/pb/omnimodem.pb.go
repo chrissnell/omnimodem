@@ -5021,6 +5021,7 @@ type AircraftReport struct {
 	TrackDeg      *float64               `protobuf:"fixed64,8,opt,name=track_deg,json=trackDeg,proto3,oneof" json:"track_deg,omitempty"`                  // degrees clockwise from true north (0..360)
 	VertRateFpm   *int32                 `protobuf:"zigzag32,9,opt,name=vert_rate_fpm,json=vertRateFpm,proto3,oneof" json:"vert_rate_fpm,omitempty"`      // barometric vertical rate, feet/min (+ up)
 	LastSeenMs    uint64                 `protobuf:"varint,10,opt,name=last_seen_ms,json=lastSeenMs,proto3" json:"last_seen_ms,omitempty"`                // tracker clock (ms) of the last decode
+	Messages      uint32                 `protobuf:"varint,11,opt,name=messages,proto3" json:"messages,omitempty"`                                        // ADS-B squitters (DF17/18) decoded from this aircraft
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5121,6 +5122,13 @@ func (x *AircraftReport) GetVertRateFpm() int32 {
 func (x *AircraftReport) GetLastSeenMs() uint64 {
 	if x != nil {
 		return x.LastSeenMs
+	}
+	return 0
+}
+
+func (x *AircraftReport) GetMessages() uint32 {
+	if x != nil {
+		return x.Messages
 	}
 	return 0
 }
@@ -5472,7 +5480,7 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\fsample_rates\x18\x04 \x03(\rR\vsampleRates\x12\x19\n" +
 	"\bgains_db\x18\x05 \x03(\x02R\againsDb\x12,\n" +
 	"\x12bias_tee_supported\x18\x06 \x01(\bR\x10biasTeeSupported\x12:\n" +
-	"\x19direct_sampling_supported\x18\a \x01(\bR\x17directSamplingSupported\"\xb9\x03\n" +
+	"\x19direct_sampling_supported\x18\a \x01(\bR\x17directSamplingSupported\"\xd5\x03\n" +
 	"\x0eAircraftReport\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\rR\achannel\x12\x12\n" +
 	"\x04icao\x18\x02 \x01(\rR\x04icao\x12\x16\n" +
@@ -5486,7 +5494,8 @@ const file_omnimodem_proto_rawDesc = "" +
 	"\rvert_rate_fpm\x18\t \x01(\x11H\x05R\vvertRateFpm\x88\x01\x01\x12 \n" +
 	"\flast_seen_ms\x18\n" +
 	" \x01(\x04R\n" +
-	"lastSeenMsB\v\n" +
+	"lastSeenMs\x12\x1a\n" +
+	"\bmessages\x18\v \x01(\rR\bmessagesB\v\n" +
 	"\t_latitudeB\f\n" +
 	"\n" +
 	"_longitudeB\x0e\n" +

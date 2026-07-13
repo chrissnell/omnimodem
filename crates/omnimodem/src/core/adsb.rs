@@ -67,6 +67,7 @@ fn report(channel: ChannelId, ac: &Aircraft) -> TelemetryEvent {
         track_deg: ac.track_deg,
         vertical_rate_fpm: ac.vertical_rate_fpm,
         last_seen_ms: ac.last_seen_ms,
+        messages: ac.messages,
     }
 }
 

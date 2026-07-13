@@ -308,6 +308,7 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             track_deg,
             vertical_rate_fpm,
             last_seen_ms,
+            messages,
         } => Kind::AircraftReport(proto::AircraftReport {
             channel: channel.0,
             icao,
@@ -319,6 +320,7 @@ pub fn telemetry_event_to_proto(ev: TelemetryEvent) -> proto::Event {
             track_deg,
             vert_rate_fpm: vertical_rate_fpm,
             last_seen_ms,
+            messages,
         }),
     };
     proto::Event { kind: Some(kind) }
@@ -510,6 +512,7 @@ mod tests {
             track_deg: Some(182.88),
             vertical_rate_fpm: Some(-832),
             last_seen_ms: 1_500,
+            messages: 42,
         };
         let proto::event::Kind::AircraftReport(r) =
             telemetry_event_to_proto(ev).kind.expect("kind")
@@ -522,6 +525,7 @@ mod tests {
         assert_eq!(r.altitude_ft, Some(38000));
         assert_eq!(r.vert_rate_fpm, Some(-832));
         assert_eq!(r.last_seen_ms, 1_500);
+        assert_eq!(r.messages, 42);
     }
 
     #[test]
@@ -539,6 +543,7 @@ mod tests {
             track_deg: None,
             vertical_rate_fpm: None,
             last_seen_ms: 0,
+            messages: 1,
         };
         let proto::event::Kind::AircraftReport(r) =
             telemetry_event_to_proto(ev).kind.expect("kind")

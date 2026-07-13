@@ -45,6 +45,11 @@ pub struct Aircraft {
     pub vertical_rate_fpm: Option<i32>,
     /// Clock value (ms) of the most recent decode for this aircraft.
     pub last_seen_ms: Millis,
+    /// Count of ADS-B squitters (DF17/18 with a recognized type code) folded into
+    /// this track — "how many packets we received from this plane". Deliberately
+    /// excluded from [`reportable_change`], so it accrues without forcing a report;
+    /// each emitted report simply carries the running total.
+    pub messages: u32,
 }
 
 /// Working state for one aircraft: its public snapshot plus the pending CPR
@@ -116,6 +121,7 @@ impl AircraftTracker {
         });
         let before = track.ac.clone();
         track.ac.last_seen_ms = now_ms;
+        track.ac.messages += 1;
 
         match tc {
             1..=4 => {
@@ -282,6 +288,20 @@ mod tests {
         let frame = encode_identification(0x484010, "DUP");
         assert_eq!(t.ingest(&frame, 0), Ingest::Updated(0x484010));
         assert_eq!(t.ingest(&frame, 100), Ingest::Unchanged(0x484010));
+    }
+
+    #[test]
+    fn messages_count_every_decoded_squitter() {
+        // The per-plane packet count accrues on every folded frame, including the
+        // duplicate that reports Unchanged — so a level, position-stable aircraft
+        // still shows its packets climbing.
+        let mut t = AircraftTracker::new();
+        let frame = encode_identification(0x484010, "CNT");
+        t.ingest(&frame, 0);
+        assert_eq!(t.get(0x484010).unwrap().messages, 1);
+        t.ingest(&frame, 100); // Unchanged, but still a received packet.
+        t.ingest(&frame, 200);
+        assert_eq!(t.get(0x484010).unwrap().messages, 3);
     }
 
     #[test]
