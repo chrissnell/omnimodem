@@ -160,6 +160,17 @@ pub(crate) fn sample_rate_writes(samp_rate: u32) -> Result<Vec<RegWrite>, AudioE
     ])
 }
 
+/// Reset the RTL2832U's bulk-IN FIFO before streaming starts, transcribed from
+/// librtlsdr `rtlsdr_reset_buffer`: stop + reset endpoint A (`0x1002`), then
+/// re-enable it (`0x0000`), so the first bulk read returns fresh samples rather
+/// than whatever stale bytes the endpoint buffered since the last capture.
+pub(crate) fn reset_buffer_writes() -> Vec<RegWrite> {
+    vec![
+        RegWrite::Block { block: Block::Usb, addr: USB_EPA_CTL, val: 0x1002, len: 2 },
+        RegWrite::Block { block: Block::Usb, addr: USB_EPA_CTL, val: 0x0000, len: 2 },
+    ]
+}
+
 /// The signed IF offset the RTL2832U resampler applies for a `ppm` frequency
 /// correction: `offs = -ppm · 2^24 / 1e6`, truncated to the demod's 16-bit field.
 /// librtlsdr `rtlsdr_set_sample_freq_correction`.
