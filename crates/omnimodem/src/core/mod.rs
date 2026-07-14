@@ -1828,6 +1828,42 @@ mod tests {
         join.join().unwrap();
     }
 
+    /// An enumerator that panics on every scan, standing in for the CoreAudio
+    /// backend blowing up under the App Sandbox during a USB device scan.
+    struct PanickingEnumerator;
+    impl DeviceEnumerator for PanickingEnumerator {
+        fn enumerate(&self) -> Vec<DeviceDescriptor> {
+            panic!("device enumeration exploded");
+        }
+    }
+
+    // A command that panics deep in the handler (here, device enumeration) must
+    // not unwind the whole core thread: the caller sees a dropped reply, but the
+    // core keeps serving so the live feed survives. Without the catch_unwind in
+    // the core loop the thread dies and the follow-up GetState hangs/drops too.
+    #[test]
+    fn panicking_command_preserves_the_core_thread() {
+        let (core, join) = spawn_core(
+            Box::new(PanickingEnumerator),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            // The panicking ListDevices drops its reply: the caller observes the
+            // failure rather than a hung RPC.
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::ListDevices { reply: tx }).unwrap();
+            assert!(rx.await.is_err(), "expected dropped reply from panicking scan");
+
+            // The core is still alive: a subsequent command answers normally.
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::GetState { reply: tx }).unwrap();
+            rx.await.expect("core thread survived the panic and answered GetState");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
     #[test]
     fn configure_audio_binds_distinct_rx_and_tx_devices() {
         let rx = named_device("RX");
