@@ -10,6 +10,13 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Capture the spawning parent's pid before any startup work. The parent-death
+    // watchdog compares against this, so it must be read before our own (possibly
+    // slow) init could let the parent exit and reparent us — otherwise we'd record
+    // pid 1 as the "original" and never detect the death. SAFETY: getppid() always
+    // succeeds and has no preconditions.
+    let original_ppid = unsafe { libc::getppid() };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -31,7 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exclusive access); the kernel drops this lock the instant we exit — even on a
     // crash or SIGKILL — so a stale lock can never wedge the next start. Bound to
     // `_instance_lock` so it lives until `main` returns. See GRA-371.
-    let _instance_lock = acquire_instance_lock(&runtime_dir)?;
+    let _instance_lock = match acquire_instance_lock(&runtime_dir) {
+        Ok(lock) => lock,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            tracing::error!(
+                lock = %runtime_dir.join("omnimodem.lock").display(),
+                "another omnimodem instance already holds the runtime lock; exiting",
+            );
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Optional daemon config file: registers `rtl_tcp` SDR endpoints so
     // ListDevices can surface them. Defaults to <runtime_dir>/omnimodem.conf;
@@ -117,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::select! {
         res = serve => { res?; }
-        _ = shutdown_signal(exit_with_parent) => {}
+        _ = shutdown_signal(exit_with_parent, original_ppid) => {}
     }
 
     let _ = std::fs::remove_file(&sock_path);
@@ -125,8 +142,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Acquire the exclusive advisory lock that enforces one daemon per runtime dir.
-/// Returns the held lock (keep it alive for the process lifetime); exits the
-/// process if another instance already holds it.
+/// Returns the held lock (keep it alive for the process lifetime). A lock already
+/// held by another instance surfaces as `ErrorKind::WouldBlock` so the caller can
+/// distinguish "someone else is running" from an I/O failure opening the file.
 fn acquire_instance_lock(runtime_dir: &std::path::Path) -> std::io::Result<Flock<std::fs::File>> {
     let lock_path = runtime_dir.join("omnimodem.lock");
     let file = std::fs::OpenOptions::new()
@@ -134,22 +152,16 @@ fn acquire_instance_lock(runtime_dir: &std::path::Path) -> std::io::Result<Flock
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-        Ok(lock) => Ok(lock),
-        Err((_, errno)) => {
-            tracing::error!(
-                lock = %lock_path.display(),
-                "another omnimodem instance already holds the runtime lock ({errno}); exiting",
-            );
-            std::process::exit(1);
-        }
-    }
+    // A non-blocking exclusive lock returns EWOULDBLOCK when contended, which
+    // `from_raw_os_error` maps to `ErrorKind::WouldBlock`.
+    Flock::lock(file, FlockArg::LockExclusiveNonblock)
+        .map_err(|(_, errno)| std::io::Error::from_raw_os_error(errno as i32))
 }
 
 /// Resolve once any of our shutdown triggers fires: SIGINT (Ctrl-C), SIGTERM (the
 /// app's graceful stop), or — when `watch_parent` is set — the parent process
-/// exiting.
-async fn shutdown_signal(watch_parent: bool) {
+/// (identified by `original_ppid`) exiting.
+async fn shutdown_signal(watch_parent: bool, original_ppid: libc::pid_t) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("received SIGINT; shutting down");
@@ -170,7 +182,7 @@ async fn shutdown_signal(watch_parent: bool) {
 
     let parent_death = async {
         if watch_parent {
-            wait_for_parent_death().await;
+            wait_for_parent_death(original_ppid).await;
             tracing::warn!("parent process exited; shutting down");
         } else {
             std::future::pending::<()>().await;
@@ -184,17 +196,54 @@ async fn shutdown_signal(watch_parent: bool) {
     }
 }
 
-/// Poll until the parent pid changes, which on macOS means the app died and we were
-/// reparented to launchd. Polling (vs. kqueue EVFILT_PROC) keeps this dependency-
-/// free and portable; sub-second latency is irrelevant for releasing an SDR.
-async fn wait_for_parent_death() {
-    // SAFETY: getppid() is always successful and has no preconditions.
-    let original = unsafe { libc::getppid() };
+/// Poll until our parent goes away. Returns when the current ppid no longer matches
+/// the spawner, or is pid 1 (launchd/init) — the app is a direct parent and is never
+/// pid 1, so reparenting there means it died. Assumes a direct parent-child spawn;
+/// an intermediate launcher that outlives the app would mask its exit. Polling (vs.
+/// kqueue EVFILT_PROC) keeps this dependency-free; sub-second latency is irrelevant
+/// for releasing an SDR. Checks before the first sleep so an already-dead parent is
+/// caught immediately.
+async fn wait_for_parent_death(original_ppid: libc::pid_t) {
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // SAFETY: getppid() always succeeds and has no preconditions.
         let current = unsafe { libc::getppid() };
-        if current != original {
+        if current == 1 || current != original_ppid {
             return;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lock_is_exclusive_per_runtime_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let first = acquire_instance_lock(dir.path()).expect("first lock should succeed");
+
+        let second = acquire_instance_lock(dir.path());
+        assert_eq!(
+            second.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::WouldBlock),
+            "a second lock on the same runtime dir must be contended",
+        );
+
+        // Releasing the first lock frees the runtime dir for a fresh acquire.
+        drop(first);
+        acquire_instance_lock(dir.path()).expect("lock should be reacquirable after release");
+    }
+
+    #[test]
+    fn separate_runtime_dirs_do_not_contend() {
+        let feed = tempfile::tempdir().expect("tempdir");
+        let scan = tempfile::tempdir().expect("tempdir");
+
+        // Mirrors the app's feed vs. USB-scan split: distinct runtime dirs each hold
+        // their own lock without blocking the other.
+        let _feed_lock = acquire_instance_lock(feed.path()).expect("feed lock");
+        let _scan_lock = acquire_instance_lock(scan.path()).expect("scan lock");
     }
 }
