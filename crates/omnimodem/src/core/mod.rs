@@ -195,18 +195,31 @@ fn run(
     loop {
         match commands.recv_timeout(HOTPLUG_POLL) {
             Ok(Command::Shutdown) => break,
-            Ok(cmd) => handle_command(
-                cmd,
-                &mut supervisor,
-                &*enumerator,
-                &audio_factory,
-                &interlock,
-                &lease,
-                &mut live,
-                &mut next_tx_id,
-                &frames,
-                &telemetry,
-            ),
+            Ok(cmd) => {
+                // A panic inside one command must not unwind the whole core
+                // thread — that would drop the reply (the caller sees "core
+                // dropped reply") *and* silently kill the live feed. Catch it
+                // here so a single bad command (e.g. a device enumeration that
+                // panics deep in a platform audio backend) degrades to a failed
+                // reply while the core keeps serving.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_command(
+                        cmd,
+                        &mut supervisor,
+                        &*enumerator,
+                        &audio_factory,
+                        &interlock,
+                        &lease,
+                        &mut live,
+                        &mut next_tx_id,
+                        &frames,
+                        &telemetry,
+                    )
+                }));
+                if outcome.is_err() {
+                    tracing::error!("core command handler panicked; feed preserved, reply dropped");
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 poll_hotplug(
                     &mut watcher, &*enumerator, &mut supervisor, &mut live, &lease, &telemetry,
