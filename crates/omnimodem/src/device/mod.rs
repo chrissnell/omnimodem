@@ -19,7 +19,19 @@ pub struct RealEnumerator;
 impl DeviceEnumerator for RealEnumerator {
     fn enumerate(&self) -> Vec<DeviceDescriptor> {
         let mut out = Vec::new();
-        for (id, backend) in crate::audio::cpal_backend::enumerate_default_host() {
+        // cpal talks to the platform audio HAL (CoreAudio on macOS), which can
+        // panic — e.g. under the macOS App Sandbox when the host lacks the
+        // audio-input entitlement. Isolate it so a panic yields no audio devices
+        // rather than taking down the caller (and, in the daemon, the live feed);
+        // USB SDR enumeration below still runs.
+        let audio = std::panic::catch_unwind(|| {
+            crate::audio::cpal_backend::enumerate_default_host()
+        })
+        .unwrap_or_else(|_| {
+            tracing::error!("audio device enumeration panicked; reporting no audio devices");
+            Vec::new()
+        });
+        for (id, backend) in audio {
             // Report the real direction(s) cpal advertises, so the TX picker only
             // offers true output devices (a mic is capture-only, a speaker is
             // playback-only) and a channel isn't silently bound RX-only.

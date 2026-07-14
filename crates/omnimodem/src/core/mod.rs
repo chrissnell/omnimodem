@@ -195,18 +195,31 @@ fn run(
     loop {
         match commands.recv_timeout(HOTPLUG_POLL) {
             Ok(Command::Shutdown) => break,
-            Ok(cmd) => handle_command(
-                cmd,
-                &mut supervisor,
-                &*enumerator,
-                &audio_factory,
-                &interlock,
-                &lease,
-                &mut live,
-                &mut next_tx_id,
-                &frames,
-                &telemetry,
-            ),
+            Ok(cmd) => {
+                // A panic inside one command must not unwind the whole core
+                // thread — that would drop the reply (the caller sees "core
+                // dropped reply") *and* silently kill the live feed. Catch it
+                // here so a single bad command (e.g. a device enumeration that
+                // panics deep in a platform audio backend) degrades to a failed
+                // reply while the core keeps serving.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_command(
+                        cmd,
+                        &mut supervisor,
+                        &*enumerator,
+                        &audio_factory,
+                        &interlock,
+                        &lease,
+                        &mut live,
+                        &mut next_tx_id,
+                        &frames,
+                        &telemetry,
+                    )
+                }));
+                if outcome.is_err() {
+                    tracing::error!("core command handler panicked; feed preserved, reply dropped");
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 poll_hotplug(
                     &mut watcher, &*enumerator, &mut supervisor, &mut live, &lease, &telemetry,
@@ -1810,6 +1823,42 @@ mod tests {
             // The enumerated soundcard is still present (registered devices are
             // additive, not a replacement).
             assert!(devices.iter().any(|d| matches!(&d.id, DeviceId::AlsaCard { .. })));
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    /// An enumerator that panics on every scan, standing in for the CoreAudio
+    /// backend blowing up under the App Sandbox during a USB device scan.
+    struct PanickingEnumerator;
+    impl DeviceEnumerator for PanickingEnumerator {
+        fn enumerate(&self) -> Vec<DeviceDescriptor> {
+            panic!("device enumeration exploded");
+        }
+    }
+
+    // A command that panics deep in the handler (here, device enumeration) must
+    // not unwind the whole core thread: the caller sees a dropped reply, but the
+    // core keeps serving so the live feed survives. Without the catch_unwind in
+    // the core loop the thread dies and the follow-up GetState hangs/drops too.
+    #[test]
+    fn panicking_command_preserves_the_core_thread() {
+        let (core, join) = spawn_core(
+            Box::new(PanickingEnumerator),
+            Box::new(|_| Box::new(NullBackend::new(48_000))),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            // The panicking ListDevices drops its reply: the caller observes the
+            // failure rather than a hung RPC.
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::ListDevices { reply: tx }).unwrap();
+            assert!(rx.await.is_err(), "expected dropped reply from panicking scan");
+
+            // The core is still alive: a subsequent command answers normally.
+            let (tx, rx) = oneshot::channel();
+            core.commands.send(Command::GetState { reply: tx }).unwrap();
+            rx.await.expect("core thread survived the panic and answered GetState");
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
