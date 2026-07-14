@@ -360,7 +360,20 @@ fn handle_command(
         }
 
         Command::ListDevices { reply } => {
-            let mut devices = supervisor.device_cache_mut().refresh(enumerator);
+            // Enumeration reaches into platform backends (CoreAudio, libusb) that
+            // can panic under the macOS App Sandbox. Catch it here, holding `reply`
+            // outside the guard, so a scan panic degrades to a partial list rather
+            // than dropping the reply — a dropped reply reads to the caller as
+            // "daemon stopped responding" even though the core (and live feed)
+            // survive via the loop's outer catch_unwind.
+            let cache = supervisor.device_cache_mut();
+            let mut devices = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cache.refresh(enumerator)
+            }))
+            .unwrap_or_else(|_| {
+                tracing::error!("device scan panicked; returning registered devices only");
+                Vec::new()
+            });
             // Merge config-file-registered endpoints (e.g. remote `rtl_tcp` SDRs)
             // that no hardware scan produces. A registered id that the live
             // enumeration already surfaced is not duplicated.
@@ -1838,9 +1851,10 @@ mod tests {
     }
 
     // A command that panics deep in the handler (here, device enumeration) must
-    // not unwind the whole core thread: the caller sees a dropped reply, but the
-    // core keeps serving so the live feed survives. Without the catch_unwind in
-    // the core loop the thread dies and the follow-up GetState hangs/drops too.
+    // not unwind the whole core thread: the live feed survives, and the scan
+    // itself degrades to an (empty) reply rather than a dropped one. A dropped
+    // reply reads to the gRPC caller as "daemon stopped responding"; catching the
+    // panic at the ListDevices boundary keeps the RPC answering.
     #[test]
     fn panicking_command_preserves_the_core_thread() {
         let (core, join) = spawn_core(
@@ -1849,11 +1863,12 @@ mod tests {
         );
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         rt.block_on(async {
-            // The panicking ListDevices drops its reply: the caller observes the
-            // failure rather than a hung RPC.
+            // The panicking ListDevices still answers: the caller gets an empty
+            // list, not a dropped reply that would surface as an "unavailable" RPC.
             let (tx, rx) = oneshot::channel();
             core.commands.send(Command::ListDevices { reply: tx }).unwrap();
-            assert!(rx.await.is_err(), "expected dropped reply from panicking scan");
+            let devices = rx.await.expect("scan panic must degrade to a reply, not a drop");
+            assert!(devices.is_empty(), "panicking scan should yield no devices");
 
             // The core is still alive: a subsequent command answers normally.
             let (tx, rx) = oneshot::channel();
