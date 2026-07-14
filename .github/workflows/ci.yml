@@ -6,14 +6,52 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/wiki/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/wiki/**'
+
+# Cancel superseded runs on PR branches; let main runs finish so status is authoritative.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      tui: ${{ steps.filter.outputs.tui }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+            tui:
+              - 'clients/omnimodem-tui/**'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+
   test:
     name: test + clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,15 +68,7 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build & test (workspace)
         run: cargo test --workspace --locked
@@ -48,17 +78,21 @@ jobs:
 
   tui:
     name: tui (go)
+    needs: changes
+    if: needs.changes.outputs.tui == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          cache-dependency-path: clients/omnimodem-tui/go.sum
       - name: Install protoc + plugins
+        # Pinned versions: bump intentionally, not on every CI run.
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.35.2
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Generate + vet + test
         working-directory: clients/omnimodem-tui
