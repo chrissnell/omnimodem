@@ -61,7 +61,11 @@ that string is then parsed by `ModeConfig::parse`.
 |---|---|---|
 | `AudioBackend` trait + capture/playback handles + null backend | `audio/backend.rs` | `AudioBackend`, `CaptureHandle`, `PlaybackHandle` |
 | cpal hardware backend (stream rebuild + backoff) | `audio/cpal_backend.rs` | `enumerate_default_host` |
-| `rtl_tcp` SDR backend (IQ→audio, tune/gain control, RF waterfall, reconnect + drop-oldest overrun) | `audio/rtlsdr.rs` | `RtlTcpBackend`, `SdrControl`, `connect_and_handshake`, `deliver_audio` |
+| SDR control cell + tuning model + `SdrTransport` seam; tuner caps/gain tables | `audio/sdr/mod.rs` | `SdrControl`, `SdrTransport`, `DemodMode`, `plan_tune`, `tuner_gains_db` |
+| Shared IQ→audio capture loop + RF waterfall + drop-oldest overrun (both SDR sources) | `audio/sdr/pipeline.rs` | `run_capture`, `deliver_audio`, `emit_waterfall` |
+| `rtl_tcp` networked SDR backend (wire protocol, reconnect supervisor) | `audio/sdr/rtl_tcp.rs` | `RtlTcpBackend`, `RtlTcpTransport`, `connect_and_handshake` |
+| Native local-USB RTL backend (nusb claim, control I/O, RTL2832U+R82xx bring-up, bulk IQ, terminal removal) | `audio/sdr/usb.rs` | `RtlUsbBackend`, `RtlUsbTransport`, `UsbControl`, `write_reg`, `plan_apply_hardware` |
+| RTL2832U / R820T-R828D register tables + tuner PLL/gain math | `audio/sdr/usb_regs.rs` | `baseband_init`, `sample_rate_writes`, `TunerKind`, `r82xx_pll` |
 | ALSA rate/format hardening (48 kHz ceiling, `plughw` trap) | `audio/alsa.rs` | rate/format selection helpers |
 | Module constants + rate ceiling | `audio/mod.rs` | `MAX_SAMPLE_RATE` |
 | File backend (deterministic test replay) | `audio/file.rs` | `FileBackend` |

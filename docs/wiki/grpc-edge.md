@@ -99,8 +99,9 @@ Two controls take effect on the running RX worker without tearing it down:
   worker polls once per chunk; `ConfigureSpectrum` bumps it and the worker
   reconciles (build/drop the FFT tap) on the next chunk. Off by default, so the FFT
   costs nothing when unwatched.
-- **SDR control** (`audio/rtlsdr.rs::SdrControl`): the same generation-counter
-  pattern for an `rtl_tcp` channel's tuner. The four SDR RPCs
+- **SDR control** (`audio/sdr/mod.rs::SdrControl`): the same generation-counter
+  pattern for an SDR channel's tuner (shared by the `rtl_tcp` and native-USB
+  backends). The four SDR RPCs
   (`SetSdrTune`/`SetSdrGain`/`ConfigureSdr`/`GetSdrCaps`) live in the
   `SetAudioGain`-style path — `grpc/service.rs` → `Command` → the `set_sdr_*` /
   `configure_sdr` / `get_sdr_caps` arms in `core/mod.rs` — mutating the shared cell

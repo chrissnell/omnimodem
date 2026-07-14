@@ -17,11 +17,13 @@ hotplug diff) hangs off of. Variants, in rough precedence of durability:
 | `Topology` | `bus, ports` | Two identical adapters with no serial — disambiguate by USB port chain. |
 | `Serial` | `by_id` | Wraps a `/dev/serial/by-id/<symlink>` (already stable by construction). |
 | `RtlTcp` | `host, port` | An `rtl_tcp` SDR endpoint (local or remote); the endpoint *is* the audio device. |
+| `Rtl` | `key: RtlKey::{Serial,Topo}` | A locally-attached RTL-SDR dongle driven natively over USB (nusb); serial when unique, else bus topology. |
 | `Placeholder` | `tag` | Virtual backends (file/stdin/loopback) and test fixtures. |
 
 Each variant round-trips through a canonical string (`usb:VVVV:PPPP:serial`,
 `alsa:<name>`, `topo:<bus>-<ports>`, `serial:<by_id>`, `rtltcp:<host>:<port>`,
-`virtual:<tag>`), which is what persistence stores. **Config keys on this, never a
+`rtl:serial:<s>` / `rtl:topo:<bus>-<ports>`, `virtual:<tag>`), which is what
+persistence stores. **Config keys on this, never a
 `/dev` path** — that is why a renamed or re-enumerated device keeps its channel
 binding. An `rtltcp:host:port` id needs no enumeration: bind it ad-hoc and the core
 synthesizes a capture-only descriptor.
@@ -35,7 +37,8 @@ without hardware.
 | Backend | File | Use |
 |---|---|---|
 | cpal (ALSA/CoreAudio/…) | `audio/cpal_backend.rs` | Real hardware; rebuilds the stream with backoff on error. |
-| `rtl_tcp` SDR | `audio/rtlsdr.rs` | Receives off a (local/remote) RTL-SDR dongle over TCP; demods IQ → audio, RX-only. |
+| `rtl_tcp` SDR | `audio/sdr/rtl_tcp.rs` | Receives off a networked RTL-SDR dongle over `rtl_tcp`; demods IQ → audio, RX-only. |
+| Native USB SDR | `audio/sdr/usb.rs` | Receives off a locally-attached RTL dongle claimed directly via nusb; same IQ → audio pipeline, RX-only. |
 | File | `audio/file.rs` | Deterministic replay of a recorded corpus (also the test input). |
 | stdin | `audio/stdin.rs` | Raw i16 PCM piped in. |
 | Null | `audio/backend.rs` (`NullBackend`) | No-op fallback when a device can't be resolved. |
@@ -43,16 +46,45 @@ without hardware.
 `CaptureHandle` / `PlaybackHandle` carry the stream's sample rate and cumulative
 submitted/drained sample counts (the watermark the no-sleep TX cycle times off).
 
-### `rtl_tcp` SDR backend
+### SDR backends (`audio/sdr/`)
 
-[`audio/rtlsdr.rs`](../../crates/omnimodem/src/audio/rtlsdr.rs) (`RtlTcpBackend`).
-Connects to a bare `rtl_tcp` server (no gqrx/`rtl_fm`/`socat`), reads the 12-byte
-`RTL0` header, sends 5-byte `[opcode][u32 BE]` commands (center freq, rate, gain
-mode/level, ppm), and streams raw u8 IQ. The capture thread runs the Plan-1 DSP
-chain (`u8_iq_to_cplx` → `NbfmReceiver`: NCO channel-select → decimate → NBFM
-discriminator → power squelch) to deliver mono i16 audio at the channel rate — so
-every downstream mode (AFSK1200/APRS first) works unmodified. Playback is
-`Unsupported` (dongles are receive-only).
+Both RTL-SDR sources share one module tree. The **`SdrTransport`** trait
+([`audio/sdr/mod.rs`](../../crates/omnimodem/src/audio/sdr/mod.rs):
+`read_iq`/`apply_hardware`/`caps`/`shutdown_handle`) is the seam: it abstracts
+*where the IQ comes from* so the demod pipeline is source-agnostic. Two transports
+implement it — `RtlTcpTransport` (networked) and `RtlUsbTransport` (local USB) — and
+`run_capture` ([`audio/sdr/pipeline.rs`](../../crates/omnimodem/src/audio/sdr/pipeline.rs))
+runs the shared DSP chain over either one.
+
+The pipeline runs the Plan-1 DSP chain (`u8_iq_to_cplx` → `NbfmReceiver`: NCO
+channel-select → decimate → NBFM discriminator → power squelch) to deliver mono i16
+audio at the channel rate — so every downstream mode (AFSK1200/APRS first) works
+unmodified. Playback is `Unsupported` on both (dongles are receive-only). The device
+factory in `lib.rs` picks the backend by identity: `DeviceId::RtlTcp` → `RtlTcpBackend`,
+`DeviceId::Rtl` → `RtlUsbBackend`.
+
+#### `RtlTcpBackend` — networked (`audio/sdr/rtl_tcp.rs`)
+
+[`audio/sdr/rtl_tcp.rs`](../../crates/omnimodem/src/audio/sdr/rtl_tcp.rs)
+(`RtlTcpBackend`/`RtlTcpTransport`). Connects to a bare `rtl_tcp` server (no
+gqrx/`rtl_fm`/`socat`), reads the 12-byte `RTL0` header, sends 5-byte
+`[opcode][u32 BE]` commands (center freq, rate, gain mode/level, ppm), and streams
+raw u8 IQ.
+
+#### `RtlUsbBackend` — native local USB (`audio/sdr/usb.rs`)
+
+[`audio/sdr/usb.rs`](../../crates/omnimodem/src/audio/sdr/usb.rs)
+(`RtlUsbBackend`/`RtlUsbTransport`). Claims the dongle's interface 0 directly via
+pure-Rust `nusb` (detaching the kernel DVB driver on Linux), does the full RTL2832U
+baseband + R820T/R828D tuner bring-up itself over control transfers (register tables
+in [`audio/sdr/usb_regs.rs`](../../crates/omnimodem/src/audio/sdr/usb_regs.rs)), and
+streams IQ over a bulk endpoint. `UsbControl`/`UsbBulk` are mockable traits (`FakeUsb`)
+so the whole path is unit-tested without hardware. A mid-capture unplug is a
+**terminal stop** (`AudioError` from a failed bulk transfer → capture exits, channel
+unbinds, hotplug reports `Departed`) — deliberately *not* the reconnect the networked
+path does. Discovery + the `needs_setup` surfacing live in `device/enumerate.rs`
+(`scan_rtl`, `RTL_USB_IDS`); operator-facing setup is in
+[`../sdr-rtl-usb.md`](../sdr-rtl-usb.md).
 
 - **`SdrControl`** — an `Arc`-of-atomics runtime cell (the RX analogue of
   `AudioGain`): NCO offset, hardware center, gain (auto/manual dB), squelch dBFS,

@@ -13,6 +13,7 @@ design doc, the plan files, and the proto keep their existing roles.
 | Feature overview / project pitch | [`../../README.md`](../../README.md) |
 | Build and run the daemon + TUI | [`../running.md`](../running.md) |
 | Set up an RTL-SDR (`rtl_tcp`) input — tuning, waterfall, demod, gain, reconnect | [`../sdr-rtl-tcp.md`](../sdr-rtl-tcp.md) |
+| Set up a local USB RTL-SDR — auto/manual/remote selection, per-OS setup, bring-up checklist | [`../sdr-rtl-usb.md`](../sdr-rtl-usb.md) |
 | Why a subsystem was built that way (design rationale) | [`../design/2026-06-17-omnimodem-design.md`](../design/2026-06-17-omnimodem-design.md) and `../plans/*.md` |
 | What a single function does | The code |
 
