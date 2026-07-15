@@ -265,6 +265,14 @@ impl RxWorker {
         RxWorker { running, join: Some(join) }
     }
 
+    /// Is the worker's thread still running? A worker whose capture ended (device
+    /// removed, finite replay drained) has already dropped its `CaptureHandle` and
+    /// released the underlying stream, so callers can distinguish a live capture
+    /// worth reusing from a finished one that must be re-opened.
+    pub fn is_running(&self) -> bool {
+        self.join.as_ref().is_some_and(|j| !j.is_finished())
+    }
+
     /// Signal the worker to stop and wait for it (used in tests / graceful paths).
     pub fn stop(mut self) {
         self.running.store(false, Ordering::Relaxed);

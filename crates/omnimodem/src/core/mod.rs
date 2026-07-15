@@ -123,12 +123,20 @@ pub fn spawn_with_devices(
 /// A channel's resolved audio binding: capture (RX) and playback (TX) devices,
 /// which may be the same `DeviceId` (single rig) or differ (split rigs). The
 /// interlock and TX lease gate on `tx_dev`; the RX worker reads on `rx_dev`.
-/// (The RX rate lives on the capture handle, so it is not duplicated here.)
+/// `rx_req_rate`/`rx_rate`/`rx_mode` record what the running capture was opened
+/// for so a re-bind to the same RX device can reuse it instead of re-claiming
+/// an exclusively-held device (see `configure_audio`).
 #[derive(Clone)]
 struct AudioBinding {
     rx_dev: DeviceId,
     tx_dev: DeviceId,
     tx_rate: u32,
+    /// Requested RX rate (as asked for by the caller; 0 = "backend's choice").
+    rx_req_rate: u32,
+    /// Actual RX rate the running capture opened at.
+    rx_rate: u32,
+    /// Mode the running RX worker was built for.
+    rx_mode: crate::mode::ModeConfig,
 }
 
 /// Per-channel live audio/PTT bindings owned by the core loop. For a moded
@@ -776,26 +784,53 @@ fn configure_audio(
             })
     };
 
-    let rx_desc = resolve(supervisor, &device_id)?;
-    let mut rx_backend = (audio_factory)(&rx_desc);
-    // For an SDR device, inject the per-channel control cell + telemetry sink so
-    // the capture thread can honor runtime tune/gain/squelch and emit the RF
-    // waterfall. The control persists across rebinds (settings survive a mode
-    // switch); a departing device clears it in poll_hotplug.
-    if device_id.is_sdr() {
-        let control = live.sdr_controls.entry(id).or_default().clone();
-        // Couple the channel mode to the SDR front-end before opening the capture,
-        // so the capture thread sends the right demod mode + tune on connect.
-        couple_sdr_mode_to_channel(&control, &supervisor.channel_mode(id));
-        rx_backend.attach_sdr_context(id, telemetry.clone(), control);
+    // Re-binding a channel to the RX device it is already capturing on, in the
+    // same mode and at the same requested rate, must NOT re-open the device: a
+    // local USB SDR claims interface 0 exclusively, so re-`open_capture` while
+    // the running capture still holds it fails with "exclusive access" and the
+    // channel loses its feed for good. The app's feed auto-reconnect re-sends
+    // ConfigureAudio on every stream restart, so without this one stream blip
+    // permanently kills reception. Keep the live capture; only the TX/bookkeeping
+    // below refreshes. Reuse requires an actually-running RX (a finished worker
+    // has already released the device, so re-open is both safe and needed).
+    let mode = supervisor.channel_mode(id);
+    let rx_running = live.rx_workers.get(&id).is_some_and(RxWorker::is_running)
+        || live.captures.contains_key(&id);
+    let reuse_rx = rx_running
+        && live.audio.get(&id).is_some_and(|b| {
+            b.rx_dev == device_id && b.rx_req_rate == sample_rate && b.rx_mode == mode
+        });
+
+    let rx_rate = if reuse_rx {
+        let rate = live.audio.get(&id).map_or(sample_rate, |b| b.rx_rate);
+        tracing::debug!(
+            channel = id.0, device = %device_id.to_canonical_string(),
+            "reusing running capture on re-bind (same RX device + mode)",
+        );
+        rate
     } else {
-        // Rebinding to a non-SDR device: drop any stale control cell so a later
-        // rebind to an SDR starts fresh rather than resurrecting old tune/gain.
-        live.sdr_controls.remove(&id);
-    }
-    let capture = rx_backend.open_capture(sample_rate)?;
-    let rx_rate = capture.sample_rate;
-    live.captures.insert(id, capture);
+        let rx_desc = resolve(supervisor, &device_id)?;
+        let mut rx_backend = (audio_factory)(&rx_desc);
+        // For an SDR device, inject the per-channel control cell + telemetry sink so
+        // the capture thread can honor runtime tune/gain/squelch and emit the RF
+        // waterfall. The control persists across rebinds (settings survive a mode
+        // switch); a departing device clears it in poll_hotplug.
+        if device_id.is_sdr() {
+            let control = live.sdr_controls.entry(id).or_default().clone();
+            // Couple the channel mode to the SDR front-end before opening the capture,
+            // so the capture thread sends the right demod mode + tune on connect.
+            couple_sdr_mode_to_channel(&control, &mode);
+            rx_backend.attach_sdr_context(id, telemetry.clone(), control);
+        } else {
+            // Rebinding to a non-SDR device: drop any stale control cell so a later
+            // rebind to an SDR starts fresh rather than resurrecting old tune/gain.
+            live.sdr_controls.remove(&id);
+        }
+        let capture = rx_backend.open_capture(sample_rate)?;
+        let rate = capture.sample_rate;
+        live.captures.insert(id, capture);
+        rate
+    };
 
     // Playback is best-effort: a TX device with no usable playback support — an
     // input-only device, or TX defaulting to the capture device — binds the
@@ -836,7 +871,14 @@ fn configure_audio(
     );
     live.audio.insert(
         id,
-        AudioBinding { rx_dev: device_id, tx_dev: tx_device_id, tx_rate },
+        AudioBinding {
+            rx_dev: device_id,
+            tx_dev: tx_device_id,
+            tx_rate,
+            rx_req_rate: sample_rate,
+            rx_rate,
+            rx_mode: mode,
+        },
     );
     live.gains.entry(id).or_default(); // default unity until SetAudioGain
 
@@ -847,7 +889,13 @@ fn configure_audio(
     // the TX worker's old modulator) running, so RX decoding and the transmitted
     // audio never changed. try_spawn_workers consumed the prior capture/sink into
     // those workers, so dropping them also releases the stale streams.
-    live.rx_workers.remove(&id);
+    //
+    // The RX worker is kept when we reused its capture (`reuse_rx`) — dropping it
+    // would tear down the very stream we chose not to re-open, and its device
+    // release is what a re-claim on an exclusive SDR would then deadlock against.
+    if !reuse_rx {
+        live.rx_workers.remove(&id);
+    }
     live.tx_workers.remove(&id);
 
     Ok(ConfigureAudioOk { rx_rate, tx_rate })
@@ -2103,6 +2151,80 @@ mod tests {
             configure_ptt_ch(&core, ChannelId(0), dev_id.clone()).await;
             // Worker gone -> manual key is allowed again.
             assert!(key_ptt_call(&core, ChannelId(0)).await.is_ok());
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    /// A backend that counts `open_capture` calls and hands back a capture that
+    /// stays live: the sender is retained in `keep` (not the handle's stop hook,
+    /// which edition-2021 disjoint captures drop early), so the RX worker's
+    /// recv_timeout just times out and loops instead of hitting EOF. Lets a test
+    /// assert whether a re-bind re-opens the device or reuses the running capture.
+    struct CountingLiveBackend {
+        id: DeviceId,
+        rate: u32,
+        opens: Arc<std::sync::atomic::AtomicUsize>,
+        keep: Arc<Mutex<Vec<std::sync::mpsc::SyncSender<crate::audio::AudioChunk>>>>,
+    }
+    impl crate::audio::backend::AudioBackend for CountingLiveBackend {
+        fn open_capture(&self, _r: u32) -> Result<CaptureHandle, crate::audio::AudioError> {
+            self.opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (tx, rx) = std::sync::mpsc::sync_channel(4);
+            self.keep.lock().unwrap().push(tx);
+            Ok(CaptureHandle::new(rx, self.rate, || {}))
+        }
+        fn open_playback(&self, r: u32) -> Result<PlaybackHandle, crate::audio::AudioError> {
+            NullBackend::new(self.rate).open_playback(r)
+        }
+        fn device_id(&self) -> DeviceId {
+            self.id.clone()
+        }
+    }
+
+    // GRA-372: the app's feed auto-reconnect re-sends ConfigureChannel +
+    // ConfigureAudio for the *same* SDR on every stream restart. Re-opening an
+    // exclusively-claimed USB SDR while the running capture still holds interface
+    // 0 fails with "exclusive access" and the channel loses its feed for good, so
+    // a re-bind to the same RX device + mode must reuse the live capture. A real
+    // mode switch still re-opens (the worker is rebuilt against the new mode).
+    #[test]
+    fn rebinding_same_device_reuses_the_running_capture() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let backend_id = dev.id.clone();
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens_factory = opens.clone();
+        let keep = Arc::new(Mutex::new(Vec::new()));
+        let keep_factory = keep.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(move |_| {
+                Box::new(CountingLiveBackend {
+                    id: backend_id.clone(),
+                    rate: 48_000,
+                    opens: opens_factory.clone(),
+                    keep: keep_factory.clone(),
+                })
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            use std::sync::atomic::Ordering::Relaxed;
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            assert_eq!(opens.load(Relaxed), 1, "first bind opens the capture");
+
+            // The reconnect path: same device, same mode. Must NOT re-open —
+            // on a real USB SDR that would fail exclusive-access.
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            assert_eq!(opens.load(Relaxed), 1, "re-bind to same device+mode must reuse, not re-open");
+
+            // Switching mode on the same device does re-open (worker rebuilt).
+            configure_channel(&core, ChannelId(0), "psk31").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            assert_eq!(opens.load(Relaxed), 2, "mode switch re-opens the capture");
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
