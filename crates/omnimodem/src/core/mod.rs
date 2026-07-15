@@ -754,6 +754,16 @@ fn configure_audio(
     if !supervisor.has_channel(id) {
         return Err(CoreError::UnknownChannel(id));
     }
+    // A requested rate of 0 means "daemon default". Normalize it once, up
+    // front: the supervisor persists 0 as MAX_SAMPLE_RATE, so after a daemon
+    // restart `restore_live_bindings` re-binds at 48_000 — and a client that
+    // keeps sending 0 (the app never sets sample_rate) would miss the reuse
+    // gate below (rx_req_rate 48_000 != 0), re-open the exclusively-claimed
+    // USB SDR, and fail every reconnect forever (GRA-372). One canonical
+    // value keeps the persisted config, the reuse comparison, and the
+    // recorded rx_req_rate in agreement across live binds and restores.
+    let sample_rate =
+        if sample_rate == 0 { crate::audio::MAX_SAMPLE_RATE } else { sample_rate };
     let tx_rate_req = if tx_sample_rate == 0 { sample_rate } else { tx_sample_rate };
     supervisor.configure_audio(
         id, device_id.clone(), sample_rate, fanout, tx_device_id.clone(), tx_sample_rate,
@@ -1664,12 +1674,16 @@ mod tests {
     }
 
     async fn configure_audio_ch(core: &CoreHandle, id: ChannelId, dev: DeviceId) {
+        configure_audio_ch_rate(core, id, dev, 48_000).await;
+    }
+
+    async fn configure_audio_ch_rate(core: &CoreHandle, id: ChannelId, dev: DeviceId, rate: u32) {
         let (tx, rx) = oneshot::channel();
         core.commands
             .send(Command::ConfigureAudio {
                 id,
                 device_id: dev.clone(),
-                sample_rate: 48_000,
+                sample_rate: rate,
                 fanout: 1,
                 tx_device_id: dev,
                 tx_sample_rate: 0,
@@ -2238,6 +2252,51 @@ mod tests {
             configure_channel(&core, ChannelId(0), "psk31").await;
             configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
             assert_eq!(opens.load(Relaxed), 2, "mode switch re-opens the capture");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    // GRA-372 regression: the supervisor persists a requested rate of 0 as
+    // MAX_SAMPLE_RATE, so after a daemon restart the restore path re-binds at
+    // 48_000 — while the app keeps sending 0 on every reconnect. The reuse
+    // gate must treat those as the same request (0 == daemon default), or
+    // every app re-bind re-opens the exclusively-claimed USB SDR and fails.
+    #[test]
+    fn rebinding_with_default_rate_reuses_capture_bound_at_explicit_default() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let backend_id = dev.id.clone();
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens_factory = opens.clone();
+        let keep = Arc::new(Mutex::new(Vec::new()));
+        let keep_factory = keep.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(move |_| {
+                Box::new(CountingLiveBackend {
+                    id: backend_id.clone(),
+                    rate: 48_000,
+                    opens: opens_factory.clone(),
+                    keep: keep_factory.clone(),
+                })
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            use std::sync::atomic::Ordering::Relaxed;
+            // Restore path: binds with the persisted, normalized rate.
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch_rate(&core, ChannelId(0), dev_id.clone(), crate::audio::MAX_SAMPLE_RATE).await;
+            assert_eq!(opens.load(Relaxed), 1, "first bind opens the capture");
+
+            // App reconnect: same device + mode, rate left at proto default 0.
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch_rate(&core, ChannelId(0), dev_id.clone(), 0).await;
+            assert_eq!(
+                opens.load(Relaxed), 1,
+                "re-bind with rate 0 must reuse the capture opened at the default rate"
+            );
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
