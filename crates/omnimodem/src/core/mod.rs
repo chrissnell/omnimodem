@@ -826,6 +826,16 @@ fn configure_audio(
             // rebind to an SDR starts fresh rather than resurrecting old tune/gain.
             live.sdr_controls.remove(&id);
         }
+        // Known limitation: on a *same-device* re-open (a real mode/rate switch
+        // on one exclusive USB SDR, so `reuse_rx` is false) the old RxWorker is
+        // still dropped below, after this claim — and its drop only signals stop,
+        // releasing interface 0 asynchronously. So this `open_capture` can lose
+        // the race and fail exclusive-access on real hardware. That is a
+        // pre-existing hazard (not the reconnect symptom GRA-372 fixes, which is
+        // the same device *and* mode → handled by the reuse path above); closing
+        // it means releasing the old worker first and waiting, which risks
+        // leaving the channel with zero RX if the re-open then fails. Tracked
+        // separately.
         let capture = rx_backend.open_capture(sample_rate)?;
         let rate = capture.sample_rate;
         live.captures.insert(id, capture);
@@ -2161,6 +2171,9 @@ mod tests {
     /// which edition-2021 disjoint captures drop early), so the RX worker's
     /// recv_timeout just times out and loops instead of hitting EOF. Lets a test
     /// assert whether a re-bind re-opens the device or reuses the running capture.
+    /// It does NOT model real USB interface exclusivity, so a re-open here always
+    /// succeeds — the tests assert the reuse/re-open *decision*, not hardware
+    /// claim success. Drop the retained sender to drive a capture to EOF.
     struct CountingLiveBackend {
         id: DeviceId,
         rate: u32,
@@ -2225,6 +2238,51 @@ mod tests {
             configure_channel(&core, ChannelId(0), "psk31").await;
             configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
             assert_eq!(opens.load(Relaxed), 2, "mode switch re-opens the capture");
+        });
+        core.commands.send(Command::Shutdown).unwrap();
+        join.join().unwrap();
+    }
+
+    // The reuse gate must NOT reuse a *dead* RX worker (device removed, replay
+    // drained): a finished worker has already released its device, so a re-bind
+    // must re-open. This guards the `RxWorker::is_running()` liveness check.
+    #[test]
+    fn rebinding_after_capture_ends_reopens_the_device() {
+        let dev = loop_device();
+        let dev_id = dev.id.clone();
+        let backend_id = dev.id.clone();
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens_factory = opens.clone();
+        let keep = Arc::new(Mutex::new(Vec::new()));
+        let keep_factory = keep.clone();
+        let (core, join) = spawn_core(
+            Box::new(FakeEnumerator::new(vec![dev])),
+            Box::new(move |_| {
+                Box::new(CountingLiveBackend {
+                    id: backend_id.clone(),
+                    rate: 48_000,
+                    opens: opens_factory.clone(),
+                    keep: keep_factory.clone(),
+                })
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            use std::sync::atomic::Ordering::Relaxed;
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            assert_eq!(opens.load(Relaxed), 1, "first bind opens the capture");
+
+            // Drop the retained sender: the capture disconnects, the RX worker
+            // hits EOF and exits, and its JoinHandle finishes. Wait for it so the
+            // liveness check sees a finished worker (not a still-parked one).
+            keep.lock().unwrap().clear();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Same device + mode, but the worker is dead → must re-open.
+            configure_channel(&core, ChannelId(0), "afsk1200").await;
+            configure_audio_ch(&core, ChannelId(0), dev_id.clone()).await;
+            assert_eq!(opens.load(Relaxed), 2, "a finished worker must not be reused");
         });
         core.commands.send(Command::Shutdown).unwrap();
         join.join().unwrap();
