@@ -155,6 +155,77 @@ fn slice_byte(m: &[f32], ptr: &mut usize, phase: &mut usize) -> u8 {
     }
 }
 
+/// dump1090-fa's preamble quality gate, applied on top of readsb's correlation
+/// pre-check. `p` is the magnitude buffer at the candidate preamble start.
+///
+/// readsb's demod (which the rest of this file ports) trades a looser preamble
+/// acceptance for weak-frame yield; on quiet spectrum that looseness lets noise
+/// preambles through, and roughly 1-in-16-million of the frames sliced from them
+/// checksums clean as a DF17/18 extended squitter — a phantom aircraft. dump1090
+/// rejects those same noise preambles here, before any slicing, with three shape
+/// checks a real Mode S preamble passes and noise rarely does:
+///
+/// 1. A rising edge into the first pulse and a falling edge out of the fourth.
+/// 2. One of five sub-sample pulse-peak patterns (readsb data phases 4..8), each
+///    defining the peak level `high` and the pulse/quiet sample sets.
+/// 3. A ~3.5 dB SNR floor (`base_signal*2 >= 3*base_noise`) and a quiet-zone
+///    check: every gap sample must sit strictly below `high`.
+///
+/// Faithful port of `demodulate2400` in dump1090-fa `demod_2400.c`; the `/ 4.0`
+/// on peak sums that hold five or six terms is dump1090's own deliberate bias,
+/// which lifts `high` and so tightens the quiet-zone test. Integer-vs-`f32` only
+/// changes truncation, not the sign of any comparison.
+fn preamble_quality_ok(p: &[f32]) -> bool {
+    if !(p[0] < p[1] && p[12] > p[13]) {
+        return false;
+    }
+    let (high, base_signal, base_noise);
+    if p[1] > p[2] && p[2] < p[3] && p[3] > p[4] && p[8] < p[9] && p[9] > p[10] && p[10] < p[11] {
+        // peaks at 1,3,9,11-12: phase 3
+        high = (p[1] + p[3] + p[9] + p[11] + p[12]) / 4.0;
+        base_signal = p[1] + p[3] + p[9];
+        base_noise = p[5] + p[6] + p[7];
+    } else if p[1] > p[2] && p[2] < p[3] && p[3] > p[4] && p[8] < p[9] && p[9] > p[10] && p[11] < p[12]
+    {
+        // peaks at 1,3,9,12: phase 4
+        high = (p[1] + p[3] + p[9] + p[12]) / 4.0;
+        base_signal = p[1] + p[3] + p[9] + p[12];
+        base_noise = p[5] + p[6] + p[7] + p[8];
+    } else if p[1] > p[2] && p[2] < p[3] && p[4] > p[5] && p[8] < p[9] && p[10] > p[11] && p[11] < p[12]
+    {
+        // peaks at 1,3-4,9-10,12: phase 5
+        high = (p[1] + p[3] + p[4] + p[9] + p[10] + p[12]) / 4.0;
+        base_signal = p[1] + p[12];
+        base_noise = p[6] + p[7];
+    } else if p[1] > p[2] && p[3] < p[4] && p[4] > p[5] && p[9] < p[10] && p[10] > p[11] && p[11] < p[12]
+    {
+        // peaks at 1,4,10,12: phase 6
+        high = (p[1] + p[4] + p[10] + p[12]) / 4.0;
+        base_signal = p[1] + p[4] + p[10] + p[12];
+        base_noise = p[5] + p[6] + p[7] + p[8];
+    } else if p[2] > p[3] && p[3] < p[4] && p[4] > p[5] && p[9] < p[10] && p[10] > p[11] && p[11] < p[12]
+    {
+        // peaks at 1-2,4,10,12: phase 7
+        high = (p[1] + p[2] + p[4] + p[10] + p[12]) / 4.0;
+        base_signal = p[4] + p[10] + p[12];
+        base_noise = p[6] + p[7] + p[8];
+    } else {
+        return false;
+    }
+    if base_signal * 2.0 < 3.0 * base_noise {
+        return false;
+    }
+    !(p[5] >= high
+        || p[6] >= high
+        || p[7] >= high
+        || p[8] >= high
+        || p[14] >= high
+        || p[15] >= high
+        || p[16] >= high
+        || p[17] >= high
+        || p[18] >= high)
+}
+
 /// Message length (bits) for a downlink format the native slicer decodes, or
 /// `None` for a DF it will not attempt. Matches readsb's default DF bitsets:
 /// short {0,4,5,11}, long {16,17,18,20,21}. The DF fixes the frame length before
@@ -293,6 +364,12 @@ fn scan_buf(m: &[f32], roster: &mut IcaoRoster, base: u64, stop: usize) -> (Vec<
         // readsb's cheap preamble pre-check: a spike at the first pulse over the
         // first quiet slot, and the fifth-pulse region over the guard.
         if !(m[i + 1] > m[i + 7] && m[i + 12] > m[i + 14] && m[i + 12] > m[i + 15]) {
+            i += 1;
+            continue;
+        }
+        // dump1090's stricter preamble-shape/SNR/quiet-zone gate on top, to reject
+        // the noise preambles readsb would slice (the phantom-DF17 source).
+        if !preamble_quality_ok(&m[i..]) {
             i += 1;
             continue;
         }
@@ -560,6 +637,35 @@ mod tests {
         assert!(decode(&vec![0.0f32; 4000]).is_empty(), "silence must not decode");
         let ramp: Vec<f32> = (0..4000).map(|i| (i % 7) as f32 * 0.01).collect();
         assert!(decode(&ramp).is_empty(), "structureless noise must not decode");
+    }
+
+    #[test]
+    fn preamble_quality_gate_accepts_real_rejects_noise() {
+        // A clean phase-4 preamble shape: pulses at 1,3,9,12; everything else quiet.
+        // This is the gate that keeps noise preambles from being sliced into phantom
+        // extended squitters (GRA-373); it must pass a real preamble.
+        let mut p = [5.0f32; 20];
+        for k in [1, 3, 9, 12] {
+            p[k] = 100.0;
+        }
+        assert!(preamble_quality_ok(&p), "a clean Mode S preamble shape must pass");
+
+        // Flat magnitude (no rising edge into the first pulse): rejected.
+        assert!(!preamble_quality_ok(&[10.0f32; 20]), "a flat slice must be rejected");
+
+        // Right pulse shape but a loud "quiet" slot above the peak: rejected by the
+        // quiet-zone check — the discriminator noise fails and a real preamble clears.
+        let mut loud_gap = p;
+        loud_gap[16] = 150.0;
+        assert!(!preamble_quality_ok(&loud_gap), "a loud quiet-zone slot must be rejected");
+
+        // Right shape but the pulses barely clear the noise floor (SNR under ~3.5 dB):
+        // rejected by the signal-vs-noise floor.
+        let mut weak = [5.0f32; 20];
+        for k in [1, 3, 9, 12] {
+            weak[k] = 7.0;
+        }
+        assert!(!preamble_quality_ok(&weak), "a preamble under the SNR floor must be rejected");
     }
 
     #[test]
