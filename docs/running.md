@@ -66,6 +66,13 @@ Or pass the TUI an explicit path/address:
 - `OMNIMODEM_PROMETHEUS_ADDR` — expose the Prometheus metrics exporter.
 - `OMNIMODEM_CONFIG` — path to the daemon config file (default `$OMNIMODEM_RUNTIME_DIR/omnimodem.conf`). A missing file is fine.
 - `RUST_LOG` — log level (default `info`).
+- `NO_COLOR` — set to any non-empty value to strip ANSI color from log output (same effect as the `--no-color` flag below).
+
+### Daemon flags
+
+- `--no-color` — suppress ANSI color escape sequences in log output. Useful when a
+  parent process captures the daemon's stderr into a plain-text sink that would
+  render the escapes literally (the ADS-B Enjoyer app passes this).
 
 ### Daemon config file
 

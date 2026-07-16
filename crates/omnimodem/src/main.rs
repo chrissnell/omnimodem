@@ -17,7 +17,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // succeeds and has no preconditions.
     let original_ppid = unsafe { libc::getppid() };
 
+    // Drop ANSI color from the log stream when a launcher asks for it: the ADS-B
+    // Enjoyer app captures our stderr into a plain-text buffer that renders escape
+    // codes literally. `--no-color` is the explicit request; the de-facto NO_COLOR
+    // convention (any non-empty value) is honored too.
+    let no_color_env = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let disable_color = should_disable_color(std::env::args().skip(1), no_color_env);
+
     tracing_subscriber::fmt()
+        .with_ansi(!disable_color)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
@@ -141,6 +149,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Decide whether to strip ANSI color from log output. True when `--no-color`
+/// appears in the passed args or the NO_COLOR convention is set. Split out from
+/// `main` so the precedence is unit-testable without touching the global env.
+fn should_disable_color(args: impl IntoIterator<Item = String>, no_color_env: bool) -> bool {
+    no_color_env || args.into_iter().any(|a| a == "--no-color")
+}
+
 /// Acquire the exclusive advisory lock that enforces one daemon per runtime dir.
 /// Returns the held lock (keep it alive for the process lifetime). A lock already
 /// held by another instance surfaces as `ErrorKind::WouldBlock` so the caller can
@@ -217,6 +232,27 @@ async fn wait_for_parent_death(original_ppid: libc::pid_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_color_flag_disables_color() {
+        assert!(should_disable_color(args(&["--no-color"]), false));
+        assert!(should_disable_color(args(&["--other", "--no-color"]), false));
+    }
+
+    #[test]
+    fn no_color_env_disables_color() {
+        assert!(should_disable_color(args(&[]), true));
+    }
+
+    #[test]
+    fn color_stays_on_by_default() {
+        assert!(!should_disable_color(args(&["--verbose"]), false));
+        assert!(!should_disable_color(args(&[]), false));
+    }
 
     #[test]
     fn instance_lock_is_exclusive_per_runtime_dir() {
