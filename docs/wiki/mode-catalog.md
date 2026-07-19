@@ -23,7 +23,7 @@ capture (no channelization), not a soundcard. See
 
 | Mode | File | What it is | RX/TX | Output |
 |---|---|---|---|---|
-| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude + TC 19 velocity. DSP + KATs and the ICAO-keyed `tracker` (CPR pairing, callsign, altitude, velocity, age-out) landed; the typed `AircraftReport` event is emitted by `core::adsb::AdsbReporter`. Daemon capture wiring (Phase 2) and the TUI flights table (Phase 4) are still open. TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
+| ADS-B (Mode S) | `adsb/` | 1090 MHz 1 Mbit/s PPM extended squitter; 8 µs preamble, 56/112-bit frames, 24-bit CRC, CPR position + barometric altitude + TC 19 velocity. DSP + KATs and the ICAO-keyed `tracker` (CPR pairing, callsign, altitude, velocity, age-out) landed. Daemon capture is wired end to end: `core/mod.rs` constructs one `core::adsb::AdsbReporter` per ADS-B channel, `core/rx_worker.rs` drives it and mints the typed `AircraftReport` event, and the TUI folds those events into a live flights table (`internal/app/model.go` handles `Event_AircraftReport`). TX is loopback self-test only (1090 MHz TX is illegal). | RX (+loopback) | Packet → aircraft |
 
 **Decoder benchmark (the ruler).** [`../../crates/adsb_bench/`](../../crates/adsb_bench/)
 replays a raw uint8 I/Q recording (2.4 Msps, as `rtl_tcp` streams it) through the
@@ -37,8 +37,13 @@ decimation folds back, and is the R1 improvement. `ComplexResampler`'s anti-alia
 lowpass is centered at DC, so `complex` assumes the signal sits near DC — true of
 the `rtl_sdr` reference recording (tuned to 1090 MHz) but **not** of a
 daemon-produced capture, which the tuner parks ~600 kHz above center to dodge the
-R820T DC spike (`RawMag` bypasses the NCO). Porting `complex` into the daemon
-needs an NCO shift to DC first.
+R820T DC spike (`RawMag` bypasses the NCO). `--center-offset <hz>` bridges that:
+the `complex` front end NCO-down-shifts the capture by that offset (reusing
+`frontend::nco::DownConverter`) to re-center the band before the DC-centered
+lowpass, so `complex` runs on an off-center daemon capture — e.g.
+`--center-offset 600000`. Promoting `complex` into the daemon front end is still
+gated on that measurement winning against the shipping `mag`/native path on a real
+daemon capture.
 
 **Decoder-quality phases (measured on the reference recording).** The slicer lives
 in [`adsb/ppm.rs`](../../crates/dsp/src/modes/adsb/ppm.rs) and its tuned constants
