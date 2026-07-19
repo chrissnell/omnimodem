@@ -32,8 +32,11 @@
 //! *not* automatically true of a daemon-produced capture: the daemon's tuner
 //! plan parks the signal a quarter-band (~600 kHz) above hardware center to dodge
 //! the R820T DC spike, and `RawMag` bypasses the NCO, so a daemon I/Q recording
-//! is offset from DC. Wiring `complex` into the daemon therefore needs an NCO
-//! shift to DC (or an on-1090 tune) first — part of that follow-up, not R1.
+//! is offset from DC. `--center-offset <hz>` closes that gap: the `complex` front
+//! end NCO-down-shifts the capture by that offset (reusing `DownConverter`) so the
+//! DC-centered anti-alias lowpass sees the true channel. Point it at a daemon
+//! capture with `--center-offset 600000` to measure `complex`-in-daemon against
+//! the shipping `mag` path before deciding whether to promote it.
 //!
 //! (The live daemon additionally scales the envelope by 1/√2 and quantizes it to
 //! i16 for its audio-delivery path; the PPM demod is scale-independent, so the
@@ -72,6 +75,11 @@ struct Args {
     /// bandwidth instead of band-limiting it away in a 2.0 MHz downsample.
     work_rate: u32,
     front: Front,
+    /// Hz above hardware center where 1090 MHz sits in the capture. `0` (default)
+    /// for a DC-tuned reference recording; a daemon capture parks the signal a
+    /// quarter-band up (~600 kHz at 2.4 Msps) to dodge the R820T DC spike, so pass
+    /// that offset to let the `complex` front end NCO-shift it to DC first.
+    center_offset_hz: f32,
     /// R6 demod core. Default `legacy` is the shipping R1–R5 ensemble; `native`
     /// runs the 2.4 Msps correlating core on the un-resampled capture.
     demod: Demod,
@@ -99,6 +107,7 @@ impl Args {
             in_rate: self.in_rate,
             work_rate: self.work_rate,
             front: self.front,
+            center_offset_hz: self.center_offset_hz,
             demod: self.demod,
             phases: self.phases,
             min_conf: self.min_conf,
@@ -118,6 +127,7 @@ fn main() {
                 "usage: adsb_bench <file.iq> [--in-rate {DEFAULT_IN_RATE}] \
                  [--demod legacy|native] \
                  [--work-rate {DEFAULT_WORK_RATE}] [--front complex|mag] \
+                 [--center-offset 0] \
                  [--phases {DEFAULT_PHASES}] [--min-conf {DEFAULT_MIN_CONF}] \
                  [--repair] [--roster] [--dump] [--json] \
                  [--baseline-frames N] [--baseline-aircraft M]"
@@ -137,6 +147,7 @@ const VALUED_FLAGS: &[&str] = &[
     "--demod",
     "--work-rate",
     "--front",
+    "--center-offset",
     "--phases",
     "--min-conf",
     "--baseline-frames",
@@ -160,6 +171,10 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             Some("mag") => Front::Mag,
             Some(other) => return Err(format!("bad --front {other:?} (want complex|mag)")),
         },
+        center_offset_hz: flag(raw, "--center-offset")
+            .map(|s| s.parse::<f32>().map_err(|_| "bad --center-offset (want Hz)".to_string()))
+            .transpose()?
+            .unwrap_or(0.0),
         demod: match flag(raw, "--demod").as_deref() {
             None | Some("legacy") => Demod::Legacy,
             Some("native") => Demod::Native,
@@ -286,6 +301,9 @@ fn print_human(args: &Args, r: &Report, dur_in: f64) {
         Demod::Legacy => {
             println!("  demod core:   legacy (R1–R5 resample + phase ensemble)");
             println!("  front end:    {}", args.front.label());
+            if args.front == Front::Complex && args.center_offset_hz != 0.0 {
+                println!("  center offset: {:.0} Hz (NCO down-shift to DC)", args.center_offset_hz);
+            }
             println!("  slicer phases: {}", args.phases);
             println!(
                 "  min confidence: {:.2}{}",
@@ -389,6 +407,7 @@ fn print_json(args: &Args, r: &Report, dur_in: f64) {
             Front::Mag => "mag",
         }
     );
+    print!("\"center_offset_hz\":{:.0},", args.center_offset_hz);
     print!("\"phases\":{},", args.phases);
     print!("\"min_conf\":{:.3},", args.min_conf);
     print!("\"repair\":{},", args.repair);
@@ -551,6 +570,20 @@ mod tests {
         let p = parse_args(&args(&["--demod", "native", "rec.iq"])).unwrap();
         assert_eq!(p.path, "rec.iq");
         assert_eq!(p.demod, Demod::Native);
+    }
+
+    #[test]
+    fn center_offset_flag_parses_and_defaults_zero() {
+        assert_eq!(parse_args(&args(&["rec.iq"])).unwrap().center_offset_hz, 0.0);
+        assert_eq!(
+            parse_args(&args(&["rec.iq", "--center-offset", "600000"])).unwrap().center_offset_hz,
+            600_000.0
+        );
+        assert!(parse_args(&args(&["rec.iq", "--center-offset", "middle"])).is_err());
+        // A valued flag before the path is not mistaken for the path.
+        let p = parse_args(&args(&["--center-offset", "600000", "rec.iq"])).unwrap();
+        assert_eq!(p.path, "rec.iq");
+        assert_eq!(p.center_offset_hz, 600_000.0);
     }
 
     #[test]

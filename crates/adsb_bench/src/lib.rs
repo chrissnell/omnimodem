@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use omnimodem_dsp::frontend::iq::u8_iq_to_cplx;
+use omnimodem_dsp::frontend::nco::DownConverter;
 use omnimodem_dsp::frontend::resample::{ComplexResampler, Resampler};
 use omnimodem_dsp::mode::Demodulator;
 use omnimodem_dsp::modes::adsb::{AdsbDemod, Demod2400, ModeS};
@@ -57,6 +58,15 @@ pub struct DecodeOpts {
     pub work_rate: u32,
     /// Front end that turns the capture into the working-rate magnitude envelope.
     pub front: Front,
+    /// Where 1090 MHz sits in the capture, in Hz above hardware center. `0.0` for a
+    /// signal already at DC (the `rtl_sdr` reference recording, tuned straight to
+    /// 1090). A daemon-produced capture parks the signal a quarter-band above center
+    /// to dodge the R820T DC spike, so it must name that offset here: the `complex`
+    /// front end NCO-down-shifts by it (reusing [`DownConverter`]) to re-center the
+    /// band before the DC-centered anti-alias lowpass, which otherwise rejects an
+    /// off-center signal. Ignored by [`Front::Mag`] and [`Demod::Native`] — both
+    /// slice `|I+jQ|`, which is invariant to a residual carrier offset.
+    pub center_offset_hz: f32,
     /// Which demod core to run (R6). [`Demod::Legacy`] is the shipping R1–R5
     /// resample-then-slice ensemble; [`Demod::Native`] is the 2.4 Msps correlating
     /// core, which slices the capture-rate envelope directly (no resample, so
@@ -78,6 +88,7 @@ impl Default for DecodeOpts {
             in_rate: DEFAULT_IN_RATE,
             work_rate: DEFAULT_WORK_RATE,
             front: Front::Complex,
+            center_offset_hz: 0.0,
             demod: Demod::Legacy,
             phases: DEFAULT_PHASES,
             min_conf: DEFAULT_MIN_CONF,
@@ -119,17 +130,25 @@ impl Front {
 }
 
 /// The stateful resampler for the selected front end. Only the chosen variant is
-/// constructed, and it persists across chunk windows so decimation phase and
-/// filter history carry over.
+/// constructed, and it persists across chunk windows so decimation phase, NCO
+/// phase, and filter history carry over.
 enum FrontEnd {
-    Complex(ComplexResampler),
+    /// The optional NCO down-shift (present only for an off-center capture) feeds the
+    /// band-limited complex decimator.
+    Complex { nco: Option<DownConverter>, rs: ComplexResampler },
     Mag(Resampler),
 }
 
 impl FrontEnd {
-    fn new(front: Front, in_rate: u32, work_rate: u32) -> Self {
+    fn new(front: Front, in_rate: u32, work_rate: u32, center_offset_hz: f32) -> Self {
         match front {
-            Front::Complex => FrontEnd::Complex(ComplexResampler::new(in_rate, work_rate, 16)),
+            Front::Complex => {
+                // The NCO runs at the capture rate, before decimation. Build it only
+                // when the signal is off-center; a DC-centered capture skips it.
+                let nco = (center_offset_hz != 0.0)
+                    .then(|| DownConverter::new(center_offset_hz, in_rate as f32));
+                FrontEnd::Complex { nco, rs: ComplexResampler::new(in_rate, work_rate, 16) }
+            }
             Front::Mag => FrontEnd::Mag(Resampler::new(in_rate, work_rate, 16)),
         }
     }
@@ -137,8 +156,20 @@ impl FrontEnd {
     /// Turn one window of capture-rate I/Q into the 2 MHz magnitude envelope.
     fn envelope(&mut self, chunk: &[Cplx]) -> Vec<Sample> {
         match self {
-            // R1: band-limited complex decimation first, magnitude at 2 MHz.
-            FrontEnd::Complex(rs) => rs.process(chunk).iter().map(|c| c.norm()).collect(),
+            // R1: band-limited complex decimation first, magnitude at 2 MHz. An
+            // off-center capture is NCO-down-shifted to DC first, so the DC-centered
+            // anti-alias lowpass sees the true channel rather than rejecting it.
+            FrontEnd::Complex { nco, rs } => {
+                let shifted;
+                let src: &[Cplx] = match nco {
+                    Some(dc) => {
+                        shifted = chunk.iter().map(|&z| dc.push_cplx(z)).collect::<Vec<_>>();
+                        &shifted
+                    }
+                    None => chunk,
+                };
+                rs.process(src).iter().map(|c| c.norm()).collect()
+            }
             // R0: magnitude at the capture rate, then decimate the envelope.
             FrontEnd::Mag(rs) => {
                 let mag: Vec<Sample> = chunk.iter().map(|c| c.norm()).collect();
@@ -215,7 +246,7 @@ pub fn decode_iq_with(bytes: &[u8], opts: &DecodeOpts, on_frame: impl FnMut(&Fra
 /// multi-phase slicer ensemble.
 fn decode_legacy(bytes: &[u8], opts: &DecodeOpts, mut on_frame: impl FnMut(&Frame)) -> Report {
     let iq = u8_iq_to_cplx(bytes);
-    let mut front_end = FrontEnd::new(opts.front, opts.in_rate, opts.work_rate);
+    let mut front_end = FrontEnd::new(opts.front, opts.in_rate, opts.work_rate, opts.center_offset_hz);
     let mut demod = AdsbDemod::with_rate_phases_min_conf(opts.work_rate, opts.phases, opts.min_conf);
     demod.set_repair(opts.repair);
     demod.set_roster(opts.roster);
@@ -295,5 +326,72 @@ fn tally(report: &mut Report, payload: &FramePayload, crc_ok: bool, confidence: 
         if msg.airborne_position().is_some() {
             report.airborne_pos += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::TAU;
+
+    /// Mean magnitude over the steady-state tail (drop the resampler/NCO warm-up).
+    fn steady_mean(env: &[Sample]) -> f32 {
+        let tail = &env[env.len() / 4..];
+        tail.iter().sum::<f32>() / tail.len() as f32
+    }
+
+    /// A unit complex tone at `hz` in `n` samples at `rate`.
+    fn tone(hz: f32, rate: u32, n: usize) -> Vec<Cplx> {
+        (0..n)
+            .map(|k| {
+                let ph = TAU * hz * k as f32 / rate as f32;
+                Cplx::new(ph.cos(), ph.sin())
+            })
+            .collect()
+    }
+
+    /// The `complex` front end's NCO down-shift must re-center an off-center capture:
+    /// a signal parked a quarter-band above hardware center decodes as if captured at
+    /// DC, and without the shift the DC-centered anti-alias lowpass throws it away.
+    /// This is the daemon-capture enablement — a reference recording sits at DC, a
+    /// daemon capture does not.
+    #[test]
+    fn complex_front_recenters_offset_capture() {
+        let in_rate = 2_400_000;
+        let work_rate = 2_000_000;
+        let n = 9_600;
+        let offset = 600_000.0; // daemon quarter-band (0.25 · 2.4 Msps)
+        let base = 500_000.0; // in-band after correction; 1.1 MHz (stopband) without it
+
+        // DC-tuned reference: signal near band center.
+        let dc = tone(base, in_rate, n);
+        // Daemon capture: the same signal, parked `offset` above center.
+        let off = tone(base + offset, in_rate, n);
+
+        let dc_env = FrontEnd::new(Front::Complex, in_rate, work_rate, 0.0).envelope(&dc);
+        let corrected = FrontEnd::new(Front::Complex, in_rate, work_rate, offset).envelope(&off);
+        let uncorrected = FrontEnd::new(Front::Complex, in_rate, work_rate, 0.0).envelope(&off);
+
+        let (dc_m, corr_m, unc_m) =
+            (steady_mean(&dc_env), steady_mean(&corrected), steady_mean(&uncorrected));
+
+        // The NCO shift reproduces the DC-tuned envelope within a few percent.
+        assert!((corr_m - dc_m).abs() / dc_m < 0.05, "corrected {corr_m} vs DC-tuned {dc_m}");
+        // Without the shift the off-center signal aliases into the stopband and is
+        // rejected — the failure the shift exists to prevent.
+        assert!(unc_m < 0.2 * dc_m, "uncorrected {unc_m} should be rejected vs DC-tuned {dc_m}");
+    }
+
+    /// A DC-centered capture must be untouched by a zero offset: no NCO is built, and
+    /// the envelope is bit-identical to the pre-change path.
+    #[test]
+    fn zero_offset_is_a_no_op() {
+        let in_rate = 2_400_000;
+        let work_rate = 2_000_000;
+        let dc = tone(300_000.0, in_rate, 4_800);
+        let a = FrontEnd::new(Front::Complex, in_rate, work_rate, 0.0).envelope(&dc);
+        let b = FrontEnd::new(Front::Complex, in_rate, work_rate, 0.0).envelope(&dc);
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
     }
 }
